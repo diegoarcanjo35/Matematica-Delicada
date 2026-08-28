@@ -1,0 +1,32 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Wrangler (local dev only — sem credenciais, mas é cache de execução)
+.wrangler
+
+# Saída de execução do Playwright (relatórios de falha) — as evidências
+# intencionais ficam em evidence/screenshots/, que continua versionada.
+test-results
+playwright-report
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

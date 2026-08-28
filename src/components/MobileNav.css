@@ -1,0 +1,109 @@
+.mobile-nav {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .mobile-nav {
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: var(--layout-mobile-nav-height);
+    background-color: var(--color-navy-deep);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    z-index: 20;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+    /* Mesmo ajuste de contraste do anel de foco aplicado na sidebar (fundo navy). */
+    --color-focus-ring: var(--color-accent-highlight);
+  }
+
+  .mobile-nav__link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.75);
+    font-size: var(--font-size-xs);
+    text-decoration: none;
+    cursor: pointer;
+    font-family: inherit;
+    min-width: 56px;
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .mobile-nav__link--active {
+    color: var(--color-accent-highlight);
+    font-weight: 700;
+  }
+}
+
+.mobile-menu {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(8, 28, 54, 0.55);
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+}
+
+.mobile-menu__panel {
+  width: 100%;
+  background-color: var(--color-bg-surface);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--space-5);
+  padding-bottom: calc(var(--layout-mobile-nav-height) + var(--space-4));
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.mobile-menu__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-4);
+}
+
+.mobile-menu__title {
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg);
+}
+
+.mobile-menu__close {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-page);
+  cursor: pointer;
+}
+
+.mobile-menu__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.mobile-menu__link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-navy-deep);
+  text-decoration: none;
+  font-weight: 600;
+  min-height: 44px;
+}
+
+.mobile-menu__link:hover {
+  background-color: var(--color-bg-page);
+}

@@ -1,0 +1,52 @@
+.state-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-5);
+  text-align: center;
+  border-radius: var(--radius-lg);
+  background-color: var(--color-bg-surface);
+  border: 1px dashed var(--color-border);
+}
+
+.state-view__title {
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg);
+  color: var(--color-navy-deep);
+  margin: 0;
+}
+
+.state-view__description {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  margin: 0;
+  max-width: 42ch;
+}
+
+.state-view--error {
+  border-color: var(--color-error);
+  border-style: solid;
+}
+
+.state-view__spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 3px solid var(--color-blue-support);
+  border-top-color: var(--color-accent-primary);
+  animation: state-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-view__spinner {
+    animation-duration: 1.8s;
+  }
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

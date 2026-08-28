@@ -1,0 +1,96 @@
+/* Matemática Delicada — Design Tokens
+   Fonte: Documento_Mestre_Plataforma_Matematica_Delicada_v1.0.md, seção 20.
+   Conceito: "Caderno Estratégico ENEM" — ~80% interface de desempenho, ~20% caderno/lettering.
+   Navy e branco sustentam a interface; rosa/amarelo/verde/laranja/azul-claro são destaques, não predominância. */
+
+:root {
+  /* Cor — paleta oficial (Documento Mestre 20.2) */
+  --color-navy-deep: #081c36;
+  --color-navy-medium: #102a4c;
+  --color-blue-action: #163f72;
+  --color-yellow-highlight: #f5b800;
+  --color-orange-strategic: #f28c00;
+  --color-white: #ffffff;
+  --color-paper-light: #fffdf8;
+  --color-surface-soft: #faf8f3;
+  --color-pink-brand: #f3a7bb;
+  --color-pink-support: #f9dde5;
+  --color-green-highlight: #b7e97a;
+  --color-blue-support: #cfe9f4;
+  --color-success: #4fae77;
+  --color-error: #d95b65;
+  --color-text-secondary: #5f6670;
+
+  /* Papel de função — como os tokens acima são usados na UI */
+  --color-bg-page: var(--color-surface-soft);
+  --color-bg-surface: var(--color-white);
+  --color-bg-paper: var(--color-paper-light);
+  --color-bg-inverse: var(--color-navy-deep);
+  --color-text-primary: var(--color-navy-deep);
+  --color-text-inverse: var(--color-white);
+  --color-text-muted: var(--color-text-secondary);
+  --color-border: #e3ded1;
+  --color-border-strong: var(--color-navy-medium);
+  --color-focus-ring: var(--color-blue-action);
+
+  --color-accent-primary: var(--color-blue-action);
+  --color-accent-highlight: var(--color-yellow-highlight);
+  --color-accent-strategic: var(--color-orange-strategic);
+  --color-accent-brand: var(--color-pink-brand);
+  --color-accent-brand-soft: var(--color-pink-support);
+  --color-accent-mark: var(--color-green-highlight);
+  --color-accent-support: var(--color-blue-support);
+
+  /* Tipografia (Documento Mestre 20.3) */
+  --font-display: "Oswald", "Bebas Neue", "Arial Narrow", sans-serif;
+  --font-body: "Inter", "Manrope", "DM Sans", system-ui, sans-serif;
+  --font-hand: "Caveat", "Kalam", cursive;
+
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.375rem;
+  --font-size-2xl: 1.75rem;
+  --font-size-3xl: 2.25rem;
+
+  --line-height-tight: 1.2;
+  --line-height-normal: 1.5;
+
+  /* Espaçamento */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Raio e sombra */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 3px rgba(8, 28, 54, 0.08);
+  --shadow-md: 0 4px 16px rgba(8, 28, 54, 0.12);
+  --shadow-lg: 0 12px 32px rgba(8, 28, 54, 0.16);
+
+  /* Layout */
+  --layout-sidebar-width: 264px;
+  --layout-content-max-width: 1180px;
+  --layout-mobile-nav-height: 64px;
+
+  /* Movimento */
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-fast: 0ms;
+    --transition-normal: 0ms;
+  }
+}

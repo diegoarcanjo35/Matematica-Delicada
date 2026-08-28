@@ -1,0 +1,54 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.badge--nao-iniciado {
+  background-color: var(--color-bg-page);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}
+
+.badge--muito-fragil,
+.badge--erro {
+  background-color: #fbe6e7;
+  color: #9a2f37;
+}
+
+.badge--prioridade-alta {
+  background-color: #fde3c8;
+  color: #8a4a00;
+}
+
+.badge--em-evolucao {
+  background-color: var(--color-blue-support);
+  color: var(--color-navy-medium);
+}
+
+.badge--quase-dominado {
+  background-color: #fff2c2;
+  color: #7a5900;
+}
+
+.badge--dominado,
+.badge--sucesso {
+  background-color: #dcf3e5;
+  color: #2c6b45;
+}
+
+.badge--revisao-vencida {
+  background-color: var(--color-pink-support);
+  color: #9a2f57;
+}
+
+.badge--neutro {
+  background-color: var(--color-bg-page);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}

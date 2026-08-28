@@ -1,0 +1,4 @@
+/* Carregamento de fontes externas com fallback local declarado em tokens.css.
+   Se o Google Fonts não carregar (offline, bloqueio de rede), a UI cai para as
+   fontes de sistema já listadas nas variáveis --font-display/--font-body/--font-hand. */
+@import url("https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=Caveat:wght@500;600&display=swap");

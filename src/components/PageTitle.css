@@ -1,0 +1,19 @@
+.page-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-5);
+}
+
+.page-title__heading {
+  font-size: var(--font-size-2xl);
+  margin: 0 0 var(--space-1);
+}
+
+.page-title__description {
+  color: var(--color-text-secondary);
+  margin: 0;
+  max-width: 60ch;
+}

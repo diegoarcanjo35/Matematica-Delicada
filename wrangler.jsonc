@@ -1,0 +1,13 @@
+{
+  // Configuração LOCAL de Cloudflare Workers Static Assets — Sprint 1 v1.1, correção 1.
+  // Propositalmente SEM account_id, SEM credenciais e SEM binding de D1 ou KV.
+  // Uso permitido: apenas `wrangler dev` local, para comprovar que o build da SPA
+  // funciona sob a arquitetura Worker + Assets. Login e deploy continuam proibidos
+  // nesta sprint — Diego cuida manualmente de qualquer ação remota na Cloudflare.
+  "name": "matematica-delicada",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

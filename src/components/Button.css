@@ -1,0 +1,77 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-md);
+  border: 2px solid transparent;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.btn:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.btn--primary {
+  background-color: var(--color-accent-primary);
+  color: var(--color-text-inverse);
+}
+
+.btn--primary:not(:disabled):hover {
+  background-color: var(--color-navy-medium);
+}
+
+.btn--secondary {
+  background-color: transparent;
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.btn--secondary:not(:disabled):hover {
+  background-color: var(--color-blue-support);
+}
+
+.btn--text {
+  background-color: transparent;
+  color: var(--color-accent-primary);
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+  min-height: auto;
+}
+
+.btn--text:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.btn__spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn__spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

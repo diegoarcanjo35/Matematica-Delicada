@@ -1,0 +1,30 @@
+.student-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.student-layout__main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.student-layout__content {
+  flex: 1;
+  padding: var(--space-5);
+  max-width: var(--layout-content-max-width);
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .student-layout__content {
+    padding: var(--space-4);
+  }
+}
+
+@media (max-width: 640px) {
+  .student-layout__content {
+    padding-bottom: calc(var(--layout-mobile-nav-height) + var(--space-5));
+  }
+}

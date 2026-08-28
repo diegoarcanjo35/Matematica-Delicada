@@ -1,0 +1,154 @@
+.dashboard__mock-notice {
+  display: inline-block;
+  background-color: var(--color-pink-support);
+  color: #7a2d47;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  margin-bottom: var(--space-4);
+}
+
+.dashboard__greeting {
+  margin-bottom: var(--space-5);
+}
+
+.dashboard__greeting-title {
+  font-size: var(--font-size-2xl);
+  margin-bottom: var(--space-1);
+}
+
+.dashboard__tagline {
+  font-family: var(--font-hand);
+  font-size: var(--font-size-xl);
+  color: var(--color-accent-strategic);
+  margin: 0 0 var(--space-2);
+}
+
+.dashboard__streak {
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.dashboard__grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+@media (max-width: 640px) {
+  .dashboard__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboard__card h3 {
+  font-size: var(--font-size-lg);
+}
+
+.dashboard__stat {
+  font-family: var(--font-display);
+  font-size: var(--font-size-lg);
+  color: var(--color-navy-deep);
+  margin: 0 0 var(--space-3);
+}
+
+.dashboard__dual-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--font-size-sm);
+  margin: var(--space-3) 0;
+  flex-wrap: wrap;
+}
+
+.dashboard__dual-stat p {
+  margin: 0;
+}
+
+.dashboard__pattern-list {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-5);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.dashboard__message {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-4);
+}
+
+.dashboard__week-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  height: 120px;
+}
+
+.dashboard__week-chart li {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  height: 100%;
+}
+
+.dashboard__week-bar {
+  width: 100%;
+  max-width: 28px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background-color: var(--color-accent-primary);
+}
+
+.dashboard__week-day {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.dashboard__week-summary {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.dashboard__patterns h3 {
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--space-3);
+}
+
+.dashboard__pattern-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+.dashboard__pattern-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.dashboard__pattern-code {
+  font-family: var(--font-display);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.dashboard__pattern-name {
+  font-weight: 700;
+  margin: 0 0 var(--space-3);
+}
+
+.dashboard__pattern-detail {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  margin: var(--space-2) 0 0;
+}
