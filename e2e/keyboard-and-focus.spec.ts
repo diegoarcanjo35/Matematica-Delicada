@@ -6,8 +6,12 @@ import { expect, test } from "@playwright/test";
 test.describe("Teclado e foco — navegação real em Chromium", () => {
   test("1-2. skip-link recebe foco e leva ao conteúdo principal", async ({ page }) => {
     await page.goto("/");
-    await page.keyboard.press("Tab");
+    // Aguarda a sessão ser validada e o shell autenticado (com skip-link) montar
+    // antes de simular Tab — senão a tecla pode ser pressionada durante o
+    // LoadingState inicial, antes do skip-link existir no DOM.
     const skipLink = page.locator(".skip-link");
+    await skipLink.waitFor({ state: "attached" });
+    await page.keyboard.press("Tab");
     await expect(skipLink).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.locator("#main-content")).toBeVisible();
@@ -55,6 +59,7 @@ test.describe("Teclado e foco — navegação real em Chromium", () => {
   test("7. foco permanece visível (outline aplicado por :focus-visible)", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/");
+    await page.locator(".skip-link").waitFor({ state: "attached" });
     await page.keyboard.press("Tab");
     const focused = page.locator(":focus-visible");
     await expect(focused).toHaveCount(1);

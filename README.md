@@ -1,20 +1,25 @@
 # Matemática Delicada
 
 Plataforma digital de preparação estratégica para Matemática no ENEM, com treino por
-padrões recorrentes. Este repositório está na **Sprint 1 — Fundação técnica e visual**:
-estrutura, sistema visual, navegação e páginas-placeholder. Nenhuma funcionalidade
-pedagógica real (diagnóstico, treino real, autenticação, banco de dados) existe ainda.
+padrões recorrentes. Este repositório está na **Sprint 2 — Autenticação, contas e
+sessões seguras**: cadastro, login, logout, sessão real (cookie `HttpOnly` + D1),
+confirmação de e-mail, recuperação de senha, e proteção real das rotas do aluno.
+Conteúdo pedagógico (diagnóstico, treino real, banco de questões) ainda não existe —
+o dashboard do aluno continua com dados de demonstração, agora dentro de uma área
+autenticada de verdade.
 
 Fonte de verdade de produto e pedagogia: [`Documento_Mestre_Plataforma_Matematica_Delicada_v1.0.md`](./Documento_Mestre_Plataforma_Matematica_Delicada_v1.0.md).
-Arquitetura desta sprint: [`docs/ARQUITETURA.md`](./docs/ARQUITETURA.md).
+Arquitetura: [`docs/ARQUITETURA.md`](./docs/ARQUITETURA.md).
+Autenticação e segurança: [`docs/AUTENTICACAO.md`](./docs/AUTENTICACAO.md).
 Sistema visual: [`docs/SISTEMA_VISUAL.md`](./docs/SISTEMA_VISUAL.md).
 
 ## Requisitos
 
 - Node.js 20+ (testado com v24.15.0)
 - npm 10+ (testado com 11.12.1)
-- Os testes E2E (teclado, foco, screenshots) usam [Playwright](https://playwright.dev/)
-  com Chromium local — não depende de conta, serviço ou navegador remoto.
+- Os testes E2E (teclado, foco, screenshots, fluxos de autenticação) usam
+  [Playwright](https://playwright.dev/) com Chromium local — não depende de conta,
+  serviço ou navegador remoto.
 
 ## Instalação
 
@@ -34,6 +39,20 @@ npm install
 
 ## Execução local
 
+A aplicação agora tem uma API real (Cloudflare Worker + D1), então a forma completa de
+rodar localmente é via Worker, não só `vite dev`:
+
+```bash
+npm run worker:preview
+```
+
+Builda o frontend, aplica as migrations no D1 local e sobe o Worker (API + assets) em
+`http://localhost:8788`. Veja a seção "Worker + Assets + D1 local" abaixo para os
+detalhes de cada etapa.
+
+Para trabalhar só na interface, sem a API (as telas de autenticação não vão funcionar
+sem o Worker rodando em paralelo):
+
 ```bash
 npm run dev
 ```
@@ -46,10 +65,13 @@ Abre em `http://localhost:5173` (ou a próxima porta livre).
 npm run lint
 ```
 
+Cobre `src/` (frontend) e `worker/` (API).
+
 ## Verificação de tipos
 
 ```bash
-npx tsc -b
+npx tsc -b                       # frontend
+npm run worker:check             # API do Worker (tsconfig separado)
 ```
 
 ## Testes
@@ -57,14 +79,15 @@ npx tsc -b
 ```bash
 npm test              # testes unitários (Vitest + Testing Library), roda uma vez
 npm run test:watch    # testes unitários em modo observação
-npm run test:e2e      # teclado, foco, console e evidências, em Chromium real (Playwright)
+npm run test:e2e      # teclado, foco, console, autenticação e segurança, em Chromium real
 npm run screenshots   # regenera só as evidências visuais em evidence/screenshots/
 ```
 
 - `npm test`: testes de componente (`src/**/*.test.tsx`) — rápidos, sem navegador real.
-- `npm run test:e2e`: sobe um build de produção local e roda toda a suíte Playwright
-  (`e2e/` e `evidence/`) em Chromium — navegação por teclado, foco visível, ausência de
-  erros no console e geração das evidências visuais.
+- `npm run test:e2e`: builda, aplica migrations, sobe o Worker local e roda toda a
+  suíte Playwright (`e2e/` e `evidence/`) em Chromium — navegação por teclado, foco
+  visível, ausência de erros no console, fluxos completos de cadastro/login/recuperação
+  de senha, segurança da API (Origin, JSON malformado, rate limit) e evidências visuais.
 - `npm run screenshots`: atalho para rodar só `evidence/screenshots.spec.ts`.
 
 ## Build de produção
@@ -73,24 +96,51 @@ npm run screenshots   # regenera só as evidências visuais em evidence/screensh
 npm run build
 ```
 
-Gera a pasta `dist/`. Para pré-visualizar o build: `npm run preview`.
+Gera a pasta `dist/`. Para pré-visualizar só o build estático (sem API): `npm run preview`.
 
-## Worker + Assets local
+## Worker + Assets + D1 local
 
 ```bash
 npm run worker:preview
 ```
 
-Esse comando builda a aplicação e sobe um Cloudflare Worker com Static Assets **100%
-local**, na porta 8788 (via `wrangler dev`, configurado em `wrangler.jsonc`). Ele:
+Esse comando builda a aplicação, aplica as migrations no D1 local e sobe um Cloudflare
+Worker completo (API + assets estáticos) **100% local**, na porta 8788. Ele:
 
-- gera o build de produção antes de subir o worker;
-- serve a SPA com fallback de rota (`not_found_handling: "single-page-application"`),
-  então rotas internas acessadas diretamente (`/treino-diario`, por exemplo) funcionam;
-- não exige login na Cloudflare;
-- não executa deploy;
-- não acessa nenhuma conta Cloudflare;
-- não cria nem usa D1 — `wrangler.jsonc` não tem `account_id`, credenciais ou bindings.
+- serve a SPA com fallback de rota (`not_found_handling: "single-page-application"`);
+- expõe a API de autenticação em `/api/auth/*` (ver `docs/AUTENTICACAO.md` para o
+  contrato de cada endpoint);
+- roda o D1 inteiramente local (SQLite em `.wrangler/state`);
+- não exige login na Cloudflare, não executa deploy, não acessa nenhuma conta Cloudflare.
+
+### Duas configurações do Wrangler — nunca confundir
+
+| Arquivo | Para que serve | Pode ser usado para deploy? |
+|---|---|---|
+| **`wrangler.local.jsonc`** | Único usado pelos scripts locais acima (`-c wrangler.local.jsonc`) | **Não** — `database_id` é uma string claramente local, nunca um ID real |
+| **`wrangler.jsonc`** | O que `wrangler deploy` usaria | Só depois que Diego criar o D1 remoto e preencher o `database_id` real, com autorização do PO |
+
+`wrangler.jsonc` tem `database_id: ""` de propósito — vazio, não um valor
+inventado. `npm run deploy` está bloqueado por construção: o script
+`"predeploy"` (mecanismo nativo do npm, roda sozinho antes de `"deploy"`)
+executa `npm run check:deploy-config`, que falha se o `database_id`
+implantável estiver vazio, zerado ou parecer um placeholder. Detalhes em
+`docs/AUTENTICACAO.md`.
+
+Comandos relacionados:
+
+```bash
+npm run db:migrate:local        # aplica migrations/*.sql no D1 local
+npm run worker:dev              # só sobe o worker (exige dist/ e D1 já preparados)
+npm run check:deploy-config     # roda manualmente a verificação de database_id real
+npm run bench:pbkdf2            # benchmark local do hash de senha
+```
+
+Para inspecionar o banco local diretamente (note o `-c wrangler.local.jsonc`):
+
+```bash
+npx wrangler d1 execute matematica-delicada-local --local -c wrangler.local.jsonc --command "SELECT * FROM users"
+```
 
 ## Estrutura do projeto
 
@@ -102,55 +152,72 @@ src/
                 MobileNav, PageTitle, Modal, Tooltip
   layouts/      StudentLayout (shell do aluno: sidebar + header + navegação móvel)
   pages/        DashboardPage (mock), PlaceholderPage, NotFoundPage
+  pages/auth/   LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage,
+                ConfirmEmailPage, RegisterConfirmationPage
+  auth/         AuthContext, useAuth, ProtectedRoute, PublicOnlyRoute
+  api/          authClient.ts — único ponto de fetch para a API
   mocks/        dashboardMock.ts — dados de demonstração, isolados da UI
   routes/       studentNav.ts — fonte única do menu do aluno
   test/         setup.ts (Vitest + Testing Library)
-e2e/            testes Playwright de teclado, foco e console (Chromium real)
+worker/         API real (Cloudflare Worker) — ver docs/ARQUITETURA.md
+  scripts/      benchmark-pbkdf2.mjs — benchmark local do hash de senha
+migrations/     SQL versionado do D1 (0001_init.sql, 0002_rate_limit_counters.sql)
+scripts/        check-deployable-d1-config.mjs — gate de deploy (ver acima)
+e2e/            testes Playwright (teclado/foco, autenticação, segurança de API)
 evidence/       screenshots.spec.ts + evidence/screenshots/*.png — evidências visuais
-playwright.config.ts   configuração do Playwright (webServer local, sem dependência remota)
-wrangler.jsonc          configuração local de Cloudflare Workers Static Assets
+playwright.config.ts   configuração do Playwright (webServer = worker local)
+wrangler.jsonc          configuração IMPLANTÁVEL (database_id vazio de propósito)
+wrangler.local.jsonc    configuração EXCLUSIVAMENTE LOCAL — nunca usada para deploy
 ```
 
 ## Rotas disponíveis
 
-Todas as rotas abaixo estão dentro do shell do aluno (`StudentLayout`), exceto a rota
-de erro 404.
+| Rota | Página | Acesso |
+|---|---|---|
+| `/entrar` | Login | público (redireciona se já autenticado) |
+| `/criar-conta` | Cadastro | público (redireciona se já autenticado) |
+| `/cadastro-confirmado` | Confirmação de cadastro criado | público |
+| `/esqueci-minha-senha` | Solicitar redefinição de senha | público (redireciona se já autenticado) |
+| `/redefinir-senha?token=...` | Redefinir senha | público |
+| `/confirmar-email?token=...` | Confirmar e-mail | público |
+| `/termos`, `/privacidade` | Placeholder (conteúdo jurídico pendente) | público |
+| `/` | Dashboard do aluno (dados mock) | **exige sessão** |
+| `/treino-diario`, `/padroes-enem`, `/reconheca-o-padrao`, `/banco-de-questoes`, `/simulados`, `/caderno-de-erros`, `/desempenho`, `/aulas-e-estrategias`, `/conquistas` | Placeholder | **exige sessão** |
+| `/configuracoes`, `/ajuda`, `/assinatura` | Placeholder | **exige sessão** |
+| qualquer outra rota | Página 404 | público |
 
-| Rota | Página |
-|---|---|
-| `/` | Dashboard do aluno (dados mock) |
-| `/treino-diario` | Placeholder |
-| `/padroes-enem` | Placeholder |
-| `/reconheca-o-padrao` | Placeholder |
-| `/banco-de-questoes` | Placeholder |
-| `/simulados` | Placeholder |
-| `/caderno-de-erros` | Placeholder |
-| `/desempenho` | Placeholder |
-| `/aulas-e-estrategias` | Placeholder |
-| `/conquistas` | Placeholder |
-| `/configuracoes`, `/ajuda`, `/assinatura` | Placeholder (itens complementares) |
-| qualquer outra rota | Página 404 |
+Visitante sem sessão que tenta acessar uma rota protegida é redirecionado para
+`/entrar` e volta automaticamente para a rota pretendida após o login. **Esse
+redirecionamento é só uma conveniência de navegação da SPA, não a proteção
+real** — a proteção de fato é a validação de sessão dentro do Worker em cada
+endpoint privado da API. Ver "Fronteira de proteção" em `docs/AUTENTICACAO.md`.
 
 ## Limitações desta sprint
 
-- Não há autenticação real — o botão "Sair" é decorativo e desabilitado.
-- Não há dados reais de aluno — tudo no dashboard vem de `src/mocks/dashboardMock.ts`,
-  claramente sinalizado na própria tela.
-- Não há banco de dados, API real, pagamentos ou integrações.
+- Dashboard continua com dados de demonstração (`src/mocks/dashboardMock.ts`) — só a
+  identidade e a sessão do aluno são reais agora.
+- Sem 2FA, sem login social, sem verificação de força de senha além do comprimento.
+- Rate limit local usa um identificador compartilhado em ambiente de desenvolvimento
+  (ver limitação documentada em `docs/AUTENTICACAO.md`).
+- Sem provedor real de e-mail — links de confirmação/recuperação ficam numa caixa de
+  saída local (`dev_email_outbox`, banco D1), usada pelos testes automatizados.
 - Conformidade com WCAG não foi auditada por ferramenta automatizada de acessibilidade;
-  os critérios mínimos da seção 10 da especificação foram verificados manualmente.
+  os critérios mínimos foram verificados manualmente e via Playwright.
 
 ## Operações remotas
 
-Commit e push da branch `sprint-01-fundacao` **já ocorreram**, mediante autorização
-literal do PO (`AUTORIZADO COMMIT` / `AUTORIZADO PUSH`) — a branch está publicada em
-`origin/sprint-01-fundacao`.
+Commit e push das branches `sprint-01-fundacao` e `main` **já ocorreram** na Sprint 1,
+mediante autorização literal do PO. A Sprint 2 roda numa branch nova
+(`sprint-02-autenticacao`) e, até nova autorização, **não deve receber commit nem
+push**.
 
 Continuam proibidos, até nova autorização explícita:
 
+- commit e push desta sprint;
 - merge na `main`;
 - release ou tag;
 - deploy;
+- criação ou uso de D1 remoto;
 - MCP da Cloudflare, `wrangler login`, `wrangler deploy` ou qualquer criação/alteração
   de recurso remoto (Worker, D1, KV, R2).
 

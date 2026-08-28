@@ -1,0 +1,51 @@
+{
+  // ============================================================================
+  // CONFIGURAÇÃO EXCLUSIVAMENTE LOCAL — NUNCA USE PARA DEPLOY.
+  //
+  // Este arquivo só existe para `wrangler dev`/`wrangler d1` LOCAIS (SQLite em
+  // .wrangler/state). Nenhum script de deploy referencia este arquivo — os
+  // únicos consumidores são os scripts "worker:dev", "worker:preview" e
+  // "db:migrate:local" do package.json, todos com a flag `-c wrangler.local.jsonc`.
+  //
+  // "database_id" abaixo NÃO é um ID real da Cloudflare — é uma string
+  // deliberadamente não-numérica e autoexplicativa, para que nunca seja
+  // confundida com um ID remoto de verdade (que teria formato UUID). O Wrangler
+  // não valida esse valor contra nenhuma API quando roda em modo local.
+  //
+  // Sprint 2 v1.2 — "ENVIRONMENT=development" sozinho NÃO é mais suficiente
+  // para habilitar nada sensível (isso falhava aberto se aplicado por engano a
+  // um Worker remoto). Agora exige, TODAS ao mesmo tempo:
+  //   1) ENVIRONMENT === "development" (ou "test", só para o outbox);
+  //   2) a flag local explícita correspondente (DEV_OUTBOX_ENABLED /
+  //      ALLOW_INSECURE_LOCAL_COOKIE), presente SÓ NESTE ARQUIVO;
+  //   3) o hostname da requisição efetivamente recebida ser localhost/127.0.0.1/
+  //      [::1] — nunca *.workers.dev, domínio customizado, nem X-Forwarded-Host;
+  //   4) (só para o cookie) o protocolo ser http: — HTTPS local mantém Secure.
+  // Ver worker/src/env.ts (isLocalDevEnvironment, isDevOutboxAllowed,
+  // shouldOmitSecureCookie) e worker/src/lib/localHost.ts.
+  //
+  // Estas duas flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
+  // falha o deploy se qualquer uma delas aparecer em wrangler.jsonc.
+  // ============================================================================
+  "name": "matematica-delicada",
+  "compatibility_date": "2025-01-01",
+  "main": "worker/src/index.ts",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEV_OUTBOX_ENABLED": "true",
+    "ALLOW_INSECURE_LOCAL_COOKIE": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "matematica-delicada-local",
+      "database_id": "local-only-sqlite-not-a-cloudflare-id",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

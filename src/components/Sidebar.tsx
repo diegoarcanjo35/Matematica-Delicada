@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { STUDENT_NAV_ITEMS } from "../routes/studentNav";
+import { useAuth } from "../auth/useAuth";
 import "./Sidebar.css";
 
 /* Sidebar recolhível — Documento Mestre 20.5: "tablet: sidebar recolhível e
@@ -8,6 +9,20 @@ import "./Sidebar.css";
    de ícones em qualquer largura em que a sidebar apareça (tablet e desktop). */
 export function Sidebar() {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  async function handleLogout() {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      await logout();
+      navigate("/entrar", { replace: true });
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }
 
   return (
     <nav
@@ -67,11 +82,14 @@ export function Sidebar() {
         <button
           type="button"
           className="sidebar__footer-link sidebar__footer-link--button"
-          disabled
-          title="Autenticação real ainda não implementada nesta sprint"
+          onClick={handleLogout}
+          disabled={isLoggingOut}
+          title="Sair"
         >
           {isCollapsed ? <span aria-hidden="true">🚪</span> : null}
-          <span className={isCollapsed ? "visually-hidden" : undefined}>Sair</span>
+          <span className={isCollapsed ? "visually-hidden" : undefined}>
+            {isLoggingOut ? "Saindo…" : "Sair"}
+          </span>
         </button>
       </div>
     </nav>

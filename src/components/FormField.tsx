@@ -1,4 +1,4 @@
-import { useId, type InputHTMLAttributes } from "react";
+import { forwardRef, useId, type InputHTMLAttributes } from "react";
 import "./FormField.css";
 
 interface FormFieldProps extends InputHTMLAttributes<HTMLInputElement> {
@@ -7,7 +7,10 @@ interface FormFieldProps extends InputHTMLAttributes<HTMLInputElement> {
   helpText?: string;
 }
 
-export function FormField({ label, errorMessage, helpText, id, ...rest }: FormFieldProps) {
+export const FormField = forwardRef<HTMLInputElement, FormFieldProps>(function FormField(
+  { label, errorMessage, helpText, id, ...rest },
+  ref
+) {
   const generatedId = useId();
   const fieldId = id ?? generatedId;
   const helpId = helpText ? `${fieldId}-help` : undefined;
@@ -19,6 +22,7 @@ export function FormField({ label, errorMessage, helpText, id, ...rest }: FormFi
         {label}
       </label>
       <input
+        ref={ref}
         id={fieldId}
         className={`form-field__input${errorMessage ? " form-field__input--error" : ""}`}
         aria-invalid={Boolean(errorMessage) || undefined}
@@ -37,4 +41,4 @@ export function FormField({ label, errorMessage, helpText, id, ...rest }: FormFi
       )}
     </div>
   );
-}
+});

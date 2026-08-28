@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-/* Sprint 1 v1.1 — correção 3. Gera screenshots reais (não simulados) em
-   evidence/screenshots/, com nomes indicando largura e estado. Roda 100% local. */
+/* Sprint 1 v1.1 (correção 3) + Sprint 2 v1.0 — screenshots reais (não simulados) em
+   evidence/screenshots/, com nomes indicando largura e estado. Roda 100% local.
+   A partir da Sprint 2, o dashboard exige sessão — o storageState padrão do
+   playwright.config.ts já autentica como o usuário de teste E2E ("Usuário E2E"). */
 
 const WIDTHS: Array<{ width: number; height: number; label: string }> = [
   { width: 360, height: 800, label: "360px" },
@@ -11,12 +13,12 @@ const WIDTHS: Array<{ width: number; height: number; label: string }> = [
   { width: 1440, height: 900, label: "1440px" },
 ];
 
-test.describe("Evidências visuais — Sprint 1 v1.1", () => {
+test.describe("Evidências visuais — dashboard autenticado", () => {
   for (const { width, height, label } of WIDTHS) {
     test(`home-${label}`, async ({ page }) => {
       await page.setViewportSize({ width, height });
       await page.goto("/");
-      await expect(page.getByText("Boa tarde, Ana Cláudia! ♡")).toBeVisible();
+      await expect(page.getByText(/Usuário/)).toBeVisible();
 
       const hasHorizontalScroll = await page.evaluate(
         () => document.documentElement.scrollWidth > window.innerWidth
@@ -64,5 +66,54 @@ test.describe("Evidências visuais — Sprint 1 v1.1", () => {
     await page.keyboard.press("Tab");
     await page.keyboard.press("Tab");
     await page.screenshot({ path: "evidence/screenshots/foco-por-teclado.png" });
+  });
+});
+
+test.describe("Evidências visuais — autenticação (visitante deslogado)", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("login-desktop", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/entrar");
+    await expect(page.getByRole("heading", { name: "Entrar" })).toBeVisible();
+    await page.screenshot({ path: "evidence/screenshots/login-desktop.png" });
+  });
+
+  test("login-mobile", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/entrar");
+    await expect(page.getByRole("heading", { name: "Entrar" })).toBeVisible();
+    await page.screenshot({ path: "evidence/screenshots/login-mobile.png" });
+  });
+
+  test("cadastro-desktop", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/criar-conta");
+    await expect(page.getByRole("heading", { name: "Criar conta" })).toBeVisible();
+    await page.screenshot({ path: "evidence/screenshots/cadastro-desktop.png" });
+  });
+
+  test("recuperar-senha-desktop", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/esqueci-minha-senha");
+    await expect(page.getByRole("heading", { name: "Esqueci minha senha" })).toBeVisible();
+    await page.screenshot({ path: "evidence/screenshots/recuperar-senha-desktop.png" });
+  });
+
+  test("erro-login-invalido", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/entrar");
+    await page.getByLabel("E-mail").fill("naoexiste@teste.com");
+    await page.getByLabel("Senha").fill("senhaerrada123");
+    await page.getByRole("button", { name: "Entrar" }).click();
+    await expect(page.getByText("E-mail ou senha incorretos.")).toBeVisible();
+    await page.screenshot({ path: "evidence/screenshots/erro-login-invalido.png" });
+  });
+
+  test("redirecionamento-visitante", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/treino-diario");
+    await expect(page.getByRole("heading", { name: "Entrar" })).toBeVisible();
+    await page.screenshot({ path: "evidence/screenshots/redirecionamento-visitante.png" });
   });
 });

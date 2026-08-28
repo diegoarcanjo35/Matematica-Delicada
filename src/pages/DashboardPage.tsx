@@ -4,6 +4,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { Modal } from "../components/Modal";
 import { ProgressBar } from "../components/ProgressBar";
+import { useAuth } from "../auth/useAuth";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_ENEM_MAP,
@@ -14,17 +15,29 @@ import {
 } from "../mocks/dashboardMock";
 import "./DashboardPage.css";
 
+function timeOfDayGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Bom dia";
+  if (hour < 18) return "Boa tarde";
+  return "Boa noite";
+}
+
 export function DashboardPage() {
   const [isMapModalOpen, setIsMapModalOpen] = useState(false);
+  const { user } = useAuth();
+  const firstName = user?.name.trim().split(/\s+/)[0] ?? MOCK_STUDENT.firstName;
 
   return (
     <div className="dashboard">
       <p className="dashboard__mock-notice">
-        Dados de demonstração — esta tela ainda não usa informações reais do aluno.
+        Sequência, Mapa ENEM, Treino de Hoje e demais números abaixo são dados de
+        demonstração — ainda não refletem seu progresso real.
       </p>
 
       <header className="dashboard__greeting">
-        <h2 className="dashboard__greeting-title">{MOCK_STUDENT.greeting}</h2>
+        <h2 className="dashboard__greeting-title">
+          {timeOfDayGreeting()}, {firstName}! ♡
+        </h2>
         <p className="dashboard__tagline">{MOCK_STUDENT.tagline}</p>
         <p className="dashboard__streak">
           Sequência atual: <strong>{MOCK_STUDENT.streakDays} dias</strong>

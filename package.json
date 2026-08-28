@@ -10,10 +10,16 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "worker:dev": "wrangler dev --port 8788",
-    "worker:preview": "npm run build && npm run worker:dev",
+    "db:migrate:local": "wrangler d1 migrations apply matematica-delicada-local --local -c wrangler.local.jsonc",
+    "worker:dev": "wrangler dev --port 8788 -c wrangler.local.jsonc",
+    "worker:preview": "npm run build && npm run db:migrate:local && npm run worker:dev",
     "screenshots": "playwright test evidence/screenshots.spec.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "worker:check": "tsc -p worker/tsconfig.json",
+    "check:deploy-config": "node scripts/check-deployable-d1-config.mjs",
+    "bench:pbkdf2": "node worker/scripts/benchmark-pbkdf2.mjs",
+    "predeploy": "npm run check:deploy-config",
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "react": "^19.2.8",
@@ -21,6 +27,7 @@
     "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260828.1",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@testing-library/jest-dom": "^7.0.1",

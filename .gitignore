@@ -20,6 +20,9 @@ dist-ssr
 test-results
 playwright-report
 
+# Cookie de sessão de teste E2E gerado pelo global-setup — nunca versionar.
+e2e/.auth
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

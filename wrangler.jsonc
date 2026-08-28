@@ -1,13 +1,32 @@
 {
-  // Configuração LOCAL de Cloudflare Workers Static Assets — Sprint 1 v1.1, correção 1.
-  // Propositalmente SEM account_id, SEM credenciais e SEM binding de D1 ou KV.
-  // Uso permitido: apenas `wrangler dev` local, para comprovar que o build da SPA
-  // funciona sob a arquitetura Worker + Assets. Login e deploy continuam proibidos
-  // nesta sprint — Diego cuida manualmente de qualquer ação remota na Cloudflare.
+  // Configuração IMPLANTÁVEL de Cloudflare Worker + Assets + D1 — Sprint 2 v1.1.
+  //
+  // Este arquivo é o que `wrangler deploy` usaria. Por isso "database_id" abaixo
+  // fica DELIBERADAMENTE VAZIO ("") — não zeros, não "TODO", não um valor
+  // inventado: uma ausência explícita e honesta. Diego preenche esse campo com o
+  // database_id REAL somente depois de criar o banco D1 manualmente na conta
+  // Profandreia e o PO autorizar. Até lá, `npm run deploy` FALHA de propósito —
+  // ver `scripts/check-deployable-d1-config.mjs`, executado automaticamente como
+  // "predeploy" antes de qualquer `wrangler deploy` (mecanismo nativo do npm).
+  //
+  // Este arquivo NÃO é usado para desenvolvimento local — isso é
+  // `wrangler.local.jsonc` (nunca usado para deploy, ver comentário lá).
+  //
+  // Login e deploy continuam proibidos nesta sprint — Diego cuida manualmente de
+  // qualquer ação remota na Cloudflare.
   "name": "matematica-delicada",
   "compatibility_date": "2025-01-01",
+  "main": "worker/src/index.ts",
   "assets": {
     "directory": "./dist",
-    "not_found_handling": "single-page-application"
-  }
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "matematica-delicada",
+      "database_id": ""
+    }
+  ]
 }

@@ -1,17 +1,26 @@
+import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
-/* Playwright — Sprint 1 v1.1, correções 2 e 3 (teclado/foco reais e screenshots).
-   Sobe o preview de produção local (vite preview) e roda tudo em Chromium local,
-   sem qualquer dependência remota. */
+const rootDir = import.meta.dirname;
+
+/* Playwright — a partir da Sprint 2, roda contra o Worker local (API + assets),
+   não mais o vite preview puro, já que a área do aluno agora exige sessão real.
+   Tudo 100% local: build + wrangler dev (D1 e Worker local), Chromium local. */
 export default defineConfig({
   testDir: ".",
   testMatch: ["e2e/**/*.spec.ts", "evidence/**/*.spec.ts"],
   fullyParallel: false,
+  // Serial entre arquivos também: todos compartilham o mesmo D1 local e o mesmo
+  // identificador de rate limit ("local-dev") nesta sessão, então rodar arquivos
+  // em paralelo causaria colisões espúrias de limite entre testes independentes.
+  workers: 1,
   retries: 0,
   reporter: [["list"]],
+  globalSetup: "./e2e/global-setup.ts",
   use: {
-    baseURL: "http://localhost:4319",
+    baseURL: "http://localhost:8788",
     trace: "off",
+    storageState: path.join(rootDir, "e2e", ".auth", "user.json"),
   },
   projects: [
     {
@@ -20,8 +29,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run build && npm run preview -- --port 4319 --strictPort",
-    url: "http://localhost:4319",
+    command: "npm run worker:preview",
+    url: "http://localhost:8788/api/health",
     reuseExistingServer: false,
     timeout: 120_000,
   },
