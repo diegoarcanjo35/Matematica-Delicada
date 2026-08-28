@@ -13,8 +13,20 @@ Sistema visual: [`docs/SISTEMA_VISUAL.md`](./docs/SISTEMA_VISUAL.md).
 
 - Node.js 20+ (testado com v24.15.0)
 - npm 10+ (testado com 11.12.1)
+- Os testes E2E (teclado, foco, screenshots) usam [Playwright](https://playwright.dev/)
+  com Chromium local — não depende de conta, serviço ou navegador remoto.
 
 ## Instalação
+
+Para instalação reproduzível (recomendado, inclusive no Windows — não exige conta nem
+serviço remoto):
+
+```bash
+npm ci
+npx playwright install chromium
+```
+
+Alternativa para desenvolvimento do dia a dia:
 
 ```bash
 npm install
@@ -43,9 +55,17 @@ npx tsc -b
 ## Testes
 
 ```bash
-npm test          # roda uma vez
-npm run test:watch # modo observação
+npm test              # testes unitários (Vitest + Testing Library), roda uma vez
+npm run test:watch    # testes unitários em modo observação
+npm run test:e2e      # teclado, foco, console e evidências, em Chromium real (Playwright)
+npm run screenshots   # regenera só as evidências visuais em evidence/screenshots/
 ```
+
+- `npm test`: testes de componente (`src/**/*.test.tsx`) — rápidos, sem navegador real.
+- `npm run test:e2e`: sobe um build de produção local e roda toda a suíte Playwright
+  (`e2e/` e `evidence/`) em Chromium — navegação por teclado, foco visível, ausência de
+  erros no console e geração das evidências visuais.
+- `npm run screenshots`: atalho para rodar só `evidence/screenshots.spec.ts`.
 
 ## Build de produção
 
@@ -54,6 +74,23 @@ npm run build
 ```
 
 Gera a pasta `dist/`. Para pré-visualizar o build: `npm run preview`.
+
+## Worker + Assets local
+
+```bash
+npm run worker:preview
+```
+
+Esse comando builda a aplicação e sobe um Cloudflare Worker com Static Assets **100%
+local**, na porta 8788 (via `wrangler dev`, configurado em `wrangler.jsonc`). Ele:
+
+- gera o build de produção antes de subir o worker;
+- serve a SPA com fallback de rota (`not_found_handling: "single-page-application"`),
+  então rotas internas acessadas diretamente (`/treino-diario`, por exemplo) funcionam;
+- não exige login na Cloudflare;
+- não executa deploy;
+- não acessa nenhuma conta Cloudflare;
+- não cria nem usa D1 — `wrangler.jsonc` não tem `account_id`, credenciais ou bindings.
 
 ## Estrutura do projeto
 
@@ -68,6 +105,10 @@ src/
   mocks/        dashboardMock.ts — dados de demonstração, isolados da UI
   routes/       studentNav.ts — fonte única do menu do aluno
   test/         setup.ts (Vitest + Testing Library)
+e2e/            testes Playwright de teclado, foco e console (Chromium real)
+evidence/       screenshots.spec.ts + evidence/screenshots/*.png — evidências visuais
+playwright.config.ts   configuração do Playwright (webServer local, sem dependência remota)
+wrangler.jsonc          configuração local de Cloudflare Workers Static Assets
 ```
 
 ## Rotas disponíveis
@@ -99,10 +140,18 @@ de erro 404.
 - Conformidade com WCAG não foi auditada por ferramenta automatizada de acessibilidade;
   os critérios mínimos da seção 10 da especificação foram verificados manualmente.
 
-## Operações remotas — proibidas nesta sprint
+## Operações remotas
 
-Este repositório **não** deve receber commit, push, merge ou deploy nesta sprint —
-essas ações aguardam autorização literal do PO (`AUTORIZADO COMMIT` / `AUTORIZADO PUSH`).
-Também **não** deve ser usado o MCP da Cloudflare, `wrangler login`, `wrangler deploy` ou
-qualquer criação/alteração de recurso remoto (Worker, D1, KV, R2). Toda ação na Cloudflare
-é feita manualmente por Diego.
+Commit e push da branch `sprint-01-fundacao` **já ocorreram**, mediante autorização
+literal do PO (`AUTORIZADO COMMIT` / `AUTORIZADO PUSH`) — a branch está publicada em
+`origin/sprint-01-fundacao`.
+
+Continuam proibidos, até nova autorização explícita:
+
+- merge na `main`;
+- release ou tag;
+- deploy;
+- MCP da Cloudflare, `wrangler login`, `wrangler deploy` ou qualquer criação/alteração
+  de recurso remoto (Worker, D1, KV, R2).
+
+Toda ação remota na Cloudflare é feita manualmente por Diego.
