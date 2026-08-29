@@ -1,23 +1,28 @@
 import { generateOpaqueToken, hashPassword, needsRehash, sha256Hex, verifyPassword } from "../lib/crypto";
 import { SESSION_TTL_SECONDS } from "../lib/cookies";
 import {
+  buildConfirmEmailStatement,
+  buildUpdatePasswordAndBumpSessionVersionStatement,
   createUser,
   findUserByNormalizedEmail,
   findUserById,
-  markEmailConfirmed,
   touchLastLogin,
-  updatePasswordAndBumpSessionVersion,
   upgradePasswordHash,
   type UserRow,
 } from "../repositories/userRepository";
 import {
+  buildRevokeAllSessionsForUserStatement,
   createSession,
   findActiveSessionByTokenHash,
-  revokeAllSessionsForUser,
   revokeSessionByTokenHash,
   touchSession,
 } from "../repositories/sessionRepository";
-import { findValidToken, issueToken, markTokenUsed } from "../repositories/tokenRepository";
+import {
+  buildConsumeTokenStatement,
+  findValidToken,
+  issueToken,
+  tokenStillValidGuardSql,
+} from "../repositories/tokenRepository";
 import type { EmailAdapter } from "../email/adapter";
 
 const EMAIL_CONFIRMATION_TTL_MS = 1000 * 60 * 60 * 24; // 24h
@@ -25,6 +30,19 @@ const PASSWORD_RESET_TTL_MS = 1000 * 60 * 30; // 30min
 
 function newId(): string {
   return crypto.randomUUID();
+}
+
+/** Formata para o mesmo formato de datetime('now') do SQLite/D1
+ *  ("YYYY-MM-DD HH:MM:SS", sem "T"/"Z"/milissegundos) — comparação
+ *  lexicográfica com toISOString() bruto é incorreta (mesmo bug já corrigido
+ *  em rateLimit.ts; aqui afetava a expiração real dos tokens de confirmação
+ *  de e-mail e redefinição de senha, encontrado pelos testes de atomicidade
+ *  da Sprint 2 v1.3, item 11: "token expirado não altera... "). */
+function toSqliteExpiry(msFromNow: number): string {
+  return new Date(Date.now() + msFromNow)
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d+Z$/, "");
 }
 
 export interface SignupResult {
@@ -137,7 +155,7 @@ export async function requestEmailConfirmation(
 
   const token = generateOpaqueToken();
   const tokenHash = await sha256Hex(token);
-  const expiresAt = new Date(Date.now() + EMAIL_CONFIRMATION_TTL_MS).toISOString();
+  const expiresAt = toSqliteExpiry(EMAIL_CONFIRMATION_TTL_MS);
 
   await issueToken(db, "email_confirmation", {
     id: newId(),
@@ -155,6 +173,12 @@ export async function requestEmailConfirmation(
   });
 }
 
+/** Confirmação de e-mail — consumo do token e confirmação do e-mail ocorrem
+ *  no mesmo lote atômico do D1 (Sprint 2 v1.3, correção 3.2). A leitura
+ *  inicial (findValidToken) só localiza o candidato; a validade real, dentro
+ *  da transação, é revalidada pelo guard SQL nos dois statements do lote —
+ *  por isso a corrida entre duas requisições concorrentes com o mesmo token
+ *  é resolvida pelo D1, não pela leitura inicial (TOCTOU-safe). */
 export async function confirmEmail(
   db: D1Database,
   token: string
@@ -163,9 +187,18 @@ export async function confirmEmail(
   const row = await findValidToken(db, "email_confirmation", tokenHash);
   if (!row) return { ok: false };
 
-  await markTokenUsed(db, "email_confirmation", row.id);
-  await markEmailConfirmed(db, row.user_id);
-  return { ok: true };
+  const guardSql = tokenStillValidGuardSql("email_confirmation");
+  const results = await db.batch([
+    buildConfirmEmailStatement(db, row.user_id, guardSql, [row.id, row.user_id]),
+    buildConsumeTokenStatement(db, "email_confirmation", row.id, row.user_id),
+  ]);
+
+  const userUpdated = results[0]?.meta.changes === 1;
+  const tokenConsumed = results[1]?.meta.changes === 1;
+  // Ambos precisam ter afetado exatamente 1 linha — não basta a ausência de
+  // exceção (Sprint 2 v1.3, correção 3.4). Se divergirem, algo inesperado
+  // aconteceu no guard e o resultado é tratado como falha, nunca como sucesso parcial.
+  return { ok: userUpdated && tokenConsumed };
 }
 
 export async function requestPasswordReset(
@@ -181,7 +214,7 @@ export async function requestPasswordReset(
 
   const token = generateOpaqueToken();
   const tokenHash = await sha256Hex(token);
-  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS).toISOString();
+  const expiresAt = toSqliteExpiry(PASSWORD_RESET_TTL_MS);
 
   await issueToken(db, "password_reset", { id: newId(), userId: user.id, tokenHash, expiresAt });
 
@@ -194,6 +227,12 @@ export async function requestPasswordReset(
   });
 }
 
+/** Redefinição de senha — consumo do token, troca de senha (com bump de
+ *  session_version) e revogação de todas as sessões ocorrem no mesmo lote
+ *  atômico do D1 (Sprint 2 v1.3, correção 3.3): se qualquer statement
+ *  falhar, nenhuma alteração parcial persiste. O hash da nova senha é
+ *  calculado ANTES do lote (é CPU pura, não toca o banco) para que o lote em
+ *  si seja só I/O e permaneça rápido. */
 export async function resetPassword(
   db: D1Database,
   token: string,
@@ -203,9 +242,19 @@ export async function resetPassword(
   const row = await findValidToken(db, "password_reset", tokenHash);
   if (!row) return { ok: false };
 
-  await markTokenUsed(db, "password_reset", row.id);
   const passwordHash = await hashPassword(newPassword);
-  await updatePasswordAndBumpSessionVersion(db, row.user_id, passwordHash);
-  await revokeAllSessionsForUser(db, row.user_id);
-  return { ok: true };
+  const guardSql = tokenStillValidGuardSql("password_reset");
+  const guardParams: [string, string] = [row.id, row.user_id];
+
+  const results = await db.batch([
+    buildUpdatePasswordAndBumpSessionVersionStatement(db, row.user_id, passwordHash, guardSql, guardParams),
+    buildRevokeAllSessionsForUserStatement(db, row.user_id, guardSql, guardParams),
+    buildConsumeTokenStatement(db, "password_reset", row.id, row.user_id),
+  ]);
+
+  const passwordUpdated = results[0]?.meta.changes === 1;
+  const tokenConsumed = results[2]?.meta.changes === 1;
+  // A revogação de sessões (results[1]) pode legitimamente afetar 0 linhas —
+  // usuário sem sessão ativa não é falha. Só senha e token são obrigatórios.
+  return { ok: passwordUpdated && tokenConsumed };
 }

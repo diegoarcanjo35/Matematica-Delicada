@@ -207,17 +207,25 @@ endpoint privado da API. Ver "Fronteira de proteção" em `docs/AUTENTICACAO.md`
 ## Operações remotas
 
 Commit e push das branches `sprint-01-fundacao` e `main` **já ocorreram** na Sprint 1,
-mediante autorização literal do PO. A Sprint 2 roda numa branch nova
-(`sprint-02-autenticacao`) e, até nova autorização, **não deve receber commit nem
-push**.
+mediante autorização literal do PO.
+
+Commit e push da Sprint 2 **também já ocorreram**, mediante autorização literal do PO,
+exclusivamente na branch remota `sprint-02-autenticacao`:
+
+- a v1.2 foi publicada no commit `2d4c412262f13ffcc329d749acdae59e786701e3`;
+- a correção v1.3 de atomicidade das operações de token foi aprovada pelo PO e está
+  incluída no HEAD atual da branch `sprint-02-autenticacao`;
+- commit e push da v1.3 foram autorizados.
 
 Continuam proibidos, até nova autorização explícita:
 
-- commit e push desta sprint;
 - merge na `main`;
+- pull request;
+- rebase;
 - release ou tag;
 - deploy;
-- criação ou uso de D1 remoto;
+- criação, acesso ou migração de D1 remoto;
+- alteração de binding, variável ou segredo remoto;
 - MCP da Cloudflare, `wrangler login`, `wrangler deploy` ou qualquer criação/alteração
   de recurso remoto (Worker, D1, KV, R2).
 

@@ -40,26 +40,37 @@ export async function createUser(
     .run();
 }
 
-export async function markEmailConfirmed(db: D1Database, userId: string): Promise<void> {
-  await db
-    .prepare(
-      "UPDATE users SET email_confirmed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
-    )
-    .bind(userId)
-    .run();
-}
-
-export async function updatePasswordAndBumpSessionVersion(
+/** Statement condicional — só confirma o e-mail se, na mesma transação, o
+ *  token referenciado (guardSql) ainda estiver válido. Feito para compor um
+ *  db.batch() com o consumo do token (Sprint 2 v1.3, correção 3.2). */
+export function buildConfirmEmailStatement(
   db: D1Database,
   userId: string,
-  passwordHash: string
-): Promise<void> {
-  await db
+  guardSql: string,
+  guardParams: [tokenId: string, guardUserId: string]
+): D1PreparedStatement {
+  return db
     .prepare(
-      "UPDATE users SET password_hash = ?, session_version = session_version + 1, updated_at = datetime('now') WHERE id = ?"
+      `UPDATE users SET email_confirmed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND ${guardSql}`
     )
-    .bind(passwordHash, userId)
-    .run();
+    .bind(userId, ...guardParams);
+}
+
+/** Statement condicional — só troca a senha e incrementa session_version se,
+ *  na mesma transação, o token de redefinição ainda estiver válido
+ *  (Sprint 2 v1.3, correção 3.3). */
+export function buildUpdatePasswordAndBumpSessionVersionStatement(
+  db: D1Database,
+  userId: string,
+  passwordHash: string,
+  guardSql: string,
+  guardParams: [tokenId: string, guardUserId: string]
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE users SET password_hash = ?, session_version = session_version + 1, updated_at = datetime('now') WHERE id = ? AND ${guardSql}`
+    )
+    .bind(passwordHash, userId, ...guardParams);
 }
 
 /** Upgrade oportunista de hash após login válido — não bump de session_version,

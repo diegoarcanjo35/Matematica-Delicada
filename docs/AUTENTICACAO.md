@@ -1,4 +1,4 @@
-# Autenticação, Sessões e Segurança — Sprint 2 v1.2
+# Autenticação, Sessões e Segurança — Sprint 2 v1.3
 
 Atualizado na v1.1 com as seis correções da primeira auditoria: configuração D1
 sem ID remoto falso, PBKDF2 a 600.000 iterações com upgrade automático,
@@ -13,6 +13,14 @@ sem `Secure` agora exigem, além do ambiente, uma **flag local explícita**
 recebida** ser reconhecidamente local — nunca `X-Forwarded-Host`, nunca
 `*.workers.dev`, nunca domínio customizado. Ver seção "Ambiente e cookie —
 prova de execução local (v1.2)" abaixo.
+
+Atualizado na v1.3 com a correção cirúrgica de atomicidade apontada pela
+leitura direta do código publicado: emissão de token, confirmação de e-mail e
+redefinição de senha agora são operações indivisíveis no D1 (`db.batch()`),
+com consumo condicional do token (elimina a corrida entre "checar" e "marcar
+usado") e validação real do resultado de cada mutação — nunca `{ ok: true }`
+só porque nada lançou exceção. Ver seção "Atomicidade das operações de token
+(v1.3)" abaixo.
 
 ## Arquitetura
 
@@ -298,10 +306,113 @@ qualquer deploy de autenticação em produção — decisão do PO, não tomada 
 
 ## Confirmação de e-mail e recuperação de senha
 
-Sem mudanças estruturais na v1.1 (o rate limit que os protege foi
-reescrito — ver acima). Tokens de 256 bits, únicos, com expiração (24h/30min),
-invalidados após uso, só o hash SHA-256 armazenado. Respostas de "solicitar"
-são sempre idênticas, exista ou não o e-mail.
+Tokens de 256 bits, únicos, com expiração (24h/30min), invalidados após uso,
+só o hash SHA-256 armazenado. Respostas de "solicitar" são sempre idênticas,
+exista ou não o e-mail. Desde a v1.3, consumo do token e a mutação que ele
+autoriza são atômicos — ver seção seguinte.
+
+## Atomicidade das operações de token (v1.3)
+
+A auditoria direta do código publicado encontrou três fluxos que faziam
+gravações relacionadas em `await`s separados, sem transação — uma falha entre
+eles podia deixar o token consumido sem a mutação correspondente, ou
+vice-versa. Corrigido usando
+[`db.batch()`](https://developers.cloudflare.com/d1/worker-api/d1-database/),
+que o D1 executa como uma única transação: todos os statements do lote são
+aplicados, ou nenhum é.
+
+### Emissão/substituição de token (`tokenRepository.issueToken`)
+
+Invalidar os tokens anteriores do usuário e inserir o novo agora é um único
+`db.batch([invalidar, inserir])`. O resultado da inserção é conferido
+explicitamente (`meta.changes === 1`); se a inserção falhar por qualquer
+motivo, a invalidação do lote também é revertida — o token anterior nunca
+fica sem substituto (testado no cenário 10, ver abaixo).
+
+### Consumo condicional — elimina a corrida entre checar e marcar usado
+
+Antes: `SELECT` para achar um token válido, depois `UPDATE ... SET used_at =
+...` num `await` separado — duas requisições concorrentes podiam ler o mesmo
+token "ainda válido" antes de qualquer uma marcá-lo como usado.
+
+Agora, o consumo é um `UPDATE` condicional que já embute o predicado de
+validade (`used_at IS NULL AND expires_at > datetime('now')`) no próprio
+`WHERE`, e o chamador confere `meta.changes === 1` para saber se **esta**
+requisição venceu a corrida
+(`tokenRepository.buildConsumeTokenStatement`/`tokenStillValidGuardSql`). A
+leitura inicial (`findValidToken`) só localiza o candidato — a validade real,
+dentro da transação, é revalidada pelo `UPDATE` condicional e pelo `EXISTS`
+usado nos statements irmãos do mesmo lote. Duas requisições concorrentes com
+o mesmo token nunca conseguem as duas mudar `used_at` — exatamente uma vê 1
+linha afetada, a outra vê 0.
+
+- **Confirmação de e-mail** (`authService.confirmEmail`): `db.batch([`
+  atualizar `users.email_confirmed_at` condicionado ao token ainda válido,
+  consumir o token `])`. Ambos os statements enxergam o mesmo estado do token
+  (nenhum dos dois o modifica antes do outro ler), então concordam sempre
+  sobre o resultado da corrida.
+- **Redefinição de senha** (`authService.resetPassword`): `db.batch([`
+  trocar `password_hash` e incrementar `session_version`, revogar todas as
+  sessões ativas do usuário, consumir o token `])` — as três, condicionadas
+  ao mesmo `EXISTS` de token válido, no mesmo lote.
+
+### Validação real do resultado das mutações
+
+Nenhuma das funções acima retorna `{ ok: true }` só porque o `db.batch()` não
+lançou exceção. `confirmEmail` exige `meta.changes === 1` tanto na
+atualização do usuário quanto no consumo do token; `resetPassword` exige o
+mesmo para a troca de senha e o consumo do token (a revogação de sessões pode
+legitimamente afetar 0 linhas — usuário sem sessão ativa não é falha). Nomes
+de tabela usados nos statements dinâmicos continuam vindo exclusivamente do
+mapa fechado `TOKEN_TABLES` (nunca de entrada do usuário) — nenhum SQL é
+montado a partir de dado externo.
+
+### Testes de atomicidade (`worker/testing/`)
+
+Não há `miniflare`/`@cloudflare/vitest-pool-workers` neste projeto para rodar
+um D1 real dentro do Vitest. Em vez de mockar `.run()`/`.batch()` só contando
+chamadas — o que provaria apenas que as funções foram chamadas, não que o
+banco fica consistente — `worker/testing/fakeD1.ts` embute um SQLite real
+(`node:sqlite`, nativo do Node) e implementa `db.batch()` como uma transação
+`BEGIN`/`COMMIT`/`ROLLBACK` verdadeira, incluindo rollback completo quando
+qualquer statement falha (mesmo contrato documentado da API D1 real). Esse
+seam vive inteiramente fora de `worker/src/` — não é varrido por
+`tsc -p worker/tsconfig.json` (que restringe `types` a
+`@cloudflare/workers-types` e não conhece `node:sqlite`) e nunca é importado
+por código de produção; nenhum comportamento de falha foi adicionado ao
+bundle do Worker. A injeção de falha forçada (`failNextMatching`, por padrão
+de SQL) só existe nesse fake.
+
+`worker/testing/authAtomicity.test.ts` cobre os 12 cenários exigidos pela
+ordem de correção v1.3, sempre conferindo o **estado do banco** depois da
+falha simulada (não só a resposta da função):
+
+1. confirmação normal consome o token e confirma o e-mail;
+2. reutilização do token de confirmação falha;
+3. duas confirmações concorrentes com o mesmo token → exatamente um sucesso;
+4. falha forçada na atualização do usuário reverte o consumo do token
+   (comprovado: `email_confirmed_at` continua `NULL`, `used_at` continua
+   `NULL`, e o token volta a funcionar numa nova tentativa);
+5. redefinição normal consome token, troca senha, incrementa `session_version`
+   e revoga todas as sessões;
+6. reutilização do token de reset falha;
+7. duas redefinições concorrentes com o mesmo token → exatamente um sucesso;
+8. falha forçada na troca de senha reverte o consumo do token e mantém
+   senha/sessões anteriores;
+9. falha forçada na revogação de sessões reverte também o consumo do token e
+   a troca de senha (statements anteriores no mesmo lote);
+10. falha na inserção de um novo token não invalida o token anterior;
+11. token expirado não altera usuário, senha ou sessões;
+12. token inexistente não altera qualquer estado.
+
+O item 11 revelou um bug real e independente da atomicidade em si: o
+`expiresAt` dos tokens era gravado com `Date.toISOString()`
+(`"...T...Z"`), formato que a comparação `expires_at > datetime('now')` do
+SQLite/D1 (`"YYYY-MM-DD HH:MM:SS"`) compara lexicograficamente de forma
+incorreta — o mesmo bug já corrigido em `rateLimit.ts` na v1.1, mas que
+persistia, sem cobertura de teste, na expiração de tokens de e-mail/senha.
+Corrigido em `authService.ts` (`toSqliteExpiry`), reaproveitando o mesmo
+formato de data usado pelo rate limit.
 
 ### Adaptador de e-mail (`worker/src/email/`)
 

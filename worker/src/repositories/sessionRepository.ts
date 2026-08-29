@@ -56,10 +56,20 @@ export async function revokeSessionByTokenHash(db: D1Database, tokenHash: string
     .run();
 }
 
-/** Revoga todas as sessões do usuário — usado na troca de senha. */
-export async function revokeAllSessionsForUser(db: D1Database, userId: string): Promise<void> {
-  await db
-    .prepare("UPDATE sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL")
-    .bind(userId)
-    .run();
+/** Statement condicional — só revoga as sessões ativas do usuário se, na
+ *  mesma transação, o token de redefinição de senha ainda estiver válido.
+ *  Compõe o mesmo db.batch() da troca de senha e do consumo do token
+ *  (Sprint 2 v1.3, correção 3.3): se qualquer statement do lote falhar,
+ *  nenhuma sessão é revogada. */
+export function buildRevokeAllSessionsForUserStatement(
+  db: D1Database,
+  userId: string,
+  guardSql: string,
+  guardParams: [tokenId: string, guardUserId: string]
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL AND ${guardSql}`
+    )
+    .bind(userId, ...guardParams);
 }
