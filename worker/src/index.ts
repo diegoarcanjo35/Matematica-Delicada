@@ -3,6 +3,7 @@ import { Errors, json } from "./lib/response";
 import { isMutationMethod, isOriginAllowed } from "./lib/origin";
 import { handleAuthRequest } from "./routes/auth";
 import { handleDevRequest } from "./routes/dev";
+import { handleOnboardingRequest } from "./routes/onboarding";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -20,6 +21,9 @@ export default {
       try {
         const authResponse = await handleAuthRequest(request, env, url);
         if (authResponse) return authResponse;
+
+        const onboardingResponse = await handleOnboardingRequest(request, env, url);
+        if (onboardingResponse) return onboardingResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

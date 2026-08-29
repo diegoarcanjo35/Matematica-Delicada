@@ -12,7 +12,11 @@ const DEFAULT_CONFIG_PATH = path.join(rootDir, "wrangler.jsonc");
 
 // Sprint 2 v1.2, correção 3.3 — nenhuma dessas variáveis pode existir em
 // "vars" da config implantável. São exclusivas de wrangler.local.jsonc.
-const FORBIDDEN_DEV_VAR_NAMES = ["DEV_OUTBOX_ENABLED", "ALLOW_INSECURE_LOCAL_COOKIE"];
+const FORBIDDEN_DEV_VAR_NAMES = [
+  "DEV_OUTBOX_ENABLED",
+  "ALLOW_INSECURE_LOCAL_COOKIE",
+  "ALLOW_TEST_RATE_LIMIT_ISOLATION",
+];
 
 export function stripJsonComments(text) {
   // wrangler.jsonc permite comentários // e /* */ — remoção simples o

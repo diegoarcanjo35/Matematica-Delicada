@@ -1,8 +1,9 @@
 import { execSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { testClientIdHeader } from "./rateLimitIsolation";
 
 /* Sprint 2 v1.0/v1.1 — segurança da API, testada diretamente (sem UI). */
-test.use({ storageState: { cookies: [], origins: [] } });
+test.use({ storageState: { cookies: [], origins: [] }, extraHTTPHeaders: testClientIdHeader("api-security") });
 
 /** Executa SQL diretamente no D1 local (mesmo arquivo que o Worker em teste usa),
  *  só para manipular estado que a própria API não expõe (ex.: forçar expiração

@@ -1,10 +1,44 @@
 import { expect, test } from "@playwright/test";
+import { installTestClientIdRoute, testClientIdHeader } from "./rateLimitIsolation";
 
 /* Sprint 2 v1.0 — fluxos completos de autenticação, em Chromium real, deslogado. */
 test.use({ storageState: { cookies: [], origins: [] } });
 
+// Cadastro/login nesta suíte acontecem via UI real (formulário + clique),
+// então o cabeçalho de isolamento precisa ser injetado por interceptação de
+// mesma origem (/api/**) — nunca via test.use({extraHTTPHeaders}), que
+// vazaria para requisições cross-origin da página (fontes do Google Fonts),
+// quebrando o preflight CORS delas. Ver e2e/rateLimitIsolation.ts.
+const TEST_CLIENT_ID_HEADER = testClientIdHeader("auth-flow");
+test.beforeEach(async ({ page }) => {
+  await installTestClientIdRoute(page, "auth-flow");
+});
+
 function uniqueEmail(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@teste.dev`;
+}
+
+/* Sprint 3 — estes testes de autenticação usam contas recém-criadas, sem
+   onboarding. Como a área do aluno agora exige onboarding concluído
+   (RequireOnboardingComplete), completamos o onboarding via API logo após o
+   login para que estes testes continuem exercitando exclusivamente a
+   mecânica de sessão/autenticação que já cobriam — o fluxo de onboarding em
+   si é coberto por e2e/onboarding.spec.ts. */
+async function completeOnboardingViaApi(page: import("@playwright/test").Page): Promise<void> {
+  const nextYear = new Date().getUTCFullYear() + 1;
+  await page.request.patch("/api/onboarding", {
+    data: { currentGrade: "3_serie_em", enemYear: nextYear, currentStep: 1 },
+  });
+  await page.request.patch("/api/onboarding", {
+    data: { goalType: "acertos", goalValue: 25, currentStep: 2 },
+  });
+  await page.request.patch("/api/onboarding", {
+    data: { availableDays: ["seg"], dailyMinutes: 30, currentStep: 3 },
+  });
+  await page.request.patch("/api/onboarding", { data: { difficulties: [], currentStep: 4 } });
+  await page.request.patch("/api/onboarding", { data: { timePreference: "noite", currentStep: 5 } });
+  await page.request.patch("/api/onboarding", { data: { diagnosticChoice: "depois", currentStep: 6 } });
+  await page.request.post("/api/onboarding/complete");
 }
 
 async function readLastOutboxLink(
@@ -134,6 +168,13 @@ test.describe("Login e sessão", () => {
     const email = uniqueEmail("retorno-destino");
     await createConfirmedUser(page, email);
 
+    // Login/onboarding/logout temporários via API — só para que o teste real
+    // (deslogado -> redireciona -> loga -> retorna ao destino) não seja
+    // interceptado pelo gate de onboarding (ver completeOnboardingViaApi acima).
+    await page.request.post("/api/auth/login", { headers: TEST_CLIENT_ID_HEADER, data: { email, password: "senhavalida123" } });
+    await completeOnboardingViaApi(page);
+    await page.request.post("/api/auth/logout");
+
     await page.goto("/padroes-enem");
     await expect(page.getByRole("heading", { name: "Entrar" })).toBeVisible();
 
@@ -148,6 +189,10 @@ test.describe("Login e sessão", () => {
   test("login completo, navegação autenticada e logout revogam o acesso", async ({ page }) => {
     const email = uniqueEmail("logout");
     await createConfirmedUser(page, email);
+
+    await page.request.post("/api/auth/login", { headers: TEST_CLIENT_ID_HEADER, data: { email, password: "senhavalida123" } });
+    await completeOnboardingViaApi(page);
+    await page.request.post("/api/auth/logout");
 
     await page.goto("/entrar");
     await page.getByLabel("E-mail").fill(email);
@@ -209,6 +254,10 @@ test.describe("Recuperação de senha", () => {
     await page.getByLabel(/Li e aceito/).check();
     await page.getByRole("button", { name: "Criar conta" }).click();
     await expect(page.getByText("Sua conta foi criada")).toBeVisible();
+
+    await page.request.post("/api/auth/login", { headers: TEST_CLIENT_ID_HEADER, data: { email, password: "senhaoriginal123" } });
+    await completeOnboardingViaApi(page);
+    await page.request.post("/api/auth/logout");
 
     await page.goto("/esqueci-minha-senha");
     await page.getByLabel("E-mail").fill(email);

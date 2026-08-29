@@ -30,6 +30,16 @@
   margin: 0;
 }
 
+.dashboard__goal {
+  color: var(--color-text-secondary);
+  margin: var(--space-1) 0 0;
+}
+
+.dashboard__diagnostic-cta {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+}
+
 .dashboard__grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

@@ -1,0 +1,72 @@
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-page__intro {
+  color: var(--color-text-secondary);
+  max-width: 60ch;
+}
+
+.settings-page form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.settings-page__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  text-align: left;
+}
+
+.settings-page__label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-navy-deep);
+}
+
+.settings-page__field input[type="number"],
+.settings-page__field textarea {
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--color-border);
+  background-color: var(--color-bg-surface);
+  font: inherit;
+}
+
+.settings-page__field textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.settings-page__checkbox-group,
+.settings-page__radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.settings-page__checkbox,
+.settings-page__radio {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+}
+
+.settings-page__help {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.settings-page__field-error {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+  font-weight: 600;
+}

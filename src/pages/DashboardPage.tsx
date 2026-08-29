@@ -1,10 +1,12 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { Modal } from "../components/Modal";
 import { ProgressBar } from "../components/ProgressBar";
 import { useAuth } from "../auth/useAuth";
+import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_ENEM_MAP,
@@ -25,7 +27,14 @@ function timeOfDayGreeting(): string {
 export function DashboardPage() {
   const [isMapModalOpen, setIsMapModalOpen] = useState(false);
   const { user } = useAuth();
+  const { profile } = useOnboardingStatus();
   const firstName = user?.name.trim().split(/\s+/)[0] ?? MOCK_STUDENT.firstName;
+  const goalLabel =
+    profile?.goalType === "acertos"
+      ? `${profile.goalValue} acertos`
+      : profile?.goalType === "nota"
+        ? `${profile.goalValue} pontos`
+        : null;
 
   return (
     <div className="dashboard">
@@ -42,6 +51,17 @@ export function DashboardPage() {
         <p className="dashboard__streak">
           Sequência atual: <strong>{MOCK_STUDENT.streakDays} dias</strong>
         </p>
+        {goalLabel && (
+          <p className="dashboard__goal">
+            Sua meta: <strong>{goalLabel}</strong>
+          </p>
+        )}
+        {profile?.diagnosticChoice === "depois" && (
+          <p className="dashboard__diagnostic-cta">
+            Você optou por fazer o diagnóstico depois.{" "}
+            <Link to="/diagnostico">Fazer o diagnóstico agora</Link>
+          </p>
+        )}
       </header>
 
       <div className="dashboard__grid">

@@ -23,11 +23,12 @@ import {
      UMA CONTA sofre, mesmo vindas de IPs diferentes.
    LIMITAÇÃO CONHECIDA: em ambiente local (wrangler dev), a Cloudflare não injeta
    cf-connecting-ip, então clientIdentifier() cai num valor fixo ("local-dev") e
-   todo tráfego local compartilha a mesma janela por IP (o limite por e-mail não
-   tem essa limitação). Os limites abaixo foram calibrados generosamente para
-   acomodar a suíte de testes local inteira sem bloqueio espúrio, mantendo ainda
-   uma proteção real. A defesa primária de produção deve ser o Rate Limiting
-   nativo da Cloudflare, na borda, por IP real — ver docs/AUTENTICACAO.md. */
+   todo tráfego local compartilharia a mesma janela por IP. Sprint 3 v1.2 mitigou
+   o efeito colateral disso na suíte de testes (arquivos E2E diferentes deixando
+   de "vazar" contador de rate limit entre si) via clientIdentifier(request, env, url)
+   — ver worker/src/env.ts:isTestRateLimitIsolationAllowed — sem alterar o
+   comportamento real do limitador. A defesa primária de produção continua sendo o
+   Rate Limiting nativo da Cloudflare, na borda, por IP real — ver docs/AUTENTICACAO.md. */
 const RATE_LIMITS = {
   signup: 30,
   login: 30,
@@ -64,11 +65,12 @@ async function audit(env: Env, type: AuditEventType, userId: string | null, meta
 async function checkCombinedRateLimit(
   env: Env,
   request: Request,
+  url: URL,
   scope: string,
   emailNormalized: string,
   limit: number
 ): Promise<boolean> {
-  const byIp = await checkRateLimit(env.DB, scope, clientIdentifier(request), limit);
+  const byIp = await checkRateLimit(env.DB, scope, clientIdentifier(request, env, url), limit);
   const byEmail = await checkEmailRateLimit(env.DB, scope, emailNormalized, limit);
   return byIp && byEmail;
 }
@@ -91,6 +93,7 @@ export async function handleAuthRequest(
     const allowed = await checkCombinedRateLimit(
       env,
       request,
+      url,
       "signup",
       normalizeEmail(email),
       RATE_LIMITS.signup
@@ -120,7 +123,7 @@ export async function handleAuthRequest(
     if (!body?.email || !body.password) return Errors.badRequest("Informe e-mail e senha.");
 
     const emailNormalized = normalizeEmail(body.email);
-    const allowed = await checkCombinedRateLimit(env, request, "login", emailNormalized, RATE_LIMITS.login);
+    const allowed = await checkCombinedRateLimit(env, request, url, "login", emailNormalized, RATE_LIMITS.login);
     if (!allowed) return Errors.tooManyRequests();
 
     const result = await login(env.DB, {
@@ -172,6 +175,7 @@ export async function handleAuthRequest(
     const allowed = await checkCombinedRateLimit(
       env,
       request,
+      url,
       "email_confirmation",
       emailNormalized,
       RATE_LIMITS.emailConfirmationRequest
@@ -202,6 +206,7 @@ export async function handleAuthRequest(
     const allowed = await checkCombinedRateLimit(
       env,
       request,
+      url,
       "password_reset_request",
       emailNormalized,
       RATE_LIMITS.passwordResetRequest
@@ -218,7 +223,7 @@ export async function handleAuthRequest(
     const allowed = await checkRateLimit(
       env.DB,
       "password_reset",
-      clientIdentifier(request),
+      clientIdentifier(request, env, url),
       RATE_LIMITS.passwordReset
     );
     if (!allowed) return Errors.tooManyRequests();

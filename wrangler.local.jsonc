@@ -17,14 +17,23 @@
   // um Worker remoto). Agora exige, TODAS ao mesmo tempo:
   //   1) ENVIRONMENT === "development" (ou "test", só para o outbox);
   //   2) a flag local explícita correspondente (DEV_OUTBOX_ENABLED /
-  //      ALLOW_INSECURE_LOCAL_COOKIE), presente SÓ NESTE ARQUIVO;
+  //      ALLOW_INSECURE_LOCAL_COOKIE / ALLOW_TEST_RATE_LIMIT_ISOLATION),
+  //      presente SÓ NESTE ARQUIVO;
   //   3) o hostname da requisição efetivamente recebida ser localhost/127.0.0.1/
   //      [::1] — nunca *.workers.dev, domínio customizado, nem X-Forwarded-Host;
   //   4) (só para o cookie) o protocolo ser http: — HTTPS local mantém Secure.
   // Ver worker/src/env.ts (isLocalDevEnvironment, isDevOutboxAllowed,
-  // shouldOmitSecureCookie) e worker/src/lib/localHost.ts.
+  // shouldOmitSecureCookie, isTestRateLimitIsolationAllowed) e
+  // worker/src/lib/localHost.ts.
   //
-  // Estas duas flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
+  // Sprint 3 v1.2 — ALLOW_TEST_RATE_LIMIT_ISOLATION permite que a suíte E2E
+  // local informe seu próprio identificador de rate limit por requisição
+  // (cabeçalho X-E2E-RateLimit-Client-Id, ver worker/src/lib/rateLimit.ts),
+  // eliminando a dependência de ordem entre arquivos de teste que
+  // compartilhavam o identificador fixo "local-dev". Não afrouxa nenhum
+  // limite real nem tem efeito fora das três condições acima.
+  //
+  // Estas três flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
   // falha o deploy se qualquer uma delas aparecer em wrangler.jsonc.
   // ============================================================================
   "name": "matematica-delicada",
@@ -38,7 +47,8 @@
   "vars": {
     "ENVIRONMENT": "development",
     "DEV_OUTBOX_ENABLED": "true",
-    "ALLOW_INSECURE_LOCAL_COOKIE": "true"
+    "ALLOW_INSECURE_LOCAL_COOKIE": "true",
+    "ALLOW_TEST_RATE_LIMIT_ISOLATION": "true"
   },
   "d1_databases": [
     {

@@ -1,12 +1,17 @@
 import { execSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { testClientIdHeader } from "./rateLimitIsolation";
 
-/* Sprint 2 v1.0/v1.1 — testes de rate limit que consomem a cota local
-   compartilhada. Nomeado "zz-" de propósito: precisa rodar por ÚLTIMO entre os
-   specs de e2e/, depois de todo teste que depende de conseguir se
-   cadastrar/logar com sucesso (ver limitação documentada em
-   worker/src/lib/rateLimit.ts). */
-test.use({ storageState: { cookies: [], origins: [] } });
+/* Sprint 2 v1.0/v1.1 — testes de rate limit que esgotam de propósito a cota
+   de cadastro. Até a Sprint 3 v1.1 este arquivo se chamava
+   "zz-rate-limit.spec.ts", nomeado de propósito para rodar por ÚLTIMO entre
+   os specs de e2e/ — uma dependência implícita de ordem/nome de arquivo,
+   rejeitada na correção v1.2. Agora usa o identificador de teste isolado
+   abaixo (ver e2e/rateLimitIsolation.ts): o contador de IP que este arquivo
+   esgota nunca é compartilhado com nenhum outro arquivo, então a ordem de
+   execução deixou de importar — comprovado rodando esta suíte antes e depois
+   de e2e/onboarding.spec.ts e evidence/sprint-03-screenshots.spec.ts. */
+test.use({ storageState: { cookies: [], origins: [] }, extraHTTPHeaders: testClientIdHeader("rate-limit") });
 
 // execSync (não execFileSync): no Windows, chamar "npx.cmd" via execFileSync
 // falha com EINVAL; execSync roda a string inteira através do shell.

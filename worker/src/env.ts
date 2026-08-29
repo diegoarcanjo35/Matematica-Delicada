@@ -8,6 +8,8 @@ export interface Env {
   DEV_OUTBOX_ENABLED?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   ALLOW_INSECURE_LOCAL_COOKIE?: string;
+  /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
+  ALLOW_TEST_RATE_LIMIT_ISOLATION?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -48,5 +50,30 @@ export function shouldOmitSecureCookie(env: Env, url: URL): boolean {
     isTrue(env.ALLOW_INSECURE_LOCAL_COOKIE) &&
     isRecognizedLocalHostname(url) &&
     isHttpProtocol(url)
+  );
+}
+
+/* Sprint 3 v1.2 — correção estrutural de isolamento de teste. O limitador de
+   taxa por IP (rateLimit.ts:clientIdentifier) cai num identificador fixo
+   ("local-dev") em wrangler dev local, porque a Cloudflare não injeta
+   cf-connecting-ip fora da borda real. Isso fazia toda a suíte E2E
+   compartilhar UM contador de IP entre arquivos de teste diferentes — uma
+   dependência implícita de ordem/execução (arquivo que esgota o limite
+   "vazava" para qualquer outro arquivo que rodasse depois).
+
+   A correção NÃO afrouxa o limite de produção nem cria um jeito de burlar o
+   rate limit real: só permite que a REQUISIÇÃO DE TESTE informe seu próprio
+   identificador (cabeçalho X-E2E-RateLimit-Client-Id), e só quando as
+   mesmas três condições de falha fechada já usadas no projeto estiverem
+   simultaneamente satisfeitas — igual a isDevOutboxAllowed. Fora de um
+   ambiente local explícito, o cabeçalho é sempre ignorado e o identificador
+   real do cliente prevalece; em produção real (sem ENVIRONMENT=development/
+   test, sem esta flag em wrangler.jsonc, e com hostname público) esta função
+   retorna false sempre, então o cabeçalho nunca tem efeito algum. */
+export function isTestRateLimitIsolationAllowed(env: Env, url: URL): boolean {
+  return (
+    hasLocalDevEnvironmentValue(env) &&
+    isTrue(env.ALLOW_TEST_RATE_LIMIT_ISOLATION) &&
+    isRecognizedLocalHostname(url)
   );
 }

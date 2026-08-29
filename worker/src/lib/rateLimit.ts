@@ -1,4 +1,10 @@
 import { sha256Hex } from "./crypto";
+import { isTestRateLimitIsolationAllowed, type Env } from "../env";
+
+/* Nome do cabeçalho de isolamento de teste — ver isTestRateLimitIsolationAllowed
+   em worker/src/env.ts para as três condições de falha fechada que precisam
+   estar simultaneamente satisfeitas para este cabeçalho ter qualquer efeito. */
+const TEST_CLIENT_ID_HEADER = "X-E2E-RateLimit-Client-Id";
 
 /* Rate limit local, por janela fixa de 60 segundos, persistido no D1.
    Sprint 2 v1.1, correção E — reescrito para:
@@ -88,7 +94,16 @@ export async function checkEmailRateLimit(
   return incrementAndCheck(db, `${scope}:email`, identifierHash, limit);
 }
 
-export function clientIdentifier(request: Request): string {
-  // cf-connecting-ip é o cabeçalho real da Cloudflare; em wrangler dev local, cai no fallback.
+export function clientIdentifier(request: Request, env: Env, url: URL): string {
+  // cf-connecting-ip é o cabeçalho real da Cloudflare; em wrangler dev local, cai no fallback
+  // "local-dev" — o que faria toda a suíte E2E local compartilhar um único contador de IP entre
+  // arquivos de teste diferentes. Sob as três condições de isTestRateLimitIsolationAllowed
+  // (nunca satisfeitas em produção), um cabeçalho de teste pode substituir esse fallback fixo
+  // por um identificador próprio do arquivo/execução, sem alterar o comportamento real do
+  // limitador nem o identificador de qualquer requisição real de produção.
+  if (isTestRateLimitIsolationAllowed(env, url)) {
+    const testClientId = request.headers.get(TEST_CLIENT_ID_HEADER);
+    if (testClientId) return `test:${testClientId}`;
+  }
   return request.headers.get("cf-connecting-ip") ?? "local-dev";
 }

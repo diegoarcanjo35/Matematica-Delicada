@@ -81,6 +81,19 @@ describe("checkDeployableConfig", () => {
     expect(result.errors.some((e: string) => e.includes("ALLOW_INSECURE_LOCAL_COOKIE"))).toBe(true);
   });
 
+  it("ID válido com flag de isolamento de rate limit de teste na config implantável -> bloqueia", () => {
+    const filePath = writeFixture({
+      ...BASE_CONFIG,
+      vars: { ALLOW_TEST_RATE_LIMIT_ISOLATION: "true" },
+      d1_databases: [
+        { binding: "DB", database_name: "x", database_id: "a1b2c3d4-e5f6-4a5b-9c8d-1234567890ab" },
+      ],
+    });
+    const result = checkDeployableConfig(filePath);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e: string) => e.includes("ALLOW_TEST_RATE_LIMIT_ISOLATION"))).toBe(true);
+  });
+
   it("database_id só com zeros -> bloqueia", () => {
     const filePath = writeFixture({
       ...BASE_CONFIG,
