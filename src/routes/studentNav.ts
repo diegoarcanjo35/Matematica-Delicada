@@ -63,6 +63,12 @@ export const STUDENT_NAV_ITEMS: NavItem[] = [
     description: "Sua sequência, selos e marcos de consistência.",
     icon: "🏆",
   },
+  {
+    path: "/cronograma",
+    label: "Cronograma",
+    description: "Sua agenda adaptativa — hoje, semana, mês e histórico.",
+    icon: "📅",
+  },
 ];
 
 export const MOBILE_NAV_ITEMS: NavItem[] = [

@@ -170,6 +170,79 @@ CREATE TABLE diagnostic_help_opens (
 CREATE UNIQUE INDEX idx_diagnostic_attempts_one_active_per_user
   ON diagnostic_attempts (user_id)
   WHERE status = 'in_progress';
+
+-- Sprint 5 v1.0 (migration 0006) — motor do cronograma adaptativo.
+CREATE TABLE schedule_activities (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL CHECK (type IN (
+    'diagnostico', 'reconhecimento', 'estudo_de_padrao', 'conteudo_de_base',
+    'aula_video', 'treino_de_questoes', 'correcao_de_erro', 'revisao_espacada',
+    'lista_do_professor', 'simulado', 'live', 'leitura_de_resumo'
+  )),
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  estimated_minutes INTEGER NOT NULL CHECK (estimated_minutes > 0),
+  completion_criteria TEXT NOT NULL,
+  explanation TEXT NOT NULL,
+  completion_mode TEXT NOT NULL CHECK (completion_mode IN ('manual', 'automatic', 'external_evidence')),
+  origin TEXT NOT NULL CHECK (origin IN ('system', 'teacher', 'diagnostic', 'review')),
+  resource_ref TEXT,
+  dismissible INTEGER NOT NULL DEFAULT 1 CHECK (dismissible IN (0, 1)),
+  is_local_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_local_fixture IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE schedule_activity_assignments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  activity_id TEXT NOT NULL REFERENCES schedule_activities (id),
+  planned_date TEXT,
+  position INTEGER,
+  status TEXT NOT NULL DEFAULT 'not_started'
+    CHECK (status IN ('not_started', 'in_progress', 'completed', 'overdue', 'rescheduled', 'dismissed', 'blocked')),
+  started_at TEXT,
+  completed_at TEXT,
+  dismissed_at TEXT,
+  blocked_at TEXT,
+  rescheduled_at TEXT,
+  last_transition_reason TEXT,
+  rescheduled_from_id TEXT REFERENCES schedule_activity_assignments (id),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX idx_schedule_assignments_user_date_position
+  ON schedule_activity_assignments (user_id, planned_date, position)
+  WHERE planned_date IS NOT NULL;
+
+CREATE TABLE schedule_activity_events (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES schedule_activity_assignments (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE schedule_preferences (
+  user_id TEXT PRIMARY KEY REFERENCES users (id),
+  timezone TEXT NOT NULL DEFAULT 'America/Sao_Paulo',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE schedule_plan_previews (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  payload TEXT NOT NULL,
+  unplaceable_activity_ids TEXT NOT NULL DEFAULT '[]',
+  input_snapshot TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  applied_at TEXT
+);
 `;
 
 export interface FakeD1RunResult {

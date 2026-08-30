@@ -32,14 +32,14 @@ test.describe("Teclado e foco — navegação real em Chromium", () => {
     await expect(treinoLink).toBeFocused();
   });
 
-  test("4. botão principal do dashboard (COMEÇAR TREINO) recebe foco e é ativável por teclado", async ({
+  test("4. CTA principal do card de Cronograma (Ver cronograma) recebe foco e é ativável por teclado", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/");
-    const startButton = page.getByRole("button", { name: "COMEÇAR TREINO" });
-    await startButton.focus();
-    await expect(startButton).toBeFocused();
+    const scheduleLink = page.getByRole("link", { name: "Ver cronograma" });
+    await scheduleLink.focus();
+    await expect(scheduleLink).toBeFocused();
   });
 
   test("5-6. item Menu da navegação móvel recebe foco e abre o drawer sem mouse", async ({

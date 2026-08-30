@@ -4,6 +4,7 @@ import { Card } from "../components/Card";
 import { Alert } from "../components/Alert";
 import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
 import { saveOnboardingProgress, OnboardingApiError } from "../api/onboardingClient";
+import { fetchScheduleSummary, updateScheduleTimezone, ScheduleApiError } from "../api/scheduleClient";
 import {
   DAILY_MINUTES_MAX,
   DAILY_MINUTES_MIN,
@@ -26,6 +27,36 @@ export function SettingsPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  const [timezone, setTimezoneState] = useState("");
+  const [isSavingTimezone, setIsSavingTimezone] = useState(false);
+  const [timezoneError, setTimezoneError] = useState<string | null>(null);
+  const [timezoneSuccess, setTimezoneSuccess] = useState(false);
+
+  useEffect(() => {
+    fetchScheduleSummary()
+      .then((summary) => setTimezoneState(summary.timezone))
+      .catch(() => {
+        // Cronograma indisponível — o fuso horário simplesmente não aparece.
+      });
+  }, []);
+
+  async function handleTimezoneSubmit(event: FormEvent) {
+    event.preventDefault();
+    setTimezoneError(null);
+    setTimezoneSuccess(false);
+    setIsSavingTimezone(true);
+    try {
+      await updateScheduleTimezone(timezone);
+      setTimezoneSuccess(true);
+    } catch (error) {
+      setTimezoneError(
+        error instanceof ScheduleApiError ? error.message : "Não foi possível salvar o fuso horário."
+      );
+    } finally {
+      setIsSavingTimezone(false);
+    }
+  }
 
   useEffect(() => {
     if (!profile) return;
@@ -177,6 +208,44 @@ export function SettingsPage() {
           </Button>
         </form>
       </Card>
+
+      {timezone && (
+        <Card>
+          <form onSubmit={handleTimezoneSubmit} noValidate>
+            <h2 className="settings-page__section-title">Fuso horário do cronograma</h2>
+            <p className="settings-page__help">
+              Usado para calcular "hoje" no seu cronograma adaptativo.
+            </p>
+            {timezoneError && (
+              <div style={{ marginBottom: "var(--space-4)" }}>
+                <Alert variant="error">{timezoneError}</Alert>
+              </div>
+            )}
+            {timezoneSuccess && (
+              <div style={{ marginBottom: "var(--space-4)" }}>
+                <Alert variant="success">Fuso horário atualizado.</Alert>
+              </div>
+            )}
+            <div className="settings-page__field">
+              <label htmlFor="settings-timezone">Fuso horário</label>
+              <select
+                id="settings-timezone"
+                value={timezone}
+                onChange={(event) => setTimezoneState(event.target.value)}
+              >
+                <option value="America/Sao_Paulo">Brasília (America/Sao_Paulo)</option>
+                <option value="America/Manaus">Manaus/Amazonas (America/Manaus)</option>
+                <option value="America/Cuiaba">Cuiabá (America/Cuiaba)</option>
+                <option value="America/Rio_Branco">Acre (America/Rio_Branco)</option>
+                <option value="America/Noronha">Fernando de Noronha (America/Noronha)</option>
+              </select>
+            </div>
+            <Button type="submit" isLoading={isSavingTimezone}>
+              Salvar fuso horário
+            </Button>
+          </form>
+        </Card>
+      )}
     </div>
   );
 }

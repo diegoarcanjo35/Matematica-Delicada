@@ -17,9 +17,10 @@ import { ResetPasswordPage } from "./pages/auth/ResetPasswordPage";
 import { ConfirmEmailPage } from "./pages/auth/ConfirmEmailPage";
 import { OnboardingPage } from "./pages/onboarding/OnboardingPage";
 import { DiagnosticPage } from "./pages/diagnostic/DiagnosticPage";
+import { SchedulePage } from "./pages/schedule/SchedulePage";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
-const PLACEHOLDER_ITEMS = STUDENT_NAV_ITEMS.filter((item) => item.path !== "/");
+const PLACEHOLDER_ITEMS = STUDENT_NAV_ITEMS.filter((item) => item.path !== "/" && item.path !== "/cronograma");
 
 export function App() {
   return (
@@ -89,6 +90,7 @@ export function App() {
               />
             ))}
             <Route path="/diagnostico" element={<DiagnosticPage />} />
+            <Route path="/cronograma" element={<SchedulePage />} />
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route
               path="/ajuda"

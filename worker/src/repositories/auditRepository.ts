@@ -15,7 +15,15 @@ export type AuditEventType =
   | "diagnostic_progress_saved"
   | "diagnostic_help_opened"
   | "diagnostic_completed"
-  | "diagnostic_restarted";
+  | "diagnostic_restarted"
+  | "schedule_plan_previewed"
+  | "schedule_plan_applied"
+  | "schedule_activity_started"
+  | "schedule_activity_completed"
+  | "schedule_activity_rescheduled"
+  | "schedule_activity_dismissed"
+  | "schedule_activity_blocked"
+  | "schedule_conflict_detected";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

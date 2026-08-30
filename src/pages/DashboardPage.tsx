@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
@@ -7,12 +7,12 @@ import { Modal } from "../components/Modal";
 import { ProgressBar } from "../components/ProgressBar";
 import { useAuth } from "../auth/useAuth";
 import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
+import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_ENEM_MAP,
   MOCK_PATTERN_CARDS,
   MOCK_STUDENT,
-  MOCK_TODAY_TRAINING,
   MOCK_WEEK_EVOLUTION,
 } from "../mocks/dashboardMock";
 import "./DashboardPage.css";
@@ -26,9 +26,24 @@ function timeOfDayGreeting(): string {
 
 export function DashboardPage() {
   const [isMapModalOpen, setIsMapModalOpen] = useState(false);
+  const [scheduleSummary, setScheduleSummary] = useState<ScheduleSummary | null>(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
   const firstName = user?.name.trim().split(/\s+/)[0] ?? MOCK_STUDENT.firstName;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchScheduleSummary()
+      .then((summary) => {
+        if (!cancelled) setScheduleSummary(summary);
+      })
+      .catch(() => {
+        // Sem cronograma disponível — o card mostra o estado "em preparação".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const goalLabel =
     profile?.goalType === "acertos"
       ? `${profile.goalValue} acertos`
@@ -39,8 +54,8 @@ export function DashboardPage() {
   return (
     <div className="dashboard">
       <p className="dashboard__mock-notice">
-        Sequência, Mapa ENEM, Treino de Hoje e demais números abaixo são dados de
-        demonstração — ainda não refletem seu progresso real.
+        Sequência, Mapa ENEM e demais números abaixo (exceto o card de Cronograma) são
+        dados de demonstração — ainda não refletem seu progresso real.
       </p>
 
       <header className="dashboard__greeting">
@@ -85,22 +100,36 @@ export function DashboardPage() {
         </Card>
 
         <Card className="dashboard__card">
-          <h3>Treino de Hoje</h3>
-          <p className="dashboard__stat">
-            {MOCK_TODAY_TRAINING.questionCount} questões — aproximadamente{" "}
-            {MOCK_TODAY_TRAINING.estimatedMinutes} minutos
-          </p>
-          <ul className="dashboard__pattern-list">
-            {MOCK_TODAY_TRAINING.patterns.map((pattern) => (
-              <li key={pattern.code}>
-                {pattern.name}: {pattern.questionCount}{" "}
-                {pattern.questionCount === 1 ? "questão" : "questões"}
-              </li>
-            ))}
-            <li>Revisão espaçada: {MOCK_TODAY_TRAINING.spacedReviewCount} questão</li>
-          </ul>
-          <p className="dashboard__message">{MOCK_TODAY_TRAINING.message}</p>
-          <Button>COMEÇAR TREINO</Button>
+          <h3>Cronograma</h3>
+          {scheduleSummary?.available ? (
+            <>
+              <p className="dashboard__stat">
+                {scheduleSummary.plannedMinutesToday} de {scheduleSummary.availableMinutesToday} minutos
+                planejados hoje
+              </p>
+              <ProgressBar
+                label="Capacidade de hoje"
+                value={
+                  scheduleSummary.availableMinutesToday > 0
+                    ? Math.min(100, Math.round((scheduleSummary.plannedMinutesToday / scheduleSummary.availableMinutesToday) * 100))
+                    : 0
+                }
+              />
+              {scheduleSummary.pendingCount > 0 && (
+                <p className="dashboard__message">
+                  {scheduleSummary.pendingCount}{" "}
+                  {scheduleSummary.pendingCount === 1 ? "atividade pendente" : "atividades pendentes"} sem data.
+                </p>
+              )}
+              <Link to="/cronograma" className="btn btn--primary">
+                <span>Ver cronograma</span>
+              </Link>
+            </>
+          ) : (
+            <p className="dashboard__message">
+              O cronograma adaptativo está em preparação técnica — ainda não disponível.
+            </p>
+          )}
         </Card>
 
         <Card className="dashboard__card">

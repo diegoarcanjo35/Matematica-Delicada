@@ -5,6 +5,7 @@ import { handleAuthRequest } from "./routes/auth";
 import { handleDevRequest } from "./routes/dev";
 import { handleOnboardingRequest } from "./routes/onboarding";
 import { handleDiagnosticRequest } from "./routes/diagnostic";
+import { handleScheduleRequest } from "./routes/schedule";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -28,6 +29,9 @@ export default {
 
         const diagnosticResponse = await handleDiagnosticRequest(request, env, url);
         if (diagnosticResponse) return diagnosticResponse;
+
+        const scheduleResponse = await handleScheduleRequest(request, env, url);
+        if (scheduleResponse) return scheduleResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

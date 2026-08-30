@@ -12,6 +12,8 @@ export interface Env {
   ALLOW_TEST_RATE_LIMIT_ISOLATION?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   ENABLE_LOCAL_DIAGNOSTIC_FIXTURES?: string;
+  /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
+  ENABLE_LOCAL_SCHEDULE_FIXTURES?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -94,6 +96,19 @@ export function isLocalDiagnosticFixturesAllowed(env: Env, url: URL): boolean {
   return (
     hasLocalDevEnvironmentValue(env) &&
     isTrue(env.ENABLE_LOCAL_DIAGNOSTIC_FIXTURES) &&
+    isRecognizedLocalHostname(url)
+  );
+}
+
+/* Sprint 5 v1.0 — mesmo padrão de falha fechada para as atividades técnicas
+   fictícias do cronograma adaptativo (CONTEÚDO TÉCNICO PROVISÓRIO — ver
+   scripts/fixtures/schedule-fixtures.local.sql). Fora das três condições
+   simultâneas, a API responde "cronograma em preparação" sem tocar nas
+   tabelas schedule_*. */
+export function isLocalScheduleFixturesAllowed(env: Env, url: URL): boolean {
+  return (
+    hasLocalDevEnvironmentValue(env) &&
+    isTrue(env.ENABLE_LOCAL_SCHEDULE_FIXTURES) &&
     isRecognizedLocalHostname(url)
   );
 }

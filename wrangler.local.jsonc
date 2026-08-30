@@ -40,7 +40,13 @@
   // outras duas condições), a API de diagnóstico nunca serve conteúdo de
   // questão — ver worker/src/env.ts:isLocalDiagnosticFixturesAllowed.
   //
-  // Estas quatro flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
+  // Sprint 5 v1.0 — ENABLE_LOCAL_SCHEDULE_FIXTURES habilita as atividades
+  // técnicas fictícias do cronograma adaptativo (CONTEÚDO TÉCNICO
+  // PROVISÓRIO — NÃO PUBLICAR), inseridas só localmente via
+  // scripts/fixtures/schedule-fixtures.local.sql. Mesmo padrão de falha
+  // fechada — ver worker/src/env.ts:isLocalScheduleFixturesAllowed.
+  //
+  // Estas cinco flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
   // falha o deploy se qualquer uma delas aparecer em wrangler.jsonc.
   // ============================================================================
   "name": "matematica-delicada",
@@ -56,7 +62,8 @@
     "DEV_OUTBOX_ENABLED": "true",
     "ALLOW_INSECURE_LOCAL_COOKIE": "true",
     "ALLOW_TEST_RATE_LIMIT_ISOLATION": "true",
-    "ENABLE_LOCAL_DIAGNOSTIC_FIXTURES": "true"
+    "ENABLE_LOCAL_DIAGNOSTIC_FIXTURES": "true",
+    "ENABLE_LOCAL_SCHEDULE_FIXTURES": "true"
   },
   "d1_databases": [
     {
