@@ -1,5 +1,6 @@
 import { findProfile } from "../repositories/onboardingRepository";
 import {
+  buildConditionalTransitionEventStatement,
   buildInsertAssignmentStatement,
   buildInsertEventStatement,
   buildMarkPreviewAppliedStatement,
@@ -293,6 +294,9 @@ export async function getAssignmentDetail(
 
 export interface TransitionResult {
   ok: boolean;
+  // Correção v1.2 — distingue mutação real de repetição idempotente, para
+  // que o chamador (rota HTTP) só audite quando algo de fato mudou.
+  changed?: boolean;
   notFound?: boolean;
   conflict?: boolean;
   fieldErrors?: Record<string, string>;
@@ -314,7 +318,7 @@ async function applyGuardedTransition(
   const before = await findAssignment(db, params.assignmentId);
   if (!before || before.user_id !== params.userId) return { ok: false, notFound: true };
 
-  const statement = buildTransitionStatement(db, {
+  const updateStatement = buildTransitionStatement(db, {
     assignmentId: params.assignmentId,
     userId: params.userId,
     expectedVersion: params.expectedVersion,
@@ -323,27 +327,36 @@ async function applyGuardedTransition(
     reason: params.reason,
     timestampColumn: params.timestampColumn,
   });
-  const [result] = await db.batch([statement]);
+  // Correção v1.2 — UPDATE da transição e INSERT do histórico no MESMO
+  // db.batch() (uma única transação): o evento só persiste se a linha, já
+  // depois do UPDATE anterior no mesmo lote, estiver exatamente na
+  // versão/estado alvo. Uma falha forçada em qualquer um dos dois statements
+  // reverte o lote inteiro — nunca fica estado alterado sem o evento
+  // correspondente.
+  const eventStatement = buildConditionalTransitionEventStatement(db, {
+    id: newId(),
+    assignmentId: params.assignmentId,
+    userId: params.userId,
+    fromStatus: before.status,
+    toStatus: params.toStatus,
+    reason: params.reason,
+    expectedVersionAfter: params.expectedVersion + 1,
+  });
+  const [updateResult] = await db.batch([updateStatement, eventStatement]);
 
-  if (result.meta.changes === 1) {
-    await db.batch([
-      buildInsertEventStatement(db, {
-        id: newId(),
-        assignmentId: params.assignmentId,
-        userId: params.userId,
-        fromStatus: before.status,
-        toStatus: params.toStatus,
-        reason: params.reason,
-      }),
-    ]);
-    return { ok: true };
+  if (updateResult.meta.changes === 1) {
+    return { ok: true, changed: true };
   }
 
   const after = await findAssignment(db, params.assignmentId);
   if (!after) return { ok: false, notFound: true };
   if (after.status === params.toStatus && after.version === params.expectedVersion + 1) {
-    // Repetição idempotente da mesma transição já concluída — sem novo evento.
-    return { ok: true };
+    // Repetição idempotente da mesma transição já concluída. O UPDATE não
+    // mudou nada agora (a versão enviada já está obsoleta), e o evento
+    // também não duplicou — o guard `NOT EXISTS` de
+    // buildConditionalTransitionEventStatement já impediu isso, já que o
+    // evento real foi gravado na primeira chamada.
+    return { ok: true, changed: false };
   }
   if (after.version !== params.expectedVersion) {
     return { ok: false, conflict: true };

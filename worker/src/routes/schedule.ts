@@ -121,7 +121,11 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
     if (!versionResult.ok) return versionResult.response;
     const result = await startAssignment(env.DB, user.id, startMatch[1], versionResult.version);
     if (!result.ok) return transitionErrorResponse(result);
-    await audit(env, "schedule_activity_started", user.id, { assignmentId: startMatch[1] });
+    // Correção v1.2 — só audita quando houve mutação real, nunca numa
+    // repetição idempotente.
+    if (result.changed) {
+      await audit(env, "schedule_activity_started", user.id, { assignmentId: startMatch[1] });
+    }
     return json({ ok: true });
   }
 
@@ -131,7 +135,9 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
     if (!versionResult.ok) return versionResult.response;
     const result = await completeAssignment(env.DB, user.id, completeMatch[1], versionResult.version);
     if (!result.ok) return transitionErrorResponse(result);
-    await audit(env, "schedule_activity_completed", user.id, { assignmentId: completeMatch[1] });
+    if (result.changed) {
+      await audit(env, "schedule_activity_completed", user.id, { assignmentId: completeMatch[1] });
+    }
     return json({ ok: true });
   }
 
@@ -141,7 +147,9 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
     if (!versionResult.ok) return versionResult.response;
     const result = await dismissAssignment(env.DB, user.id, dismissMatch[1], versionResult.version);
     if (!result.ok) return transitionErrorResponse(result);
-    await audit(env, "schedule_activity_dismissed", user.id, { assignmentId: dismissMatch[1] });
+    if (result.changed) {
+      await audit(env, "schedule_activity_dismissed", user.id, { assignmentId: dismissMatch[1] });
+    }
     return json({ ok: true });
   }
 
@@ -164,7 +172,9 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
     }
     const result = await blockAssignment(env.DB, user.id, blockMatch[1], versionResult.value!, reasonResult.value!);
     if (!result.ok) return transitionErrorResponse(result);
-    await audit(env, "schedule_activity_blocked", user.id, { assignmentId: blockMatch[1], reason: reasonResult.value! });
+    if (result.changed) {
+      await audit(env, "schedule_activity_blocked", user.id, { assignmentId: blockMatch[1], reason: reasonResult.value! });
+    }
     return json({ ok: true });
   }
 

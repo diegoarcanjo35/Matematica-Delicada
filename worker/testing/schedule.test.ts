@@ -738,6 +738,140 @@ describe("cronograma — bloqueio de atividade (correção v1.1)", () => {
   });
 });
 
+/* Correção v1.2 — applyGuardedTransition() fazia o UPDATE da transição num
+   db.batch() e o INSERT do histórico num SEGUNDO db.batch() separado, então
+   os dois não eram atômicos entre si; além disso as rotas auditavam sempre
+   que a chamada retornava ok:true, mesmo numa repetição idempotente,
+   duplicando o evento em audit_log (embora schedule_activity_events já não
+   duplicasse). Testado para as quatro transições que passam por
+   applyGuardedTransition: start, complete, dismiss, block. */
+interface TransitionCase {
+  name: string;
+  path: (id: string) => string;
+  toStatus: string;
+  auditEventType: string;
+  extraBody?: Record<string, unknown>;
+}
+
+const TRANSITION_CASES: TransitionCase[] = [
+  { name: "start", path: (id) => `/api/schedule/activities/${id}/start`, toStatus: "in_progress", auditEventType: "schedule_activity_started" },
+  { name: "complete", path: (id) => `/api/schedule/activities/${id}/complete`, toStatus: "completed", auditEventType: "schedule_activity_completed" },
+  { name: "dismiss", path: (id) => `/api/schedule/activities/${id}/dismiss`, toStatus: "dismissed", auditEventType: "schedule_activity_dismissed" },
+  {
+    name: "block",
+    path: (id) => `/api/schedule/activities/${id}/block`,
+    toStatus: "blocked",
+    auditEventType: "schedule_activity_blocked",
+    extraBody: { reason: "content_unavailable" },
+  },
+];
+
+describe("cronograma — atomicidade e idempotência das transições (correção v1.2)", () => {
+  for (const testCase of TRANSITION_CASES) {
+    describe(`transição: ${testCase.name}`, () => {
+      function countEventsFor(assignmentId: string): number {
+        return (
+          db.sqlite
+            .prepare("SELECT COUNT(*) as count FROM schedule_activity_events WHERE assignment_id = ? AND to_status = ?")
+            .get(assignmentId, testCase.toStatus) as { count: number }
+        ).count;
+      }
+      function countAuditFor(userId: string): number {
+        return (
+          db.sqlite
+            .prepare("SELECT COUNT(*) as count FROM audit_log WHERE user_id = ? AND event_type = ?")
+            .get(userId, testCase.auditEventType) as { count: number }
+        ).count;
+      }
+
+      it("sucesso cria exatamente um histórico e um registro de auditoria", async () => {
+        const userId = `user-atomic-${testCase.name}-1`;
+        const token = await seedUserWithSession(userId);
+        const localEnv = { DB: db, ENVIRONMENT: "test", ENABLE_LOCAL_SCHEDULE_FIXTURES: "true" } as never;
+        const id = await seedAssignment(userId, "test-sched-a1", TODAY, 0);
+
+        const request = requestWithCookie(testCase.path(id), "POST", token, { version: 1, ...testCase.extraBody });
+        const response = await handleScheduleRequest(request, localEnv, new URL(`http://localhost${testCase.path(id)}`));
+        expect(response?.status).toBe(200);
+
+        expect(countEventsFor(id)).toBe(1);
+        expect(countAuditFor(userId)).toBe(1);
+      });
+
+      it("repetição idempotente retorna sucesso, mas não duplica histórico nem auditoria", async () => {
+        const userId = `user-atomic-${testCase.name}-2`;
+        const token = await seedUserWithSession(userId);
+        const localEnv = { DB: db, ENVIRONMENT: "test", ENABLE_LOCAL_SCHEDULE_FIXTURES: "true" } as never;
+        const id = await seedAssignment(userId, "test-sched-a1", TODAY, 0);
+
+        for (let i = 0; i < 2; i++) {
+          const request = requestWithCookie(testCase.path(id), "POST", token, { version: 1, ...testCase.extraBody });
+          const response = await handleScheduleRequest(request, localEnv, new URL(`http://localhost${testCase.path(id)}`));
+          expect(response?.status).toBe(200);
+        }
+
+        expect(countEventsFor(id)).toBe(1);
+        expect(countAuditFor(userId)).toBe(1);
+      });
+
+      it("versão desatualizada retorna conflito e não cria evento em nenhuma das duas tabelas", async () => {
+        const userId = `user-atomic-${testCase.name}-3`;
+        const token = await seedUserWithSession(userId);
+        const localEnv = { DB: db, ENVIRONMENT: "test", ENABLE_LOCAL_SCHEDULE_FIXTURES: "true" } as never;
+        const id = await seedAssignment(userId, "test-sched-a1", TODAY, 0); // version real = 1
+
+        const request = requestWithCookie(testCase.path(id), "POST", token, { version: 99, ...testCase.extraBody });
+        const response = await handleScheduleRequest(request, localEnv, new URL(`http://localhost${testCase.path(id)}`));
+        expect(response?.status).toBe(409);
+
+        expect(countEventsFor(id)).toBe(0);
+        expect(countAuditFor(userId)).toBe(0);
+      });
+
+      it("falha forçada na inserção do histórico reverte a mudança de estado (mesmo lote)", async () => {
+        const userId = `user-atomic-${testCase.name}-4`;
+        await seedUser(userId);
+        const id = await seedAssignment(userId, "test-sched-a1", TODAY, 0);
+
+        db.failNextMatching(/INSERT INTO schedule_activity_events/);
+        let threw = false;
+        try {
+          if (testCase.name === "start") await startAssignment(db as never, userId, id, 1);
+          else if (testCase.name === "complete") await completeAssignment(db as never, userId, id, 1);
+          else if (testCase.name === "dismiss") await dismissAssignment(db as never, userId, id, 1);
+          else await blockAssignment(db as never, userId, id, 1, "content_unavailable");
+        } catch {
+          threw = true;
+        }
+        expect(threw).toBe(true);
+
+        const row = await findAssignment(db as never, id);
+        expect(row?.status).toBe("not_started"); // o UPDATE no mesmo lote também reverteu
+        expect(row?.version).toBe(1);
+        expect(countEventsFor(id)).toBe(0);
+      });
+
+      it("falha forçada no UPDATE não cria histórico nem auditoria", async () => {
+        const userId = `user-atomic-${testCase.name}-5`;
+        const token = await seedUserWithSession(userId);
+        const localEnv = { DB: db, ENVIRONMENT: "test", ENABLE_LOCAL_SCHEDULE_FIXTURES: "true" } as never;
+        const id = await seedAssignment(userId, "test-sched-a1", TODAY, 0);
+
+        db.failNextMatching(/UPDATE schedule_activity_assignments\s+SET status/);
+        const request = requestWithCookie(testCase.path(id), "POST", token, { version: 1, ...testCase.extraBody });
+        await expect(
+          handleScheduleRequest(request, localEnv, new URL(`http://localhost${testCase.path(id)}`))
+        ).rejects.toThrow();
+
+        const row = await findAssignment(db as never, id);
+        expect(row?.status).toBe("not_started");
+        expect(countEventsFor(id)).toBe(0);
+        expect(countAuditFor(userId)).toBe(0);
+      });
+    });
+  }
+});
+
 /* ---------------------------------------------------------------------- */
 /* Reagendamento (histórico, capacidade, rollback)                         */
 /* ---------------------------------------------------------------------- */

@@ -211,6 +211,64 @@ export function buildInsertEventStatement(
     .bind(params.id, params.assignmentId, params.userId, params.fromStatus, params.toStatus, params.reason);
 }
 
+/** Correção v1.2 — histórico condicionado, para compor no MESMO db.batch()
+ *  do UPDATE da transição (nunca um segundo batch separado): o INSERT só
+ *  persiste se, NAQUELE MOMENTO da transação (depois do UPDATE anterior no
+ *  mesmo lote ter rodado), a linha estiver exatamente no estado/versão alvo
+ *  E ainda não existir nenhum evento prévio para esta atribuição com este
+ *  `to_status`.
+ *
+ *  A segunda condição é essencial: sem ela, um REENVIO idempotente com a
+ *  mesma `expectedVersion` já obsoleta veria o UPDATE falhar (guard de
+ *  versão não bate, `changes = 0`), mas a linha JÁ estaria (desde a
+ *  chamada real anterior) no estado/versão alvo — a primeira condição
+ *  sozinha bateria de novo e duplicaria o evento. Para as quatro transições
+ *  que usam este helper (start/complete/dismiss/block), cada
+ *  `(assignment_id, to_status)` só pode ser alcançado uma única vez de
+ *  verdade (todas terminam num estado final ou consomem o único
+ *  `not_started` possível), então "nenhum evento prévio com este to_status"
+ *  é equivalente a "esta é a primeira vez que a transição realmente
+ *  acontece" — sem precisar de coluna nova nem migration. */
+export function buildConditionalTransitionEventStatement(
+  db: D1Database,
+  params: {
+    id: string;
+    assignmentId: string;
+    userId: string;
+    fromStatus: string | null;
+    toStatus: string;
+    reason: string | null;
+    expectedVersionAfter: number;
+  }
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO schedule_activity_events (id, assignment_id, user_id, from_status, to_status, reason)
+       SELECT ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM schedule_activity_assignments
+         WHERE id = ? AND user_id = ? AND status = ? AND version = ?
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM schedule_activity_events WHERE assignment_id = ? AND to_status = ?
+       )`
+    )
+    .bind(
+      params.id,
+      params.assignmentId,
+      params.userId,
+      params.fromStatus,
+      params.toStatus,
+      params.reason,
+      params.assignmentId,
+      params.userId,
+      params.toStatus,
+      params.expectedVersionAfter,
+      params.assignmentId,
+      params.toStatus
+    );
+}
+
 /** Guard reutilizado por todas as transições: usuário dono, versão exata e
  *  status atual dentre os permitidos — tudo dentro do MESMO statement
  *  condicionado, nunca uma corrida entre ler e gravar. */
