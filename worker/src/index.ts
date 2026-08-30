@@ -7,6 +7,8 @@ import { handleOnboardingRequest } from "./routes/onboarding";
 import { handleDiagnosticRequest } from "./routes/diagnostic";
 import { handleScheduleRequest } from "./routes/schedule";
 import { handlePatternsRequest } from "./routes/patterns";
+import { handleEditorialQuestionsRequest } from "./routes/editorialQuestions";
+import { handleEditorialImportsRequest } from "./routes/editorialImports";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -36,6 +38,12 @@ export default {
 
         const patternsResponse = await handlePatternsRequest(request, env, url);
         if (patternsResponse) return patternsResponse;
+
+        const editorialQuestionsResponse = await handleEditorialQuestionsRequest(request, env, url);
+        if (editorialQuestionsResponse) return editorialQuestionsResponse;
+
+        const editorialImportsResponse = await handleEditorialImportsRequest(request, env, url);
+        if (editorialImportsResponse) return editorialImportsResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

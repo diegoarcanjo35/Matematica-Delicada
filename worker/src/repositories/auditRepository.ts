@@ -23,7 +23,11 @@ export type AuditEventType =
   | "schedule_activity_rescheduled"
   | "schedule_activity_dismissed"
   | "schedule_activity_blocked"
-  | "schedule_conflict_detected";
+  | "schedule_conflict_detected"
+  | "editorial_role_granted"
+  | "editorial_question_import_previewed"
+  | "editorial_question_import_applied"
+  | "editorial_question_import_undone";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

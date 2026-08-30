@@ -16,6 +16,8 @@ export interface Env {
   ENABLE_LOCAL_SCHEDULE_FIXTURES?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   ENABLE_LOCAL_PATTERN_FIXTURES?: string;
+  /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
+  ENABLE_LOCAL_EDITORIAL_FIXTURES?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -125,6 +127,25 @@ export function isLocalPatternFixturesAllowed(env: Env, url: URL): boolean {
   return (
     hasLocalDevEnvironmentValue(env) &&
     isTrue(env.ENABLE_LOCAL_PATTERN_FIXTURES) &&
+    isRecognizedLocalHostname(url)
+  );
+}
+
+/* Sprint 7 v1.0 — mesmo padrão de falha fechada, usado para DUAS coisas
+   distintas do Banco de Questões, ambas sensíveis:
+     1) o bootstrap local que concede papéis editor/admin (seção 4.2 da
+        ordem) — nunca por GET, nunca por cadastro comum, só por uma ação
+        explícita de setup local atrás deste gate;
+     2) as questões técnicas fictícias (CONTEÚDO TÉCNICO PROVISÓRIO PARA
+        DESENVOLVIMENTO LOCAL — NÃO PUBLICAR — ver
+        scripts/fixtures/questions-fixtures.local.sql).
+   Fora das três condições simultâneas (ambiente local + flag exclusiva de
+   wrangler.local.jsonc + hostname local reconhecido, nunca X-Forwarded-Host),
+   nenhum papel é concedido e nenhum conteúdo de fixture é servido. */
+export function isLocalEditorialFixturesAllowed(env: Env, url: URL): boolean {
+  return (
+    hasLocalDevEnvironmentValue(env) &&
+    isTrue(env.ENABLE_LOCAL_EDITORIAL_FIXTURES) &&
     isRecognizedLocalHostname(url)
   );
 }

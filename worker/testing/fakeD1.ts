@@ -321,6 +321,166 @@ CREATE TABLE student_pattern_progress (
 );
 
 CREATE INDEX idx_student_pattern_progress_user ON student_pattern_progress (user_id);
+
+-- Sprint 7 v1.0 (migration 0008) — Banco de Questões e Importação Editorial.
+-- Espelho manual do DDL de migrations/0008_question_bank_editorial.sql; os
+-- dois precisam ser mantidos em sincronia.
+CREATE TABLE roles (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK (name IN ('student', 'teacher', 'editor', 'admin', 'support', 'commercial')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_roles_name ON roles (name);
+
+CREATE TABLE user_roles (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  role_id TEXT NOT NULL REFERENCES roles (id),
+  granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  granted_by TEXT REFERENCES users (id)
+);
+CREATE UNIQUE INDEX idx_user_roles_unique ON user_roles (user_id, role_id);
+CREATE INDEX idx_user_roles_user ON user_roles (user_id);
+
+CREATE TABLE questions (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  enunciado TEXT NOT NULL,
+  resolucao_comentada TEXT NOT NULL DEFAULT '',
+  conteudo TEXT NOT NULL DEFAULT '',
+  subconteudo TEXT NOT NULL DEFAULT '',
+  habilidade TEXT NOT NULL DEFAULT '',
+  competencia TEXT NOT NULL DEFAULT '',
+  dificuldade TEXT NOT NULL CHECK (dificuldade IN ('facil', 'media', 'dificil')),
+  origem TEXT NOT NULL CHECK (origem IN (
+    'oficial', 'autoral', 'licenciada', 'diagnostico', 'reconhecimento', 'revisao_base'
+  )),
+  prova TEXT,
+  ano INTEGER,
+  tempo_estimado_segundos INTEGER,
+  tipo_calculo TEXT NOT NULL DEFAULT 'misto' CHECK (tipo_calculo IN ('mental', 'escrito', 'misto')),
+  necessita_calculadora INTEGER NOT NULL DEFAULT 0 CHECK (necessita_calculadora IN (0, 1)),
+  editorial_status TEXT NOT NULL DEFAULT 'draft' CHECK (editorial_status IN (
+    'draft', 'in_review', 'changes_requested', 'approved', 'published', 'archived'
+  )),
+  autor_id TEXT REFERENCES users (id),
+  revisor_id TEXT REFERENCES users (id),
+  titular_direitos TEXT,
+  base_licenca TEXT,
+  texto_atribuicao TEXT,
+  fingerprint TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  is_local_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_local_fixture IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_questions_code ON questions (code);
+CREATE INDEX idx_questions_fingerprint ON questions (fingerprint);
+CREATE INDEX idx_questions_editorial_status ON questions (editorial_status);
+CREATE INDEX idx_questions_autor ON questions (autor_id);
+
+CREATE TABLE question_alternatives (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  letter TEXT NOT NULL CHECK (letter IN ('A', 'B', 'C', 'D', 'E')),
+  text TEXT NOT NULL CHECK (length(trim(text)) > 0),
+  is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1)),
+  distractor_explanation TEXT,
+  position INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_question_alternatives_letter ON question_alternatives (question_id, letter);
+CREATE INDEX idx_question_alternatives_question ON question_alternatives (question_id);
+
+CREATE TABLE question_images (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  asset_ref TEXT NOT NULL,
+  alt_text TEXT NOT NULL DEFAULT '',
+  caption TEXT,
+  position INTEGER NOT NULL DEFAULT 0,
+  titular_direitos TEXT,
+  base_licenca TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_question_images_question ON question_images (question_id, position);
+
+CREATE TABLE question_patterns (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  role TEXT NOT NULL CHECK (role IN ('principal', 'secundario')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_question_patterns_unique ON question_patterns (question_id, pattern_id);
+CREATE UNIQUE INDEX idx_question_patterns_one_principal ON question_patterns (question_id) WHERE role = 'principal';
+CREATE INDEX idx_question_patterns_pattern ON question_patterns (pattern_id);
+
+CREATE TABLE question_tags (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_question_tags_unique ON question_tags (question_id, content);
+CREATE INDEX idx_question_tags_question ON question_tags (question_id, position);
+
+CREATE TABLE question_dna (
+  question_id TEXT PRIMARY KEY REFERENCES questions (id),
+  pista TEXT NOT NULL DEFAULT '',
+  estrategia TEXT NOT NULL DEFAULT '',
+  pegadinha TEXT NOT NULL DEFAULT '',
+  conteudo_apoio TEXT NOT NULL DEFAULT '',
+  resolucao TEXT NOT NULL DEFAULT '',
+  atalho TEXT,
+  aprendizado_erro TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE question_history (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  user_id TEXT REFERENCES users (id),
+  action TEXT NOT NULL CHECK (action IN (
+    'created', 'updated', 'submitted_review', 'changes_requested',
+    'approved', 'published', 'archived', 'import_applied', 'import_undone'
+  )),
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_question_history_question ON question_history (question_id, created_at);
+
+CREATE TABLE question_import_batches (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  status TEXT NOT NULL DEFAULT 'previewed' CHECK (status IN ('previewed', 'applied', 'undone', 'expired')),
+  row_count INTEGER NOT NULL,
+  valid_row_count INTEGER NOT NULL,
+  error_count INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  input_fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  applied_at TEXT,
+  undone_at TEXT
+);
+CREATE INDEX idx_question_import_batches_user ON question_import_batches (user_id);
+
+CREATE TABLE question_import_items (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES question_import_batches (id),
+  row_number INTEGER NOT NULL,
+  code TEXT NOT NULL,
+  question_id TEXT REFERENCES questions (id)
+);
+CREATE INDEX idx_question_import_items_batch ON question_import_items (batch_id);
 `;
 
 export interface FakeD1RunResult {

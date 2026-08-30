@@ -52,7 +52,16 @@
   // localmente via scripts/fixtures/patterns-fixtures.local.sql. Mesmo
   // padrão de falha fechada — ver worker/src/env.ts:isLocalPatternFixturesAllowed.
   //
-  // Estas seis flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
+  // Sprint 7 v1.0 — ENABLE_LOCAL_EDITORIAL_FIXTURES habilita (a) o bootstrap
+  // local que concede papéis editor/admin (nunca por GET, nunca por cadastro
+  // comum — seção 4.2 da ordem) e (b) as questões técnicas fictícias do Banco
+  // de Questões (CONTEÚDO TÉCNICO PROVISÓRIO — NÃO PUBLICAR — NÃO É QUESTÃO
+  // OFICIAL), inseridas só localmente via
+  // scripts/fixtures/questions-fixtures.local.sql e
+  // scripts/fixtures/roles-fixtures.local.sql. Mesmo padrão de falha fechada
+  // — ver worker/src/env.ts:isLocalEditorialFixturesAllowed.
+  //
+  // Estas sete flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
   // falha o deploy se qualquer uma delas aparecer em wrangler.jsonc.
   // ============================================================================
   "name": "matematica-delicada",
@@ -70,7 +79,8 @@
     "ALLOW_TEST_RATE_LIMIT_ISOLATION": "true",
     "ENABLE_LOCAL_DIAGNOSTIC_FIXTURES": "true",
     "ENABLE_LOCAL_SCHEDULE_FIXTURES": "true",
-    "ENABLE_LOCAL_PATTERN_FIXTURES": "true"
+    "ENABLE_LOCAL_PATTERN_FIXTURES": "true",
+    "ENABLE_LOCAL_EDITORIAL_FIXTURES": "true"
   },
   "d1_databases": [
     {

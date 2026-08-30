@@ -1,0 +1,170 @@
+/* Estilos mínimos do shell editorial — Sprint 7 v1.0. Reutiliza os tokens
+   visuais já definidos globalmente (mesma convenção de PatternsPage.css/
+   SchedulePage.css); não introduz nova paleta. Responsivo: nenhuma rolagem
+   horizontal na página — tabelas largas rolam dentro de .editorial__table-wrap. */
+
+.editorial {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 100%;
+}
+
+.editorial--centered {
+  align-items: center;
+  justify-content: center;
+  min-height: 40vh;
+  text-align: center;
+}
+
+.editorial__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.editorial__search,
+.editorial__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.editorial__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.editorial__field-label {
+  font-weight: 600;
+}
+
+.editorial__field-error {
+  color: #b3261e;
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.editorial__table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.editorial__table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+.editorial__table th,
+.editorial__table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.editorial__table-enunciado {
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editorial__status {
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.editorial__status--published {
+  background: #d7f0da;
+}
+.editorial__status--draft {
+  background: #eee;
+}
+.editorial__status--in_review {
+  background: #fff3cd;
+}
+.editorial__status--changes_requested {
+  background: #fde2e1;
+}
+.editorial__status--approved {
+  background: #d9e8ff;
+}
+.editorial__status--archived {
+  background: #ddd;
+}
+
+.editorial__fixture-badge {
+  font-size: 0.7rem;
+  color: #b3261e;
+  font-weight: 700;
+}
+
+.editorial__fixture-notice,
+.editorial__locked-notice {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  background: #fff3cd;
+}
+
+.editorial__conflict {
+  border: 2px solid #b3261e;
+}
+
+.editorial__pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.editorial__section {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.editorial__alternative {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.editorial__alternative-letter {
+  font-weight: 700;
+  min-width: 1.5rem;
+}
+
+.editorial__alternative input[type="text"],
+.editorial__alternative input:not([type]) {
+  flex: 1;
+}
+
+.editorial__actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.editorial__nav-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+@media (max-width: 480px) {
+  .editorial__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

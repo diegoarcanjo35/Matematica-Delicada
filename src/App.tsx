@@ -20,6 +20,10 @@ import { DiagnosticPage } from "./pages/diagnostic/DiagnosticPage";
 import { SchedulePage } from "./pages/schedule/SchedulePage";
 import { PatternsPage } from "./pages/patterns/PatternsPage";
 import { PatternDetailPage } from "./pages/patterns/PatternDetailPage";
+import { EditorialQuestionsPage } from "./pages/editorial/EditorialQuestionsPage";
+import { EditorialQuestionFormPage } from "./pages/editorial/EditorialQuestionFormPage";
+import { EditorialImportsPage } from "./pages/editorial/EditorialImportsPage";
+import { RequireEditorialRole } from "./auth/RequireEditorialRole";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
 // Rotas do menu do aluno que já têm tela real e por isso NÃO recebem
@@ -69,6 +73,27 @@ export function App() {
             <PlaceholderPage title="Política de Privacidade" description="Conteúdo jurídico definitivo pendente." />
           }
         />
+
+        {/* Área editorial — Sprint 7 v1.0. Exige sessão válida (ProtectedRoute)
+            E papel editor/admin (RequireEditorialRole, que consulta o banco via
+            /api/editorial/me). Deliberadamente FORA do StudentLayout/
+            OnboardingStatusProvider/menu do aluno (seção 9 da ordem: "Não
+            adicionar ao menu do aluno") — só alcançável por navegação direta
+            à URL, e mesmo assim bloqueada sem papel. */}
+        <Route
+          element={
+            <ProtectedRoute>
+              <RequireEditorialRole>
+                <Outlet />
+              </RequireEditorialRole>
+            </ProtectedRoute>
+          }
+        >
+          <Route path="/editorial/questoes" element={<EditorialQuestionsPage />} />
+          <Route path="/editorial/questoes/nova" element={<EditorialQuestionFormPage />} />
+          <Route path="/editorial/questoes/:id" element={<EditorialQuestionFormPage />} />
+          <Route path="/editorial/importacoes" element={<EditorialImportsPage />} />
+        </Route>
 
         {/* Área do aluno — exige sessão válida no servidor. OnboardingStatusProvider
             fica aqui, acima de /onboarding e da área gated, para que ambos

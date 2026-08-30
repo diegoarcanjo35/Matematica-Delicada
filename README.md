@@ -187,6 +187,7 @@ wrangler.local.jsonc    configuração EXCLUSIVAMENTE LOCAL — nunca usada para
 | `/padroes-enem/:slug` | Ficha técnica de um padrão | **exige sessão** |
 | `/treino-diario`, `/reconheca-o-padrao`, `/banco-de-questoes`, `/simulados`, `/caderno-de-erros`, `/desempenho`, `/aulas-e-estrategias`, `/conquistas` | Placeholder | **exige sessão** |
 | `/configuracoes`, `/ajuda`, `/assinatura` | Placeholder | **exige sessão** |
+| `/editorial/questoes`, `/editorial/questoes/nova`, `/editorial/questoes/:id`, `/editorial/importacoes` | Banco de Questões editorial (Sprint 7 — ver `docs/BANCO_QUESTOES.md`); **fora do menu do aluno**, só alcançável por navegação direta | **exige sessão + papel editor/admin** |
 | qualquer outra rota | Página 404 | público |
 
 Visitante sem sessão que tenta acessar uma rota protegida é redirecionado para
