@@ -47,7 +47,7 @@ npm run worker:preview
 ```
 
 Builda o frontend, aplica as migrations no D1 local e sobe o Worker (API + assets) em
-`http://localhost:8788`. Veja a seção "Worker + Assets + D1 local" abaixo para os
+`http://localhost:8793`. Veja a seção "Worker + Assets + D1 local" abaixo para os
 detalhes de cada etapa.
 
 Para trabalhar só na interface, sem a API (as telas de autenticação não vão funcionar
@@ -105,7 +105,7 @@ npm run worker:preview
 ```
 
 Esse comando builda a aplicação, aplica as migrations no D1 local e sobe um Cloudflare
-Worker completo (API + assets estáticos) **100% local**, na porta 8788. Ele:
+Worker completo (API + assets estáticos) **100% local**, na porta 8793. Ele:
 
 - serve a SPA com fallback de rota (`not_found_handling: "single-page-application"`);
 - expõe a API de autenticação em `/api/auth/*` (ver `docs/AUTENTICACAO.md` para o

@@ -4,6 +4,7 @@ import { isMutationMethod, isOriginAllowed } from "./lib/origin";
 import { handleAuthRequest } from "./routes/auth";
 import { handleDevRequest } from "./routes/dev";
 import { handleOnboardingRequest } from "./routes/onboarding";
+import { handleDiagnosticRequest } from "./routes/diagnostic";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -24,6 +25,9 @@ export default {
 
         const onboardingResponse = await handleOnboardingRequest(request, env, url);
         if (onboardingResponse) return onboardingResponse;
+
+        const diagnosticResponse = await handleDiagnosticRequest(request, env, url);
+        if (diagnosticResponse) return diagnosticResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

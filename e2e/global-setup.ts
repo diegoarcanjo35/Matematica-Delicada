@@ -7,7 +7,7 @@ import { testClientIdHeader } from "./rateLimitIsolation";
    precisem repetir login em cada arquivo. Testes que precisam começar deslogados
    usam test.use({ storageState: { cookies: [], origins: [] } }) por arquivo. */
 
-const BASE_URL = "http://localhost:8788";
+const BASE_URL = "http://localhost:8793";
 // Isola o signup/login deste setup do contador de IP dos demais arquivos —
 // mesma correção estrutural da Sprint 3 v1.2 (ver e2e/rateLimitIsolation.ts).
 const TEST_CLIENT_ID_HEADER = testClientIdHeader("global-setup");

@@ -16,6 +16,7 @@ import { ForgotPasswordPage } from "./pages/auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "./pages/auth/ResetPasswordPage";
 import { ConfirmEmailPage } from "./pages/auth/ConfirmEmailPage";
 import { OnboardingPage } from "./pages/onboarding/OnboardingPage";
+import { DiagnosticPage } from "./pages/diagnostic/DiagnosticPage";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
 const PLACEHOLDER_ITEMS = STUDENT_NAV_ITEMS.filter((item) => item.path !== "/");
@@ -87,15 +88,7 @@ export function App() {
                 element={<PlaceholderPage title={item.label} description={item.description} />}
               />
             ))}
-            <Route
-              path="/diagnostico"
-              element={
-                <PlaceholderPage
-                  title="Diagnóstico"
-                  description="Será implementado na próxima sprint."
-                />
-              }
-            />
+            <Route path="/diagnostico" element={<DiagnosticPage />} />
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route
               path="/ajuda"

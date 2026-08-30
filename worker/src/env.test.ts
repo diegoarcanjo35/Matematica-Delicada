@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { isDevOutboxAllowed, isTestRateLimitIsolationAllowed, shouldOmitSecureCookie, type Env } from "./env";
+import {
+  isDevOutboxAllowed,
+  isLocalDiagnosticFixturesAllowed,
+  isTestRateLimitIsolationAllowed,
+  shouldOmitSecureCookie,
+  type Env,
+} from "./env";
 
 function envWith(overrides: Partial<Env>): Env {
   return { DB: {} as never, ASSETS: {} as never, ...overrides };
@@ -101,5 +107,37 @@ describe("isTestRateLimitIsolationAllowed — três condições obrigatórias (a
     const productionEnv = envWith({}); // sem ENVIRONMENT, sem a flag — configuração implantável real
     const productionUrl = new URL("https://matematica-delicada.proffandreia5.workers.dev/api/auth/signup");
     expect(isTestRateLimitIsolationAllowed(productionEnv, productionUrl)).toBe(false);
+  });
+});
+
+/* Sprint 4 v1.0 — as fixtures do diagnóstico (CONTEÚDO TÉCNICO PROVISÓRIO)
+   só podem ser servidas sob as mesmas três condições de falha fechada. */
+describe("isLocalDiagnosticFixturesAllowed — três condições obrigatórias (ambiente + flag local + hostname)", () => {
+  it.each([
+    ["development + true + localhost", "development", "true", "http://localhost:8788", true],
+    ["test + true + 127.0.0.1", "test", "true", "http://127.0.0.1:8788", true],
+    ["development + true + [::1]", "development", "true", "http://[::1]:8788", true],
+    ["development + ausente/false + localhost", "development", undefined, "http://localhost:8788", false],
+    ["development + \"false\" + localhost", "development", "false", "http://localhost:8788", false],
+    ["test + ausente/false + localhost", "test", undefined, "http://localhost:8788", false],
+    ["production + true + localhost", "production", "true", "http://localhost:8788", false],
+    ["ausente + true + localhost", undefined, "true", "http://localhost:8788", false],
+    [
+      "development + true + workers.dev",
+      "development",
+      "true",
+      "https://matematica-delicada.proffandreia5.workers.dev",
+      false,
+    ],
+    ["development + true + domínio arbitrário", "development", "true", "https://exemplo.com", false],
+  ])("%s -> habilitado? %s", (_label, environment, flag, urlStr, expectedEnabled) => {
+    const env = envWith({ ENVIRONMENT: environment, ENABLE_LOCAL_DIAGNOSTIC_FIXTURES: flag });
+    expect(isLocalDiagnosticFixturesAllowed(env, new URL(urlStr))).toBe(expectedEnabled);
+  });
+
+  it("produção real (sem a flag, sem ENVIRONMENT local, hostname público) nunca serve conteúdo de fixture", () => {
+    const productionEnv = envWith({});
+    const productionUrl = new URL("https://matematica-delicada.proffandreia5.workers.dev/api/diagnostic/status");
+    expect(isLocalDiagnosticFixturesAllowed(productionEnv, productionUrl)).toBe(false);
   });
 });

@@ -1,0 +1,39 @@
+{
+  // ============================================================================
+  // CONFIGURAÇÃO EXCLUSIVAMENTE LOCAL — NUNCA USE PARA DEPLOY.
+  //
+  // Variante de wrangler.local.jsonc usada SÓ pelo E2E
+  // e2e/diagnostic-unavailable-gate.spec.ts (seção 12 da ordem da Sprint 4:
+  // provar o estado "indisponível" diretamente no gate/decisão apropriado,
+  // sem enfraquecer o ambiente principal da suíte — por isso um servidor
+  // `wrangler dev` próprio, numa porta e num banco local SQLite separados,
+  // em vez de desligar ENABLE_LOCAL_DIAGNOSTIC_FIXTURES no wrangler.local.jsonc
+  // principal, que todos os outros specs da Sprint 2-4 dependem).
+  //
+  // Mesmas quatro flags que wrangler.local.jsonc, exceto
+  // ENABLE_LOCAL_DIAGNOSTIC_FIXTURES, deliberadamente omitida — é exatamente
+  // a condição que este spec verifica (worker/src/env.ts:isLocalDiagnosticFixturesAllowed).
+  // ============================================================================
+  "name": "matematica-delicada",
+  "compatibility_date": "2025-01-01",
+  "main": "worker/src/index.ts",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEV_OUTBOX_ENABLED": "true",
+    "ALLOW_INSECURE_LOCAL_COOKIE": "true",
+    "ALLOW_TEST_RATE_LIMIT_ISOLATION": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "matematica-delicada-local-no-diag",
+      "database_id": "local-only-sqlite-not-a-cloudflare-id-no-diag",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

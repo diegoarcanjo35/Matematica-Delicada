@@ -10,6 +10,8 @@ export interface Env {
   ALLOW_INSECURE_LOCAL_COOKIE?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   ALLOW_TEST_RATE_LIMIT_ISOLATION?: string;
+  /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
+  ENABLE_LOCAL_DIAGNOSTIC_FIXTURES?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -74,6 +76,24 @@ export function isTestRateLimitIsolationAllowed(env: Env, url: URL): boolean {
   return (
     hasLocalDevEnvironmentValue(env) &&
     isTrue(env.ALLOW_TEST_RATE_LIMIT_ISOLATION) &&
+    isRecognizedLocalHostname(url)
+  );
+}
+
+/* Sprint 4 v1.0 — as 12 questões do diagnóstico inicial nesta sprint são
+   CONTEÚDO TÉCNICO PROVISÓRIO (fixtures locais, nunca pedagogicamente
+   aprovadas, nunca inseridas no D1 remoto — ver
+   scripts/fixtures/diagnostic-fixtures.local.sql). Mesmo assim, todo
+   endpoint que serve conteúdo de questão ou permite iniciar uma tentativa
+   verifica este gate ANTES de tocar nas tabelas diagnostic_* — mesmo padrão
+   de falha fechada de isDevOutboxAllowed. Fora das três condições
+   simultâneas (ambiente local + flag exclusiva de wrangler.local.jsonc +
+   hostname local), a API responde "diagnóstico em preparação pedagógica"
+   sem consultar o banco, nunca 404/500 nem qualquer vazamento de conteúdo. */
+export function isLocalDiagnosticFixturesAllowed(env: Env, url: URL): boolean {
+  return (
+    hasLocalDevEnvironmentValue(env) &&
+    isTrue(env.ENABLE_LOCAL_DIAGNOSTIC_FIXTURES) &&
     isRecognizedLocalHostname(url)
   );
 }

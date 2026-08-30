@@ -228,8 +228,7 @@ test.describe("Onboarding — fluxo completo", () => {
     await page.getByRole("button", { name: "Concluir onboarding" }).click();
 
     await expect(page).toHaveURL("/diagnostico");
-    await expect(page.getByRole("heading", { name: "Diagnóstico" })).toBeVisible();
-    await expect(page.getByText("Será implementado na próxima sprint.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Vamos conhecer seu ponto de partida" })).toBeVisible();
   });
 
   test("sem erros no console durante o fluxo de onboarding", async ({ page }) => {

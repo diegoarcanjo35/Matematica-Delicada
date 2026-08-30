@@ -91,6 +91,79 @@ CREATE TABLE student_profiles (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE diagnostic_questions (
+  id TEXT PRIMARY KEY,
+  prompt TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE diagnostic_question_options (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES diagnostic_questions (id),
+  position INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  is_correct INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE diagnostic_question_recognition_options (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL REFERENCES diagnostic_questions (id),
+  position INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  is_correct INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE diagnostic_question_help_layers (
+  question_id TEXT NOT NULL REFERENCES diagnostic_questions (id),
+  layer INTEGER NOT NULL CHECK (layer BETWEEN 1 AND 4),
+  content TEXT NOT NULL,
+  PRIMARY KEY (question_id, layer)
+);
+
+CREATE TABLE diagnostic_attempts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  status TEXT NOT NULL DEFAULT 'not_started'
+    CHECK (status IN ('not_started', 'in_progress', 'completed', 'abandoned')),
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE diagnostic_attempt_questions (
+  attempt_id TEXT NOT NULL REFERENCES diagnostic_attempts (id),
+  question_id TEXT NOT NULL REFERENCES diagnostic_questions (id),
+  position INTEGER NOT NULL,
+  PRIMARY KEY (attempt_id, question_id)
+);
+
+CREATE TABLE diagnostic_responses (
+  attempt_id TEXT NOT NULL REFERENCES diagnostic_attempts (id),
+  question_id TEXT NOT NULL REFERENCES diagnostic_questions (id),
+  selected_option_id TEXT REFERENCES diagnostic_question_options (id),
+  is_dont_know INTEGER NOT NULL DEFAULT 0,
+  is_correct INTEGER,
+  recognition_option_id TEXT REFERENCES diagnostic_question_recognition_options (id),
+  recognition_is_correct INTEGER,
+  time_spent_ms INTEGER NOT NULL DEFAULT 0,
+  answered_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (attempt_id, question_id)
+);
+
+CREATE TABLE diagnostic_help_opens (
+  attempt_id TEXT NOT NULL REFERENCES diagnostic_attempts (id),
+  question_id TEXT NOT NULL REFERENCES diagnostic_questions (id),
+  layer INTEGER NOT NULL CHECK (layer BETWEEN 1 AND 4),
+  opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (attempt_id, question_id, layer)
+);
 `;
 
 export interface FakeD1RunResult {

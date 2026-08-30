@@ -145,6 +145,7 @@ export function OnboardingPage() {
   const [stepError, setStepError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [isCompleting, setIsCompleting] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const isNavigatingRef = useRef(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -209,9 +210,11 @@ export function OnboardingPage() {
     if (clientError) return;
 
     isNavigatingRef.current = true;
+    setIsSubmitting(true);
     const nextStep = Math.min(step + 1, STEP_COUNT);
     const saved = await persistStep(nextStep);
     isNavigatingRef.current = false;
+    setIsSubmitting(false);
     if (saved) {
       setStepError(null);
       setStep(nextStep);
@@ -222,10 +225,14 @@ export function OnboardingPage() {
     if (isNavigatingRef.current || step === 1) return;
     setStepError(null);
     setFieldErrors({});
+    isNavigatingRef.current = true;
+    setIsSubmitting(true);
     // Volta sem exigir validação — o aluno não pode perder o que já digitou,
     // mas também não é obrigado a corrigir a etapa atual só para recuar.
     const previousStep = step - 1;
     await persistStep(previousStep).catch(() => undefined);
+    isNavigatingRef.current = false;
+    setIsSubmitting(false);
     setStep(previousStep);
   }
 
@@ -674,11 +681,16 @@ export function OnboardingPage() {
           )}
 
           <div className="onboarding__actions">
-            <Button type="button" variant="secondary" onClick={handleBack} disabled={step === 1}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleBack}
+              disabled={step === 1 || isSubmitting}
+            >
               Voltar
             </Button>
             {step < STEP_COUNT ? (
-              <Button type="button" onClick={handleNext}>
+              <Button type="button" onClick={handleNext} disabled={isSubmitting} isLoading={isSubmitting}>
                 Avançar
               </Button>
             ) : (

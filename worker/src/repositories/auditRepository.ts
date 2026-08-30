@@ -10,7 +10,12 @@ export type AuditEventType =
   | "onboarding_started"
   | "onboarding_progress_saved"
   | "onboarding_completed"
-  | "onboarding_preferences_updated";
+  | "onboarding_preferences_updated"
+  | "diagnostic_started"
+  | "diagnostic_progress_saved"
+  | "diagnostic_help_opened"
+  | "diagnostic_completed"
+  | "diagnostic_restarted";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(
