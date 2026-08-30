@@ -153,14 +153,21 @@ qualquer estado não-published elegível → archived
 - Todo `GET` é 100% somente leitura — nenhuma rota GET cria questão, papel ou
   lote de importação.
 
-## Fingerprint (Sprint 7 v1.1, Correção C)
+## Fingerprint (Sprint 7 v1.1/v1.2, Correção C)
 
 Algoritmo EXPLÍCITO, DETERMINÍSTICO e testado DIRETAMENTE — nunca só provado
 indiretamente via comportamento de duplicidade. Implementação em
 `worker/src/lib/fingerprint.ts`; testes diretos em
 `worker/testing/fingerprint.test.ts`.
 
-**Contrato:**
+> **v1.2** — a auditoria por inspeção direta do código encontrou que o
+> payload v1 incluía `isCorrect` (o gabarito) de cada alternativa: isso
+> permitia "lavar" uma duplicata criando a MESMA questão (mesmo enunciado,
+> mesmos textos de alternativa) só trocando qual letra está marcada como
+> correta — o fingerprint mudava e a duplicata escapava da detecção. A v2
+> EXCLUI o gabarito (e a explicação do distrator) do payload canônico.
+
+**Contrato (v2):**
 
 - calculado no Worker (`computeQuestionFingerprint`), nunca no banco;
 - `SHA-256` em hexadecimal (`worker/src/lib/crypto.ts:sha256Hex`) — nunca um
@@ -171,31 +178,40 @@ indiretamente via comportamento de duplicidade. Implementação em
 
   ```json
   {
-    "v": "question-fingerprint-v1",
+    "v": "question-fingerprint-v2",
     "enunciado": "<texto canonicalizado>",
     "alternativas": [
-      { "letter": "A", "text": "<texto canonicalizado>", "correta": false },
-      { "letter": "B", "text": "<texto canonicalizado>", "correta": true },
-      { "letter": "C", "text": "<texto canonicalizado>", "correta": false },
-      { "letter": "D", "text": "<texto canonicalizado>", "correta": false },
-      { "letter": "E", "text": "<texto canonicalizado>", "correta": false }
+      { "letter": "A", "text": "<texto canonicalizado>" },
+      { "letter": "B", "text": "<texto canonicalizado>" },
+      { "letter": "C", "text": "<texto canonicalizado>" },
+      { "letter": "D", "text": "<texto canonicalizado>" },
+      { "letter": "E", "text": "<texto canonicalizado>" }
     ]
   }
   ```
 
 - `v` é a constante de versão do algoritmo (`QUESTION_FINGERPRINT_VERSION =
-  "question-fingerprint-v1"`) — SEMPRE o primeiro campo do payload; uma
+  "question-fingerprint-v2"`) — SEMPRE o primeiro campo do payload; uma
   mudança futura de algoritmo exige uma nova constante (ex.:
-  `question-fingerprint-v2`) e uma estratégia de migration/reindexação
+  `question-fingerprint-v3`) e uma estratégia de migration/reindexação
   explícita para os fingerprints já gravados — nunca uma alteração silenciosa
-  do texto canônico sob a MESMA versão;
-- inclui, no mínimo, o enunciado e as cinco alternativas (texto + indicação
-  de correta), sempre reordenadas por LETRA (`buildCanonicalFingerprintPayload`
-  ordena por `letter`, nunca pela ordem de chegada do cliente) — trocar duas
+  do texto canônico sob a MESMA versão. **Esta troca de v1→v2 especificamente
+  NÃO exigiu essa reindexação**: a Sprint 7 ainda não foi mesclada em `main`
+  nem tocou D1 remoto, então não existe nenhum fingerprint v1 "real" em
+  produção para reconciliar — só fixtures/dados técnicos locais deste
+  branch, e nenhuma delas computava um hash real (ver "Fixtures" abaixo).
+  Uma eventual evolução do algoritmo DEPOIS de uma implantação real
+  precisará de reindexação de verdade;
+- inclui, no mínimo, o enunciado e os TEXTOS das cinco alternativas, sempre
+  reordenados por LETRA (`buildCanonicalFingerprintPayload` ordena por
+  `letter`, nunca pela ordem de chegada do cliente) — trocar duas
   alternativas de POSIÇÃO no envio não muda o fingerprint, mas trocar o
-  CONTEÚDO entre duas letras muda;
-- independente de código editorial, ID, status editorial, autor, revisor e
-  datas — nenhum desses campos entra na assinatura da função nem no payload;
+  CONTEÚDO (texto) entre duas letras muda;
+- **EXCLUI** explicitamente: indicação de correta (`isCorrect`/gabarito),
+  explicação do distrator, código editorial, ID, status editorial, autor,
+  revisor e datas — nenhum desses campos entra na assinatura da função nem
+  no payload. Trocar SÓ o gabarito (mantendo os mesmos textos de
+  alternativa) produz o MESMO fingerprint — a duplicata continua detectada;
 - produz o MESMO resultado seja a questão criada pelo formulário unitário
   (`questionService.ts:createQuestion`/`updateQuestion`) ou pela importação
   CSV (`questionImportService.ts:parseAndValidateRow`) — os dois caminhos
@@ -242,7 +258,7 @@ usado pela interface para decidir entre shell editorial e acesso negado.
 Todos exigem sessão + papel editorial; parametrizado; corpo limitado; sem
 stack/SQL nas respostas de erro.
 
-## PATCH parcial (Sprint 7 v1.1, Correção A)
+## PATCH parcial (Sprint 7 v1.1/v1.2, Correção A)
 
 `PATCH /api/editorial/questions/:id` aplica atualização PARCIAL real —
 implementado em `worker/src/services/questionService.ts:updateQuestion`.
@@ -256,41 +272,119 @@ Contrato exato:
 | Coleção enviada como `[]` | limpa explicitamente — só quando o status atual permite edição (`draft`/`changes_requested`) |
 | Campo escalar enviado como `null` | aceito SOMENTE se o campo é anulável (`prova`, `ano`, `tempoEstimadoSegundos`, `titularDireitos`, `baseLicenca`, `textoAtribuicao` — `NULLABLE_QUESTION_SCALAR_FIELDS` em `worker/src/lib/questionsValidation.ts`); qualquer outro campo com `null` explícito é 400 **sem escrever nada** |
 | Coleção enviada como `null` | sempre 400 (coleções não são anuláveis — `[]` é a forma de limpar) |
+| Corpo sem NENHUM campo/coleção editável | 400, sem incrementar versão (v1.2) |
 | `version` | sempre obrigatório; desatualizada → 409 |
+| `mutationId` | sempre obrigatório (UUID) — ver "Idempotência por chave de operação" abaixo (v1.2) |
 | `published` | sempre imutável (guard SQL + checagem no serviço) |
 | Mass assignment | allow-list (`QUESTION_UPDATE_ALLOWED_FIELDS`) — `editorialStatus`/`version`/`autorId`/`revisorId` nunca são graváveis via PATCH |
 
+### Idempotência por chave de operação (v1.2)
+
+> A auditoria por inspeção direta encontrou que a heurística de retry da
+> v1.1 (comparar `version`-alvo + `enunciado`/`conteudo`/`dificuldade`/
+> `origem`/`fingerprint` mesclados) era insuficiente: uma edição concorrente
+> DIFERENTE que só mudasse tags, DNA, imagens, direitos, prova ou a
+> explicação de um distrator NUNCA entrava nessa comparação — então ela
+> podia ser (incorretamente) reconhecida como "a mesma chamada sendo
+> repetida" e aceita como sucesso silencioso, quando na verdade era uma
+> segunda edição real e válida sendo descartada. **Removida por completo.**
+
+Contrato final: `PATCH` exige `version` **e** `mutationId` (UUID gerado pelo
+cliente). A prova de retry é EXCLUSIVAMENTE o `mutationId` — nunca
+parecença de conteúdo.
+
+Persistência sem migration nova: `question_history.id` (já `PRIMARY KEY`,
+unicidade garantida pelo banco) é reaproveitado como a própria chave de
+idempotência da mutação (`updateQuestion`, início da função):
+
+1. busca um evento de histórico com `id = mutationId`
+   (`questionRepository.ts:findHistoryById`);
+2. se existir e **question_id/user_id/action baterem** com esta chamada →
+   sucesso idempotente, `ok:true, changed:false`, **nenhuma** escrita nova;
+3. se existir mas question_id/user_id/action **não** baterem → 409 (colisão
+   com outra questão, outro ator ou outra ação — nunca tratado como retry);
+4. se não existir (mutationId nova) → segue o fluxo normal; se a `version`
+   enviada estiver desatualizada, o resultado é o 409 de conflito comum
+   (não relacionado à mutationId).
+
+O frontend (`src/pages/editorial/EditorialQuestionFormPage.tsx` +
+`src/pages/editorial/mutationId.ts`) gera um `mutationId` novo a cada clique
+explícito em "Salvar"; reutiliza o MESMO ID somente quando o payload da nova
+tentativa é byte-a-byte idêntico ao da tentativa anterior que falhou POR
+FALHA DE REDE (`isNetworkFailure` — nunca para um 400/409, que já significam
+que o servidor processou a requisição); qualquer edição do formulário desde
+então gera um ID novo. `resolveMutationId`/`computePayloadSignature`/
+`isNetworkFailure` são testados isoladamente em
+`src/pages/editorial/mutationId.test.ts` — cobertura de integração completa
+da UX de retry (simular uma falha de rede real contra o componente montado)
+fica para uma suíte E2E futura.
+
+### PATCH vazio / no-op (v1.2)
+
+- corpo **sem nenhum** campo/coleção editável presente → 400
+  (`fieldErrors._body`), sem incrementar versão, sem histórico;
+- corpo com campos/coleções presentes mas cujo valor EFETIVO é idêntico ao já
+  gravado (comparação CANÔNICA — `alternativesCanonicallyEqual`/
+  `dnaCanonicallyEqual`/`patternsCanonicallyEqual`/`tagsCanonicallyEqual`/
+  `imagesCanonicallyEqual`, todas em `questionService.ts`, nunca por
+  fingerprint — a v2 do fingerprint exclui gabarito/explicação, então
+  compará-lo mascararia uma mudança real só nesses campos) → `ok:true,
+  changed:false`, sem gravar versão/histórico/auditoria novos.
+- a resposta sempre distingue `changed:true` / `changed:false` / 409.
+
 ### Atomicidade
 
-O `UPDATE` escalar roda **sempre**, mesmo quando nenhum campo escalar mudou —
-é o único jeito de expressar, num único statement condicionado, o guard de
-versão que decide sucesso/conflito/idempotência para a chamada inteira. Isso
-garante que o lote (`db.batch()`) NUNCA fica vazio, então não existe cenário
-onde seria preciso lidar com um `db.batch([])` dinâmico (a preocupação da
-ordem de correção) — o `UPDATE` escalar É a operação, não um "extra".
-
-Só as coleções EXPLICITAMENTE presentes no corpo entram no lote, cada uma
-como um par `DELETE` + `INSERT`s guardado pela MESMA versão-alvo do `UPDATE`
-escalar (`buildDeleteAlternativesStatement`/`buildGuardedInsertAlternativeStatement`
+O `UPDATE` escalar roda sempre que uma escrita real é decidida (nunca para
+no-op/idempotente) — é o único jeito de expressar, num único statement
+condicionado, o guard de versão. Só as coleções EXPLICITAMENTE presentes no
+corpo entram no lote, cada uma como um par `DELETE` + `INSERT`s guardado
+pela MESMA versão-alvo do `UPDATE` escalar
+(`buildDeleteAlternativesStatement`/`buildGuardedInsertAlternativeStatement`
 etc., em `worker/src/repositories/questionRepository.ts`) — uma coleção
 ausente não gera nenhum statement, então nunca é apagada por omissão. Uma
 falha lançada por QUALQUER statement do lote reverte a transação inteira
 (nenhuma escrita parcial).
 
-### Concorrência e idempotência
+### Validação do lote (v1.2, Correção B)
 
-- `version` desatualizada (e o conteúdo enviado não bate com o que já está
-  gravado) → 409.
-- Repetição idempotente do MESMO PATCH (mesmo `expectedVersion` já obsoleto,
-  reenviado por retry de rede) → sucesso silencioso, sem duplicar
-  `question_history`: o serviço reconhece que a questão já está exatamente na
-  versão que esta chamada teria produzido E que o conteúdo escalar mesclado
-  bate com o que está gravado, e retorna `ok: true` sem escrever de novo. O
-  guard `NOT EXISTS (question_id, version)` de `question_history` (mesmo de
-  antes) impede a duplicação mesmo se a tentativa chegasse a re-executar.
-- `question_history` registra a ação `updated` com `metadata.fields` — os
-  NOMES dos grupos de campos alterados nesta chamada (ex.:
-  `"enunciado,alternativas"`), separados por vírgula — **nunca o conteúdo**.
+> A auditoria encontrou que só `coreResult.meta.changes` era validado após
+> `db.batch()` — um statement condicionado que retorna `changes = 0`
+> SILENCIOSAMENTE (sem lançar) nunca era detectado, então uma inconsistência
+> (ex.: o `UPDATE` escalar mudou mas o `INSERT` de `question_history` não)
+> podia ser relatada como sucesso.
+
+`worker/src/lib/batchValidation.ts:validateBatchResults` agora verifica
+TODOS os resultados do lote contra a expectativa declarada de CADA
+statement — nunca assume que tudo deve afetar exatamente 1 linha:
+
+- `DELETE` de uma coleção → expectativa `"any"` (uma coleção já vazia
+  legitimamente afeta 0 linhas);
+- `INSERT`/`UPSERT` guardado de uma linha específica de coleção → `"exactlyOne"`
+  (se o `UPDATE` central mudou, o guard bate e a linha SEMPRE deveria
+  existir);
+- `INSERT` de `question_history` → `"exactlyOne"` (se o core mudou, o
+  histórico sempre deveria ser criado).
+
+Um descompasso lança `BatchInvariantError` — nunca convertida em sucesso.
+Aplicado tanto em `updateQuestion` (PATCH) quanto em `applyTransition`
+(transições de workflow, que também validam o `INSERT` de histórico depois
+do `UPDATE` da transição). **Limitação documentada**: como o `db.batch()` já
+foi commitado quando o descompasso é detectado, D1 (e o FakeD1Database) não
+oferecem uma forma de desfazer statements já aplicados fora de uma transação
+em andamento — a exceção lançada é a melhor forma de "erro controlado"
+alcançável (propaga como 500 opaco via `worker/src/index.ts`, nunca um
+sucesso), mas não é uma transação de compensação real. Na prática, esse
+cenário só é alcançável hoje via manipulação direta de teste (inserir uma
+linha de histórico concorrente com a mesma versão-alvo por fora) — o design
+das guardas (todas condicionadas pela MESMA versão-alvo do `UPDATE` central,
+dentro da MESMA transação) torna o cenário natural, sem interferência
+externa, essencialmente impossível.
+
+`question_history` registra a ação `updated` com `metadata.fields` — os
+NOMES dos grupos de campos alterados nesta chamada (ex.:
+`"enunciado,alternativas"`), separados por vírgula — **nunca o conteúdo**.
+`audit_log` (`editorial_question_updated`) só é gravado quando
+`changed:true` — nunca em no-op nem em retry idempotente por `mutationId`.
 
 ## Importação CSV
 
@@ -408,6 +502,15 @@ pela migration nem por qualquer GET.
   forma incremental (envie o conjunto completo de 5 quando quiser alterar
   alternativas) — só omitir o campo `alternativas` inteiro preserva o estado
   atual sem tocar nele.
+- A validação do lote (Correção B) detecta uma inconsistência pós-commit
+  lançando um erro controlado, mas não a desfaz via uma transação de
+  compensação real — ver "Validação do lote" acima para o motivo e o porquê
+  de o cenário ser, por construção, essencialmente inalcançável fora de
+  manipulação direta de teste.
+- Cobertura de integração completa da UX de retry de `mutationId` (simular
+  uma falha de rede real contra o formulário montado) fica para uma suíte
+  E2E futura — hoje só a lógica pura de decisão é testada diretamente
+  (`src/pages/editorial/mutationId.test.ts`).
 
 ## Próximos passos
 

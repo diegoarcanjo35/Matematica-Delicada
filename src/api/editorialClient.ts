@@ -164,10 +164,19 @@ export function createQuestion(input: QuestionFormInput): Promise<{ ok: true; id
   return request("/api/editorial/questions", { method: "POST", body: JSON.stringify(input) });
 }
 
-export function updateQuestion(id: string, expectedVersion: number, input: Partial<QuestionFormInput>): Promise<{ ok: true; id: string }> {
+/** Sprint 7 v1.2, Correção A — `mutationId` é obrigatório: o servidor usa
+ *  esse UUID (gerado pelo cliente) como única prova de retry idempotente.
+ *  Nunca inferido por conteúdo — quem chama decide se reaproveita o mesmo
+ *  ID (retry da mesma requisição) ou gera um novo (edição nova). */
+export function updateQuestion(
+  id: string,
+  expectedVersion: number,
+  mutationId: string,
+  input: Partial<QuestionFormInput>
+): Promise<{ ok: true; id: string; changed: boolean }> {
   return request(`/api/editorial/questions/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: JSON.stringify({ ...input, expectedVersion }),
+    body: JSON.stringify({ ...input, expectedVersion, mutationId }),
   });
 }
 

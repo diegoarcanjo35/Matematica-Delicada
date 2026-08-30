@@ -27,7 +27,8 @@ export type AuditEventType =
   | "editorial_role_granted"
   | "editorial_question_import_previewed"
   | "editorial_question_import_applied"
-  | "editorial_question_import_undone";
+  | "editorial_question_import_undone"
+  | "editorial_question_updated";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

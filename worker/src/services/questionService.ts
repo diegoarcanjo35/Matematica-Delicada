@@ -8,6 +8,8 @@
    buildConditionalHistoryStatement em questionRepository.ts. */
 
 import { computeQuestionFingerprint } from "../lib/fingerprint";
+import { validateBatchResults, type ExpectedBatchStatement } from "../lib/batchValidation";
+import { recordAuditEvent } from "../repositories/auditRepository";
 import {
   allImagesHaveAlt,
   hasPrincipalPattern,
@@ -53,6 +55,7 @@ import {
   buildUpsertDnaStatement,
   countQuestions,
   findDna,
+  findHistoryById,
   findQuestionByCode,
   findQuestionById,
   findQuestionsByFingerprint,
@@ -122,6 +125,10 @@ export interface MutationResult<T> {
   conflict?: boolean;
   fieldErrors?: Record<string, string>;
   forbidden?: boolean;
+  /** Sprint 7 v1.2, Correção A — distingue uma mutação real (`true`) de um
+   *  no-op ou de uma repetição idempotente reconhecida pelo `mutationId`
+   *  (`false`). Só `changed: true` grava `audit_log`. */
+  changed?: boolean;
 }
 
 async function validatePatternIdsExist(db: D1Database, patternIds: string[]): Promise<boolean> {
@@ -258,30 +265,156 @@ function isProvided<T extends object>(input: T, key: keyof T): boolean {
   return input[key] !== undefined;
 }
 
+const ALL_SCALAR_FIELDS = [
+  "enunciado",
+  "resolucaoComentada",
+  "conteudo",
+  "subconteudo",
+  "habilidade",
+  "competencia",
+  "dificuldade",
+  "origem",
+  "prova",
+  "ano",
+  "tempoEstimadoSegundos",
+  "tipoCalculo",
+  "necessitaCalculadora",
+  "titularDireitos",
+  "baseLicenca",
+  "textoAtribuicao",
+] as const;
+const ALL_COLLECTION_FIELDS = ["alternativas", "dna", "padroes", "tags", "imagens"] as const;
+
+/* --------------------- Comparação CANÔNICA (Correção A, v1.2) ------------------
+   Usada só para decidir se um PATCH é um no-op (seção "PATCH vazio/no-op" da
+   ordem v1.2) — NUNCA para decidir idempotência de retry (isso agora é
+   função exclusiva do `mutationId`, nunca de comparação de conteúdo). */
+
+function alternativesCanonicallyEqual(a: AlternativeInput[], b: AlternativeInput[]): boolean {
+  if (a.length !== b.length) return false;
+  const sort = (arr: AlternativeInput[]) => [...arr].sort((x, y) => x.letter.localeCompare(y.letter));
+  const sa = sort(a);
+  const sb = sort(b);
+  return sa.every(
+    (alt, i) =>
+      alt.letter === sb[i].letter &&
+      alt.text === sb[i].text &&
+      alt.isCorrect === sb[i].isCorrect &&
+      (alt.distractorExplanation ?? null) === (sb[i].distractorExplanation ?? null)
+  );
+}
+
+function dnaCanonicallyEqual(a: QuestionDnaInput, b: QuestionDnaInput): boolean {
+  return (
+    a.pista === b.pista &&
+    a.estrategia === b.estrategia &&
+    a.pegadinha === b.pegadinha &&
+    a.conteudoApoio === b.conteudoApoio &&
+    a.resolucao === b.resolucao &&
+    (a.atalho ?? null) === (b.atalho ?? null) &&
+    a.aprendizadoErro === b.aprendizadoErro
+  );
+}
+
+function patternsCanonicallyEqual(a: QuestionPatternInput[], b: QuestionPatternInput[]): boolean {
+  if (a.length !== b.length) return false;
+  const key = (p: QuestionPatternInput) => `${p.patternId}:${p.role}`;
+  const sa = a.map(key).sort();
+  const sb = b.map(key).sort();
+  return sa.every((k, i) => k === sb[i]);
+}
+
+function tagsCanonicallyEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((t, i) => t === sb[i]);
+}
+
+function imagesCanonicallyEqual(a: QuestionImageInput[], b: QuestionImageInput[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every(
+    (img, i) =>
+      img.assetRef === b[i].assetRef &&
+      img.altText === b[i].altText &&
+      (img.caption ?? null) === (b[i].caption ?? null) &&
+      img.position === b[i].position &&
+      (img.titularDireitos ?? null) === (b[i].titularDireitos ?? null) &&
+      (img.baseLicenca ?? null) === (b[i].baseLicenca ?? null)
+  );
+}
+
 /** Edita o conteúdo de uma questão em `draft`/`changes_requested` — PATCH
- *  PARCIAL de verdade (Sprint 7 v1.1, Correção A): um campo/coleção AUSENTE
- *  do corpo preserva o valor atual; uma coleção enviada como `[]` limpa
- *  explicitamente; `null` só é aceito nos campos anuláveis
+ *  PARCIAL de verdade (Sprint 7 v1.1/v1.2, Correções A). Um campo/coleção
+ *  AUSENTE do corpo preserva o valor atual; uma coleção enviada como `[]`
+ *  limpa explicitamente; `null` só é aceito nos campos anuláveis
  *  (`NULLABLE_QUESTION_SCALAR_FIELDS`), senão é 400 sem gravar nada.
  *  Publicada NUNCA é editável (seção 6 da ordem) — o guard SQL do UPDATE já
  *  restringe isso, e aqui é verificado ANTES também, para devolver um erro
  *  específico em vez de um 409 genérico de versão quando o problema é outro.
  *
- *  Atomicidade: o UPDATE escalar roda SEMPRE (é o próprio "core" da operação
- *  e o único jeito de expressar o guard de versão condicionado num único
- *  statement) — isso garante que o lote NUNCA fica vazio mesmo quando
- *  nenhuma coleção foi enviada, então nunca há necessidade de um
- *  `db.batch([])` dinâmico vazio (a preocupação da seção 2 da ordem v1.1).
- *  Só as coleções EXPLICITAMENTE presentes no corpo entram no lote (DELETE +
- *  INSERTs guardados pela MESMA versão-alvo do UPDATE escalar) — uma coleção
- *  ausente não gera nenhum statement, então nunca é apagada por omissão. */
+ *  v1.2, Correção A — IDEMPOTÊNCIA POR CHAVE DE OPERAÇÃO: a heurística da
+ *  v1.1 (comparar versão-alvo + um punhado de escalares mesclados) foi
+ *  REMOVIDA — ela podia confundir uma edição concorrente DIFERENTE (que só
+ *  mudasse tags, DNA, imagens, direitos ou texto explicativo de alternativa)
+ *  com "a mesma chamada sendo repetida", porque nenhum desses campos entrava
+ *  na comparação. A prova de retry agora é EXCLUSIVAMENTE o `mutationId`
+ *  (UUID gerado pelo cliente), reaproveitando `question_history.id` como
+ *  chave de idempotência (sem migration nova): a linha de histórico já
+ *  registra ator/questão/ação/versão, então uma consulta por esse ID basta
+ *  para confirmar "esta EXATA operação já foi aplicada". Conteúdo parecido
+ *  NUNCA é aceito como prova de retry.
+ *
+ *  v1.2, Correção A — PATCH vazio/no-op: corpo sem nenhum campo/coleção
+ *  editável é 400 sem incrementar versão; corpo com campos/coleções
+ *  presentes mas cujo valor EFETIVO é idêntico ao já gravado (comparação
+ *  canônica — ver funções `*CanonicallyEqual` acima) retorna
+ *  `ok:true, changed:false` sem gravar versão/histórico/auditoria novos.
+ *
+ *  Atomicidade: o UPDATE escalar roda sempre que uma escrita real é
+ *  decidida (nunca para no-op/idempotente) — é o único jeito de expressar o
+ *  guard de versão condicionado num único statement. Só as coleções
+ *  EXPLICITAMENTE presentes no corpo entram no lote (DELETE + INSERTs
+ *  guardados pela MESMA versão-alvo do UPDATE escalar) — uma coleção
+ *  ausente não gera nenhum statement, então nunca é apagada por omissão.
+ *
+ *  v1.2, Correção B — VALIDAÇÃO DE TODO O LOTE: depois que o UPDATE escalar
+ *  confirma sucesso (`meta.changes === 1`), TODOS os demais resultados do
+ *  lote (INSERTs de coleção e o INSERT de `question_history`) são
+ *  verificados contra a expectativa declarada de cada um
+ *  (`worker/src/lib/batchValidation.ts`) — nunca só o resultado do UPDATE
+ *  central. Um descompasso (ex.: o histórico afetando 0 linhas mesmo com o
+ *  core tendo mudado) lança `BatchInvariantError`, que NUNCA é convertida em
+ *  sucesso — propaga como erro interno controlado (seção "Validação do
+ *  lote" de docs/BANCO_QUESTOES.md documenta a limitação: como o lote já foi
+ *  commitado, esta é a melhor forma de "erro controlado" alcançável sem uma
+ *  transação de compensação). */
 export async function updateQuestion(
   db: D1Database,
   actorUserId: string,
   questionId: string,
   expectedVersion: number,
+  mutationId: string,
   input: Partial<QuestionInput>
 ): Promise<MutationResult<{ id: string }>> {
+  // Chave de idempotência PRIMEIRO — antes de qualquer outra leitura/escrita.
+  // Reaproveita question_history.id (PK, unicidade garantida pelo banco).
+  const existingMutation = await findHistoryById(db, mutationId);
+  if (existingMutation) {
+    if (existingMutation.question_id !== questionId || existingMutation.user_id !== actorUserId || existingMutation.action !== "updated") {
+      // Colisão: o mesmo mutationId já foi usado para outra questão, outro
+      // ator ou outra ação — nunca tratado como retry válido.
+      return {
+        ok: false,
+        conflict: true,
+        fieldErrors: { mutationId: "Este identificador de mutação já foi usado para outra operação." },
+      };
+    }
+    // Mesma mutação, já aplicada — sucesso idempotente, SEM tocar o banco de
+    // novo (nenhuma escrita, nenhum histórico/auditoria duplicados).
+    return { ok: true, changed: false, value: { id: questionId } };
+  }
+
   const before = await findQuestionById(db, questionId);
   if (!before) return { ok: false, notFound: true };
 
@@ -303,12 +436,20 @@ export async function updateQuestion(
   }
   // Coleções também não são anuláveis — `null` é rejeitado; `[]` é a forma
   // válida de limpar.
-  for (const field of ["alternativas", "dna", "padroes", "tags", "imagens"] as const) {
+  for (const field of ALL_COLLECTION_FIELDS) {
     if (isProvided(input, field) && (input as Record<string, unknown>)[field] === null) {
       fieldErrors[field] = "Este campo não pode ser nulo — envie um array vazio para limpar.";
     }
   }
   if (Object.keys(fieldErrors).length > 0) return { ok: false, fieldErrors };
+
+  // v1.2, Correção A — corpo sem NENHUM campo/coleção editável é 400, sem
+  // incrementar versão (nenhuma leitura adicional nem consulta de duplicidade).
+  const anyScalarProvided = ALL_SCALAR_FIELDS.some((field) => isProvided(input, field));
+  const anyCollectionProvided = ALL_COLLECTION_FIELDS.some((field) => isProvided(input, field));
+  if (!anyScalarProvided && !anyCollectionProvided) {
+    return { ok: false, fieldErrors: { _body: "Nenhum campo editável foi enviado." } };
+  }
 
   const enunciadoProvided = isProvided(input, "enunciado");
   if (enunciadoProvided && input.enunciado!.trim().length === 0) fieldErrors.enunciado = "Enunciado não pode ser vazio.";
@@ -340,34 +481,20 @@ export async function updateQuestion(
     if (!patternsExist) return { ok: false, fieldErrors: { padroes: "Um ou mais padrões informados não existem." } };
   }
 
-  // Estado EFETIVO após o PATCH (mesclando o que foi enviado com o que já
-  // existia) — usado tanto para o fingerprint (Correção C: depende de
-  // enunciado + alternativas, então precisa do conjunto EFETIVO de
-  // alternativas mesmo quando elas não vieram neste PATCH) quanto para o
-  // UPDATE escalar em si.
+  // Alternativas EXISTENTES são sempre carregadas — usadas tanto para
+  // completar o conjunto EFETIVO (quando não enviadas) quanto para a
+  // comparação canônica de no-op (quando enviadas).
+  const existingAlternativeRows = await listAlternatives(db, questionId);
+  const existingAlternatives: AlternativeInput[] = existingAlternativeRows.map((a) => ({
+    letter: a.letter as never,
+    text: a.text,
+    isCorrect: a.is_correct === 1,
+    distractorExplanation: a.distractor_explanation,
+  }));
+
   const effectiveEnunciado = enunciadoProvided ? input.enunciado! : before.enunciado;
-  let effectiveAlternatives: AlternativeInput[];
-  if (alternativesProvided) {
-    effectiveAlternatives = altResult!.value!;
-  } else {
-    const existing = await listAlternatives(db, questionId);
-    effectiveAlternatives = existing.map((a) => ({
-      letter: a.letter as never,
-      text: a.text,
-      isCorrect: a.is_correct === 1,
-      distractorExplanation: a.distractor_explanation,
-    }));
-  }
+  const effectiveAlternatives = alternativesProvided ? altResult!.value! : existingAlternatives;
 
-  const fingerprint = await computeFingerprint(effectiveEnunciado, effectiveAlternatives);
-  if (fingerprint !== before.fingerprint) {
-    const duplicates = (await findQuestionsByFingerprint(db, fingerprint)).filter((q) => q.id !== questionId);
-    if (duplicates.length > 0) {
-      return { ok: false, fieldErrors: { enunciado: "Já existe uma questão com enunciado equivalente (fingerprint duplicada)." } };
-    }
-  }
-
-  const versionAfter = expectedVersion + 1;
   const mergedScalars = {
     enunciado: effectiveEnunciado,
     resolucaoComentada: isProvided(input, "resolucaoComentada") ? input.resolucaoComentada! : before.resolucao_comentada,
@@ -387,120 +514,202 @@ export async function updateQuestion(
     titularDireitos: isProvided(input, "titularDireitos") ? input.titularDireitos! : before.titular_direitos,
     baseLicenca: isProvided(input, "baseLicenca") ? input.baseLicenca! : before.base_licenca,
     textoAtribuicao: isProvided(input, "textoAtribuicao") ? input.textoAtribuicao! : before.texto_atribuicao,
-    fingerprint,
   };
-  const coreUpdate = buildUpdateQuestionCoreStatement(db, questionId, expectedVersion, mergedScalars);
+
+  // v1.2, Correção A — detecção de NO-OP: só os campos/coleções REALMENTE
+  // enviados entram na comparação (um campo ausente nunca "muda" nada, por
+  // definição). Comparação canônica, nunca por fingerprint (a v2 do
+  // fingerprint exclui gabarito/explicação — comparar só fingerprint
+  // mascararia uma mudança real de isCorrect/distractorExplanation).
+  let hasRealChange =
+    mergedScalars.enunciado !== before.enunciado ||
+    mergedScalars.resolucaoComentada !== before.resolucao_comentada ||
+    mergedScalars.conteudo !== before.conteudo ||
+    mergedScalars.subconteudo !== before.subconteudo ||
+    mergedScalars.habilidade !== before.habilidade ||
+    mergedScalars.competencia !== before.competencia ||
+    mergedScalars.dificuldade !== before.dificuldade ||
+    mergedScalars.origem !== before.origem ||
+    mergedScalars.prova !== before.prova ||
+    mergedScalars.ano !== before.ano ||
+    mergedScalars.tempoEstimadoSegundos !== before.tempo_estimado_segundos ||
+    mergedScalars.tipoCalculo !== before.tipo_calculo ||
+    mergedScalars.necessitaCalculadora !== before.necessita_calculadora ||
+    mergedScalars.titularDireitos !== before.titular_direitos ||
+    mergedScalars.baseLicenca !== before.base_licenca ||
+    mergedScalars.textoAtribuicao !== before.texto_atribuicao;
+
+  if (!hasRealChange && alternativesProvided && !alternativesCanonicallyEqual(effectiveAlternatives, existingAlternatives)) {
+    hasRealChange = true;
+  }
+  if (!hasRealChange && dnaProvided) {
+    const existingDna = await findDna(db, questionId);
+    const existingDnaForCompare: QuestionDnaInput = existingDna
+      ? {
+          pista: existingDna.pista,
+          estrategia: existingDna.estrategia,
+          pegadinha: existingDna.pegadinha,
+          conteudoApoio: existingDna.conteudo_apoio,
+          resolucao: existingDna.resolucao,
+          atalho: existingDna.atalho,
+          aprendizadoErro: existingDna.aprendizado_erro,
+        }
+      : { pista: "", estrategia: "", pegadinha: "", conteudoApoio: "", resolucao: "", atalho: null, aprendizadoErro: "" };
+    if (!dnaCanonicallyEqual(dnaResult!.value!, existingDnaForCompare)) hasRealChange = true;
+  }
+  if (!hasRealChange && patternsProvided) {
+    const existingPatterns = await listPatternsForQuestion(db, questionId);
+    const existingPatternInputs: QuestionPatternInput[] = existingPatterns.map((p) => ({ patternId: p.pattern_id, role: p.role as never }));
+    if (!patternsCanonicallyEqual(patternsResult!.value!, existingPatternInputs)) hasRealChange = true;
+  }
+  if (!hasRealChange && tagsProvided) {
+    const existingTags = await listTags(db, questionId);
+    if (!tagsCanonicallyEqual(tagsResult!.value!, existingTags.map((t) => t.content))) hasRealChange = true;
+  }
+  if (!hasRealChange && imagesProvided) {
+    const existingImages = await listImages(db, questionId);
+    const existingImageInputs: QuestionImageInput[] = existingImages.map((i) => ({
+      assetRef: i.asset_ref,
+      altText: i.alt_text,
+      caption: i.caption,
+      position: i.position,
+      titularDireitos: i.titular_direitos,
+      baseLicenca: i.base_licenca,
+    }));
+    if (!imagesCanonicallyEqual(imagesResult!.value!, existingImageInputs)) hasRealChange = true;
+  }
+
+  if (!hasRealChange) {
+    // No-op documentado (seção "PATCH vazio/no-op" da ordem v1.2): valores
+    // enviados idênticos ao estado atual — sucesso sem gravar versão,
+    // histórico ou auditoria novos.
+    return { ok: true, changed: false, value: { id: questionId } };
+  }
+
+  const fingerprint = await computeFingerprint(effectiveEnunciado, effectiveAlternatives);
+  if (fingerprint !== before.fingerprint) {
+    const duplicates = (await findQuestionsByFingerprint(db, fingerprint)).filter((q) => q.id !== questionId);
+    if (duplicates.length > 0) {
+      return { ok: false, fieldErrors: { enunciado: "Já existe uma questão com enunciado equivalente (fingerprint duplicada)." } };
+    }
+  }
+
+  const versionAfter = expectedVersion + 1;
+  const coreUpdate = buildUpdateQuestionCoreStatement(db, questionId, expectedVersion, { ...mergedScalars, fingerprint });
 
   // Só as coleções EXPLICITAMENTE presentes entram no lote — cada uma como
-  // par DELETE+INSERTs guardado pela MESMA `versionAfter` do UPDATE escalar
-  // (o mesmo padrão de guard condicionado do v1.0, agora aplicado
-  // seletivamente por coleção em vez de sempre-todas). O array de campos
+  // par DELETE+INSERTs guardado pela MESMA `versionAfter` do UPDATE escalar.
+  // Cada statement além do core declara sua EXPECTATIVA (Correção B) — o
+  // DELETE sempre "any" (uma coleção já vazia legitimamente afeta 0 linhas);
+  // cada INSERT guardado "exactlyOne" (se o core mudou, o guard bate e a
+  // linha específica SEMPRE deveria ser inserida). O array de campos
   // alterados vira metadado do histórico (nomes só, nunca conteúdo).
-  const statements = [coreUpdate];
+  const childStatements: Array<{ statement: D1PreparedStatement; expectation: ExpectedBatchStatement }> = [];
   const changedFields: string[] = [];
 
-  for (const field of [
-    "enunciado",
-    "resolucaoComentada",
-    "conteudo",
-    "subconteudo",
-    "habilidade",
-    "competencia",
-    "dificuldade",
-    "origem",
-    "prova",
-    "ano",
-    "tempoEstimadoSegundos",
-    "tipoCalculo",
-    "necessitaCalculadora",
-    "titularDireitos",
-    "baseLicenca",
-    "textoAtribuicao",
-  ] as const) {
+  for (const field of ALL_SCALAR_FIELDS) {
     if (isProvided(input, field)) changedFields.push(field);
   }
 
   if (alternativesProvided) {
     changedFields.push("alternativas");
-    statements.push(buildDeleteAlternativesStatement(db, questionId, versionAfter));
-    effectiveAlternatives.forEach((alt, index) =>
-      statements.push(buildGuardedInsertAlternativeStatement(db, questionId, newId(), alt, index, versionAfter))
-    );
+    childStatements.push({ statement: buildDeleteAlternativesStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_alternatives", expected: "any" } });
+    effectiveAlternatives.forEach((alt, index) => {
+      childStatements.push({
+        statement: buildGuardedInsertAlternativeStatement(db, questionId, newId(), alt, index, versionAfter),
+        expectation: { label: `INSERT question_alternatives[${alt.letter}]`, expected: "exactlyOne" },
+      });
+    });
   }
   if (dnaProvided) {
     changedFields.push("dna");
-    statements.push(buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, versionAfter));
+    childStatements.push({
+      statement: buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, versionAfter),
+      expectation: { label: "UPSERT question_dna", expected: "exactlyOne" },
+    });
   }
   if (patternsProvided) {
     changedFields.push("padroes");
-    statements.push(buildDeletePatternLinksStatement(db, questionId, versionAfter));
-    patternsResult!.value!.forEach((link) =>
-      statements.push(buildGuardedInsertPatternLinkStatement(db, questionId, newId(), link, versionAfter))
-    );
+    childStatements.push({ statement: buildDeletePatternLinksStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_patterns", expected: "any" } });
+    patternsResult!.value!.forEach((link) => {
+      childStatements.push({
+        statement: buildGuardedInsertPatternLinkStatement(db, questionId, newId(), link, versionAfter),
+        expectation: { label: `INSERT question_patterns[${link.patternId}]`, expected: "exactlyOne" },
+      });
+    });
   }
   if (tagsProvided) {
     changedFields.push("tags");
-    statements.push(buildDeleteTagsStatement(db, questionId, versionAfter));
-    tagsResult!.value!.forEach((tag, index) =>
-      statements.push(buildGuardedInsertTagStatement(db, questionId, newId(), tag, index, versionAfter))
-    );
+    childStatements.push({ statement: buildDeleteTagsStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_tags", expected: "any" } });
+    tagsResult!.value!.forEach((tag, index) => {
+      childStatements.push({
+        statement: buildGuardedInsertTagStatement(db, questionId, newId(), tag, index, versionAfter),
+        expectation: { label: `INSERT question_tags[${index}]`, expected: "exactlyOne" },
+      });
+    });
   }
   if (imagesProvided) {
     changedFields.push("imagens");
-    statements.push(buildDeleteImagesStatement(db, questionId, versionAfter));
-    imagesResult!.value!.forEach((image) =>
-      statements.push(buildGuardedInsertImageStatement(db, questionId, newId(), image, versionAfter))
-    );
+    childStatements.push({ statement: buildDeleteImagesStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_images", expected: "any" } });
+    imagesResult!.value!.forEach((image, index) => {
+      childStatements.push({
+        statement: buildGuardedInsertImageStatement(db, questionId, newId(), image, versionAfter),
+        expectation: { label: `INSERT question_images[${index}]`, expected: "exactlyOne" },
+      });
+    });
   }
 
-  statements.push(
-    buildConditionalHistoryStatement(db, {
-      id: newId(),
+  // mutationId reaproveitado como question_history.id — a chave de
+  // idempotência da operação inteira (Correção A). A checagem de colisão já
+  // rodou no topo da função, então este INSERT é sempre seguro (nenhum
+  // conflito de PK esperado nesta linha).
+  childStatements.push({
+    statement: buildConditionalHistoryStatement(db, {
+      id: mutationId,
       questionId,
       userId: actorUserId,
       action: "updated",
       fromStatus: before.editorial_status,
       toStatus: before.editorial_status,
       versionAfter,
-      // Só os NOMES dos grupos alterados — nunca o conteúdo integral
-      // (Correção A, seção 2: "histórico deve indicar quais grupos de
-      // campos mudaram, sem guardar o conteúdo integral").
+      // Só os NOMES dos grupos alterados — nunca o conteúdo integral.
       metadata: { fields: changedFields.join(",") },
-    })
+    }),
+    expectation: { label: "INSERT question_history", expected: "exactlyOne" },
+  });
+
+  const allStatements = [coreUpdate, ...childStatements.map((c) => c.statement)];
+  // Uma falha lançada por QUALQUER statement do lote (ex.: erro forçado)
+  // propaga a exceção do `db.batch()` inteiro, revertendo TUDO (nenhuma
+  // escrita parcial) — garantia já existente do FakeD1Database/D1 real.
+  const results = await db.batch(allStatements);
+  const coreResult = results[0];
+
+  if (coreResult.meta.changes !== 1) {
+    const after = await findQuestionById(db, questionId);
+    if (!after) return { ok: false, notFound: true };
+    if (after.version !== expectedVersion) return { ok: false, conflict: true };
+    return { ok: false, fieldErrors: { editorial_status: "Questão não está num status editável." } };
+  }
+
+  // v1.2, Correção B — valida TODOS os demais resultados do lote contra a
+  // expectativa declarada de cada statement; lança BatchInvariantError (erro
+  // controlado, nunca um sucesso silencioso) se algum descompasso aparecer —
+  // em particular, se o histórico afetar 0 linhas mesmo com o core tendo mudado.
+  validateBatchResults(
+    results.slice(1),
+    childStatements.map((c) => c.expectation)
   );
 
-  // Validação de cada resultado do lote (seção 2 da ordem v1.1): o único
-  // statement cujo `meta.changes` decide sucesso/falha é o UPDATE escalar
-  // (índice 0) — todos os demais são condicionados pela MESMA versão-alvo,
-  // então uma falha ali (ex.: injetada por teste) já reflete no UPDATE
-  // escalar não tendo sido a causa raiz; uma falha lançada por QUALQUER
-  // statement do lote (ex.: erro forçado) propaga a exceção do `db.batch()`
-  // inteiro, revertendo TUDO (nenhuma escrita parcial).
-  const [coreResult] = await db.batch(statements);
-  if (coreResult.meta.changes === 1) return { ok: true, value: { id: questionId } };
+  // audit_log só quando a mutação REALMENTE aconteceu (changed:true) —
+  // nunca em no-op nem em retry idempotente (ambos retornam antes de chegar
+  // aqui).
+  await recordAuditEvent(db, newId(), "editorial_question_updated", actorUserId, {
+    questionId,
+    fields: changedFields.join(","),
+  });
 
-  const after = await findQuestionById(db, questionId);
-  if (!after) return { ok: false, notFound: true };
-  // Repetição idempotente (Correção A, seção 2 da ordem v1.1): o UPDATE não
-  // mudou nada agora (a `expectedVersion` enviada já está obsoleta), mas se
-  // a questão está EXATAMENTE na versão que ESTA chamada teria produzido
-  // (`versionAfter`) e o conteúdo escalar mesclado bate byte a byte com o
-  // que está gravado, é a MESMA chamada sendo reenviada (ex.: retry de
-  // rede) — não um conflito real com edição de outra pessoa. Reconhecer
-  // isso evita um 409 espúrio E confirma que o guard `NOT EXISTS` do
-  // histórico (por versão) já impediu a duplicação, sem escrever de novo.
-  if (
-    after.version === versionAfter &&
-    after.enunciado === mergedScalars.enunciado &&
-    after.conteudo === mergedScalars.conteudo &&
-    after.dificuldade === mergedScalars.dificuldade &&
-    after.origem === mergedScalars.origem &&
-    after.fingerprint === mergedScalars.fingerprint
-  ) {
-    return { ok: true, value: { id: questionId } };
-  }
-  if (after.version !== expectedVersion) return { ok: false, conflict: true };
-  return { ok: false, fieldErrors: { editorial_status: "Questão não está num status editável." } };
+  return { ok: true, changed: true, value: { id: questionId } };
 }
 
 /* --------------------------------- Leitura DTO -------------------------------- */
@@ -756,8 +965,15 @@ async function applyTransition(
     metadata: params.metadata ?? null,
   });
 
-  const [updateResult] = await db.batch([transitionStatement, historyStatement]);
-  if (updateResult.meta.changes === 1) return { ok: true, changed: true };
+  const [updateResult, historyResult] = await db.batch([transitionStatement, historyStatement]);
+  if (updateResult.meta.changes === 1) {
+    // v1.2, Correção B — não basta o UPDATE da transição ter mudado; o
+    // INSERT de question_history TAMBÉM precisa ter afetado exatamente 1
+    // linha. Um `changes = 0` silencioso aqui (sem exceção) nunca pode ser
+    // relatado como sucesso.
+    validateBatchResults([historyResult], [{ label: "INSERT question_history (transição)", expected: "exactlyOne" }]);
+    return { ok: true, changed: true };
+  }
 
   const after = await findQuestionById(db, params.questionId);
   if (!after) return { ok: false, notFound: true };

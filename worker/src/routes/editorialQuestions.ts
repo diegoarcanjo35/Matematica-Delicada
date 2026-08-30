@@ -4,6 +4,7 @@ import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { resolveEditorialRole, roleSatisfies } from "../lib/rbac";
 import {
+  isValidMutationId,
   isValidQuestionId,
   pickAllowedFields,
   QUESTION_CREATE_ALLOWED_FIELDS,
@@ -195,21 +196,33 @@ export async function handleEditorialQuestionsRequest(request: Request, env: Env
     }
 
     if (request.method === "PATCH") {
-      const body = await readJsonBody<Record<string, unknown> & { expectedVersion?: number }>(request);
+      const body = await readJsonBody<Record<string, unknown> & { expectedVersion?: number; mutationId?: string }>(request);
       if (!body) return Errors.badRequest("Corpo inválido ou excede o limite de tamanho.");
       const versionResult = validateExpectedVersion(body.expectedVersion);
       if (!versionResult.ok) return validationError("expectedVersion", versionResult.error!);
+      // Sprint 7 v1.2, Correção A — mutationId é obrigatório e precisa ser
+      // um UUID bem formado; a prova de idempotência de retry nunca é
+      // conteúdo parecido, só esta chave.
+      if (!isValidMutationId(body.mutationId)) return validationError("mutationId", "Informe um mutationId (UUID) válido.");
 
       const input = pickAllowedFields<QuestionInput>(body, QUESTION_CREATE_ALLOWED_FIELDS);
-      const result = await updateQuestion(env.DB, actor.userId, questionId, versionResult.value!, input);
+      const result = await updateQuestion(env.DB, actor.userId, questionId, versionResult.value!, body.mutationId, input);
       if (!result.ok) {
         if (result.notFound) return Errors.notFound();
         if (result.conflict) {
-          return json({ error: { code: "version_conflict", message: "A questão foi alterada por outra pessoa. Recarregue antes de salvar." } }, { status: 409 });
+          return json(
+            {
+              error: {
+                code: "version_conflict",
+                message: result.fieldErrors?.mutationId ?? "A questão foi alterada por outra pessoa. Recarregue antes de salvar.",
+              },
+            },
+            { status: 409 }
+          );
         }
         return json({ error: { code: "validation_error", message: "Não foi possível salvar.", fields: result.fieldErrors ?? {} } }, { status: 400 });
       }
-      return json({ ok: true, id: result.value!.id });
+      return json({ ok: true, id: result.value!.id, changed: result.changed ?? true });
     }
 
     return Errors.methodNotAllowed();

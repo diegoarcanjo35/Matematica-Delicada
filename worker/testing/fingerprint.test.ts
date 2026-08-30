@@ -1,4 +1,6 @@
 // @vitest-environment node
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeD1Database } from "./fakeD1";
 import { createUser } from "../src/repositories/userRepository";
@@ -11,9 +13,11 @@ import {
 import { createQuestion } from "../src/services/questionService";
 import { previewImport } from "../src/services/questionImportService";
 
-/* Sprint 7 v1.1, Correção C — algoritmo de fingerprint testado DIRETAMENTE
-   (nunca só indiretamente via comportamento de duplicidade). Cobre os 12
-   itens da seção 4 da ordem de correção. */
+/* Sprint 7 v1.1/v1.2, Correção C — algoritmo de fingerprint testado
+   DIRETAMENTE (nunca só indiretamente via comportamento de duplicidade).
+   Cobre os itens das duas ordens de correção. v1.2: o payload EXCLUI
+   `isCorrect`/gabarito e explicação de distrator — versão bump para
+   "question-fingerprint-v2" (nunca um "v1" com regras diferentes). */
 
 const BASE_ALTERNATIVES: FingerprintAlternativeInput[] = [
   { letter: "A", text: "Alternativa A", isCorrect: false },
@@ -29,8 +33,8 @@ describe("computeQuestionFingerprint — contrato explícito", () => {
     expect(fp).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("a constante de versão está presente no payload canônico (nunca alteração silenciosa de algoritmo)", () => {
-    expect(QUESTION_FINGERPRINT_VERSION).toBe("question-fingerprint-v1");
+  it("a constante de versão está presente no payload canônico e foi incrementada para v2 (Correção C, v1.2 — regras mudaram, nunca um v1 silencioso)", () => {
+    expect(QUESTION_FINGERPRINT_VERSION).toBe("question-fingerprint-v2");
   });
 
   // 1. mesma questão por criação e CSV → mesmo fingerprint.
@@ -92,13 +96,12 @@ describe("computeQuestionFingerprint — contrato explícito", () => {
     expect(a).not.toBe(b);
   });
 
-  // 6. mudança em qualquer alternativa → diferente.
-  it("6. uma mudança em QUALQUER alternativa produz um fingerprint DIFERENTE", async () => {
+  // 6. mudança no TEXTO de qualquer alternativa → diferente (v1.2: mudar
+  // SÓ o gabarito NÃO conta mais — ver bloco "Correção C v1.2" abaixo).
+  it("6. uma mudança no TEXTO de qualquer alternativa produz um fingerprint DIFERENTE", async () => {
     const original = await computeQuestionFingerprint("Enunciado fixo.", BASE_ALTERNATIVES);
     const changedText = BASE_ALTERNATIVES.map((a) => (a.letter === "C" ? { ...a, text: "Alternativa C modificada" } : a));
-    const changedCorrect = BASE_ALTERNATIVES.map((a) => ({ ...a, isCorrect: a.letter === "A" }));
     expect(await computeQuestionFingerprint("Enunciado fixo.", changedText)).not.toBe(original);
-    expect(await computeQuestionFingerprint("Enunciado fixo.", changedCorrect)).not.toBe(original);
   });
 
   // 7. troca de letras/ordem das alternativas → diferente (mas ORDEM DE
@@ -128,6 +131,101 @@ describe("computeQuestionFingerprint — contrato explícito", () => {
     const fp1 = await computeQuestionFingerprint("Mesmo conteúdo.", BASE_ALTERNATIVES);
     const fp2 = await computeQuestionFingerprint("Mesmo conteúdo.", BASE_ALTERNATIVES);
     expect(fp1).toBe(fp2);
+  });
+});
+
+describe("Correção C, v1.2 — fingerprint independente do GABARITO", () => {
+  it("mesma questão com GABARITO diferente (isCorrect trocado) → MESMO fingerprint", async () => {
+    const original = await computeQuestionFingerprint("Enunciado fixo.", BASE_ALTERNATIVES);
+    const differentAnswerKey = BASE_ALTERNATIVES.map((a) => ({ ...a, isCorrect: a.letter === "D" })); // era B, agora D
+    expect(await computeQuestionFingerprint("Enunciado fixo.", differentAnswerKey)).toBe(original);
+  });
+
+  it("mesma questão com explicação de distrator diferente → MESMO fingerprint (payload nunca inclui distractorExplanation)", async () => {
+    // O tipo FingerprintAlternativeInput nem carrega distractorExplanation —
+    // reforça estruturalmente que o payload não pode incluí-la. O teste
+    // ainda passa um campo extra (TS permite excesso de campos em runtime)
+    // para provar que, mesmo se o chamador o incluísse por engano, ele
+    // seria ignorado pelo cálculo.
+    const withExplanationA = BASE_ALTERNATIVES.map((a, i) =>
+      i === 0 ? ({ ...a, distractorExplanation: "Explicação X" } as FingerprintAlternativeInput) : a
+    );
+    const withExplanationB = BASE_ALTERNATIVES.map((a, i) =>
+      i === 0 ? ({ ...a, distractorExplanation: "Explicação Y, completamente diferente" } as FingerprintAlternativeInput) : a
+    );
+    const a = await computeQuestionFingerprint("Enunciado fixo.", withExplanationA);
+    const b = await computeQuestionFingerprint("Enunciado fixo.", withExplanationB);
+    expect(a).toBe(b);
+  });
+
+  it("duplicidade NÃO pode ser burlada trocando o gabarito — criar a mesma questão com correta diferente ainda é rejeitado como duplicata", async () => {
+    const db = new FakeD1Database();
+    db.sqlite.exec(
+      `INSERT INTO patterns (id, code, slug, name, recognition_phrase, description, main_strategy, introductory_example, strategic_summary, editorial_status)
+       VALUES ('pat-1', 'PAD-01', 'padrao-1', 'Padrão 1', 'F', 'D', 'E', 'X', 'R', 'published')`
+    );
+    await createUser(db as never, {
+      id: "autor1",
+      name: "Autora Teste",
+      email: "autor1@teste.dev",
+      emailNormalized: "autor1@teste.dev",
+      passwordHash: "hash",
+    });
+    const dna = { pista: "p", estrategia: "e", pegadinha: "p", conteudoApoio: "c", resolucao: "r", atalho: null, aprendizadoErro: "a" };
+    const enunciado = "Questão para teste de burla de gabarito.";
+    const altsCorrectB = ["A", "B", "C", "D", "E"].map((letter) => ({
+      letter,
+      text: `Alt ${letter}`,
+      isCorrect: letter === "B",
+      distractorExplanation: null,
+    }));
+    const altsCorrectD = ["A", "B", "C", "D", "E"].map((letter) => ({
+      letter,
+      text: `Alt ${letter}`, // MESMOS textos
+      isCorrect: letter === "D", // só o gabarito muda
+      distractorExplanation: null,
+    }));
+
+    const first = await createQuestion(db as never, "autor1", {
+      code: "GABARITO-1",
+      enunciado,
+      dificuldade: "media",
+      origem: "autoral",
+      alternativas: altsCorrectB as never,
+      dna,
+      padroes: [{ patternId: "pat-1", role: "principal" }],
+      tags: [],
+      imagens: [],
+    } as never);
+    expect(first.ok).toBe(true);
+
+    // "Lavagem" tentada: mesmo enunciado, mesmos textos de alternativa, só o
+    // gabarito muda — DEVE continuar sendo rejeitado como duplicata.
+    const laundered = await createQuestion(db as never, "autor1", {
+      code: "GABARITO-2",
+      enunciado,
+      dificuldade: "media",
+      origem: "autoral",
+      alternativas: altsCorrectD as never,
+      dna,
+      padroes: [{ patternId: "pat-1", role: "principal" }],
+      tags: [],
+      imagens: [],
+    } as never);
+    expect(laundered.ok).toBe(false);
+    expect(laundered.fieldErrors?.enunciado).toMatch(/fingerprint/i);
+  });
+
+  it("fixtures locais recalculadas: nenhuma fixture do repositório embute um fingerprint calculado sob o algoritmo antigo — o seed usa placeholders determinísticos, nunca um hash real", () => {
+    // scripts/fixtures/questions-fixtures.local.sql e
+    // worker/testing/questionFixtures.ts NUNCA computaram o fingerprint via
+    // o algoritmo real (usam strings placeholder determinísticas, ex.
+    // 'fixture-fingerprint-q-01') — então não há nenhum valor "v1" residual
+    // para recalcular: a mudança de versão não deixa nenhum dado de fixture
+    // desatualizado. Este teste documenta essa confirmação diretamente.
+    const seedSql = readFileSync(resolve(__dirname, "../../scripts/fixtures/questions-fixtures.local.sql"), "utf-8");
+    expect(seedSql).toMatch(/fixture-fingerprint-q-\d+/);
+    expect(seedSql).not.toMatch(/[0-9a-f]{64}/); // nenhum hash real de 64 hex embutido
   });
 });
 

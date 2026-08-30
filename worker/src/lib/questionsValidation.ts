@@ -110,6 +110,20 @@ export function isValidQuestionId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 100;
 }
 
+/** Sprint 7 v1.2, Correção A — `mutationId` gerado pelo cliente para o
+ *  PATCH. Aceita qualquer UUID bem formado (RFC 4122, qualquer versão —
+ *  `crypto.randomUUID()` do navegador gera v4, mas não exigimos a versão
+ *  exata para não acoplar a validação a uma implementação de geração
+ *  específica). Reaproveitado como `question_history.id` (chave primária) —
+ *  por isso PRECISA ser um formato compatível com o que já é aceito ali
+ *  (TEXT), e a unicidade real é garantida pela PK da tabela, nunca só por
+ *  este regex. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidMutationId(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
 export function validateNonEmptyText(
   value: unknown,
   fieldLabel: string,

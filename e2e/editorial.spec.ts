@@ -164,6 +164,7 @@ test.describe("Criação, edição e conflito", () => {
     const outOfBandPatch = await page.request.patch(`/api/editorial/questions/${id}`, {
       data: {
         expectedVersion: 1,
+        mutationId: crypto.randomUUID(),
         enunciado: `Alterado por outra sessão ${uniqueToken()}.`,
         alternativas: ["A", "B", "C", "D", "E"].map((letter) => ({
           letter,

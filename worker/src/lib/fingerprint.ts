@@ -1,7 +1,15 @@
-/* Fingerprint de duplicidade do Banco de Questões — Sprint 7 v1.1, Correção
-   C. Algoritmo EXPLÍCITO, DETERMINÍSTICO e testado diretamente (ver
+/* Fingerprint de duplicidade do Banco de Questões — Sprint 7 v1.1/v1.2,
+   Correção C. Algoritmo EXPLÍCITO, DETERMINÍSTICO e testado diretamente (ver
    worker/testing/fingerprint.test.ts) — nunca só provado indiretamente via
    comportamento de duplicidade.
+
+   v1.2, Correção C: a v1 incluía `isCorrect` de cada alternativa no payload
+   canônico — isso permitia "lavar" uma duplicata só trocando qual letra está
+   marcada como correta (mesmo enunciado, mesmas alternativas, gabarito
+   diferente escapava da detecção). A v2 EXCLUI o gabarito (e a explicação do
+   distrator) do payload: duas questões com o mesmo enunciado e os mesmos
+   TEXTOS de alternativa são a MESMA questão para fins de duplicidade,
+   independente de qual alternativa cada uma marca como correta.
 
    Contrato (docs/BANCO_QUESTOES.md, seção "Fingerprint"):
      - calculado no Worker, nunca no banco;
@@ -10,33 +18,42 @@
      - a partir de uma representação canônica VERSIONADA (JSON.stringify de
        um objeto com chaves e ordem fixas — nunca concatenação ambígua de
        string);
-     - inclui, no mínimo, o enunciado e as cinco alternativas (texto +
-       indicação de correta), sempre reordenadas por letra A-E — nunca a
-       ordem em que o cliente as enviou;
-     - independente de código editorial, ID, status editorial, autor,
-       revisor e datas — nenhum desses campos entra no payload canônico;
+     - inclui, no mínimo, o enunciado e os TEXTOS das cinco alternativas
+       A-E, sempre reordenadas por letra — nunca a ordem em que o cliente as
+       enviou;
+     - EXCLUI explicitamente: indicação de correta (`isCorrect`), explicação
+       do distrator, código editorial, ID, status editorial, autor, revisor
+       e datas — nenhum desses campos entra no payload canônico;
      - produz o MESMO resultado seja a questão criada pelo formulário
        unitário ou pela importação CSV, porque os dois caminhos chamam esta
        MESMA função com os MESMOS tipos de entrada (nunca duas
        implementações paralelas).
 
    Uma mudança futura de algoritmo exige uma nova constante de versão (ex.:
-   "question-fingerprint-v2") e uma estratégia de migration/reindexação
+   "question-fingerprint-v3") e uma estratégia de migration/reindexação
    explícita — nunca uma alteração silenciosa do texto canônico sob a MESMA
    versão, o que tornaria fingerprints antigos e novos incomparáveis sem
-   aviso. */
+   aviso. A troca de v1 para v2 NESTA correção não exige essa reindexação:
+   a Sprint 7 ainda não foi mesclada em `main` nem tocou D1 remoto, então não
+   existe fingerprint v1 "real" em produção para reconciliar — só as
+   fixtures/dados técnicos locais deste branch, recalculados nesta mesma
+   correção. */
 
 import { sha256Hex } from "./crypto";
 import type { QuestionAlternativeLetter } from "./questionsValidation";
 
 /** Versão do algoritmo — sempre o primeiro campo do payload canônico.
  *  Nunca reaproveitada para uma mudança de regra: uma mudança de algoritmo
- *  troca esta constante. */
-export const QUESTION_FINGERPRINT_VERSION = "question-fingerprint-v1";
+ *  troca esta constante. v1.2, Correção C: bump de v1 para v2 (payload
+ *  mudou — gabarito excluído), nunca um "v1" com regras diferentes. */
+export const QUESTION_FINGERPRINT_VERSION = "question-fingerprint-v2";
 
 export interface FingerprintAlternativeInput {
   letter: QuestionAlternativeLetter | string;
   text: string;
+  /** Aceito na assinatura por compatibilidade com o formato já usado nos
+   *  dois call sites (AlternativeInput completo) — mas NUNCA entra no
+   *  payload canônico a partir da v2 (Correção C). */
   isCorrect: boolean;
 }
 
@@ -68,15 +85,17 @@ export function canonicalizeFingerprintText(raw: string): string {
 export function buildCanonicalFingerprintPayload(
   enunciado: string,
   alternatives: FingerprintAlternativeInput[]
-): { v: string; enunciado: string; alternativas: Array<{ letter: string; text: string; correta: boolean }> } {
+): { v: string; enunciado: string; alternativas: Array<{ letter: string; text: string }> } {
   const sorted = [...alternatives].sort((a, b) => a.letter.localeCompare(b.letter));
   return {
     v: QUESTION_FINGERPRINT_VERSION,
     enunciado: canonicalizeFingerprintText(enunciado),
+    // v1.2, Correção C: SEM `correta`/isCorrect e SEM explicação do
+    // distrator — só letra + texto. Trocar o gabarito ou a explicação do
+    // distrator NUNCA muda o fingerprint.
     alternativas: sorted.map((alt) => ({
       letter: alt.letter,
       text: canonicalizeFingerprintText(alt.text),
-      correta: alt.isCorrect,
     })),
   };
 }

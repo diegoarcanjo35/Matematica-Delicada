@@ -280,7 +280,7 @@ describe("CRUD de questões", () => {
 
   it("409 quando expectedVersion está desatualizada num PATCH", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    const result = await updateQuestion(db as never, "autor1", qId, 999, {
+    const result = await updateQuestion(db as never, "autor1", qId, 999, crypto.randomUUID(), {
       enunciado: "Novo enunciado.",
       alternativas: validAlternatives as never,
       dna: validDna,
@@ -294,7 +294,7 @@ describe("CRUD de questões", () => {
 
   it("questão publicada nunca pode ser editada por PATCH", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "published", version: 5 });
-    const result = await updateQuestion(db as never, "autor1", qId, 5, {
+    const result = await updateQuestion(db as never, "autor1", qId, 5, crypto.randomUUID(), {
       enunciado: "Tentativa de sobrescrever conteúdo publicado.",
       alternativas: validAlternatives as never,
       dna: validDna,
@@ -309,7 +309,7 @@ describe("CRUD de questões", () => {
   });
 
   it("isolamento: PATCH em id inexistente retorna notFound", async () => {
-    const result = await updateQuestion(db as never, "autor1", "id-que-nao-existe", 1, {} as never);
+    const result = await updateQuestion(db as never, "autor1", "id-que-nao-existe", 1, crypto.randomUUID(), {} as never);
     expect(result.ok).toBe(false);
     expect(result.notFound).toBe(true);
   });
@@ -319,7 +319,7 @@ describe("CRUD de questões", () => {
 /* Sprint 7 v1.1, Correção A — PATCH parcial de verdade                    */
 /* ---------------------------------------------------------------------- */
 
-describe("Correção A — semântica parcial do PATCH", () => {
+describe("Correção A — semântica parcial do PATCH (v1.1) + idempotência por mutationId (v1.2)", () => {
   function tagCount(id: string): number {
     return (db.sqlite.prepare("SELECT COUNT(*) as total FROM question_tags WHERE question_id = ?").get(id) as { total: number }).total;
   }
@@ -335,6 +335,16 @@ describe("Correção A — semântica parcial do PATCH", () => {
   function imageCount(id: string): number {
     return (db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE question_id = ?").get(id) as { total: number }).total;
   }
+  function auditLogCount(questionId: string): number {
+    return (
+      db.sqlite
+        .prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = 'editorial_question_updated' AND metadata LIKE ?")
+        .get(`%${questionId}%`) as { total: number }
+    ).total;
+  }
+  function mid(): string {
+    return crypto.randomUUID();
+  }
 
   // 1. alterar apenas título/enunciado preserva todas as coleções.
   it("1. alterar apenas o enunciado preserva alternativas/DNA/padrões/tags/imagens", async () => {
@@ -343,9 +353,10 @@ describe("Correção A — semântica parcial do PATCH", () => {
     db.sqlite.exec(`INSERT INTO question_images (id, question_id, asset_ref, alt_text) VALUES ('i1','${qId}','assets/questoes/x.png','alt')`);
 
     const before = { alt: altCount(qId), tag: tagCount(qId), pat: patternCount(qId) };
-    const result = await updateQuestion(db as never, "autor1", qId, 1, { enunciado: "Novo enunciado bem diferente do original para teste A1." } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { enunciado: "Novo enunciado bem diferente do original para teste A1." } as never);
 
     expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
     expect(altCount(qId)).toBe(before.alt);
     expect(tagCount(qId)).toBe(before.tag);
     expect(patternCount(qId)).toBe(before.pat);
@@ -361,7 +372,7 @@ describe("Correção A — semântica parcial do PATCH", () => {
     db.sqlite.exec(`INSERT INTO question_tags (id, question_id, content, position) VALUES ('t1','${qId}','fixture',0)`);
 
     const newAlternatives = validAlternatives.map((a) => (a.letter === "A" ? { ...a, text: "Alt A alterada" } : a));
-    const result = await updateQuestion(db as never, "autor1", qId, 1, { alternativas: newAlternatives } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { alternativas: newAlternatives } as never);
 
     expect(result.ok).toBe(true);
     expect(tagCount(qId)).toBe(1);
@@ -375,7 +386,7 @@ describe("Correção A — semântica parcial do PATCH", () => {
   it("3. omitir 'alternativas' do corpo NÃO apaga as alternativas existentes", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
     expect(altCount(qId)).toBe(5);
-    const result = await updateQuestion(db as never, "autor1", qId, 1, { conteudo: "Novo conteúdo" } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Novo conteúdo" } as never);
     expect(result.ok).toBe(true);
     expect(altCount(qId)).toBe(5);
   });
@@ -383,14 +394,14 @@ describe("Correção A — semântica parcial do PATCH", () => {
   // 4. enviar alternatives: [] limpa somente quando o estado permitir.
   it("4. 'alternativas: []' limpa explicitamente enquanto a questão está em draft", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    const result = await updateQuestion(db as never, "autor1", qId, 1, { alternativas: [] } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { alternativas: [] } as never);
     expect(result.ok).toBe(true);
     expect(altCount(qId)).toBe(0);
   });
 
   it("4b. 'alternativas: []' é rejeitada (nada é apagado) quando a questão não está mais num status editável", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "published", version: 5 });
-    const result = await updateQuestion(db as never, "autor1", qId, 5, { alternativas: [] } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 5, mid(), { alternativas: [] } as never);
     expect(result.ok).toBe(false);
     expect(altCount(qId)).toBe(5);
   });
@@ -398,7 +409,7 @@ describe("Correção A — semântica parcial do PATCH", () => {
   // 5. campo obrigatório null retorna 400 sem escrever.
   it("5. enviar um campo obrigatório como null retorna erro de validação SEM escrever nada", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    const result = await updateQuestion(db as never, "autor1", qId, 1, { enunciado: null } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { enunciado: null } as never);
     expect(result.ok).toBe(false);
     expect(result.fieldErrors?.enunciado).toBeDefined();
     expect(questionRow(qId).version).toBe(1); // nada foi gravado
@@ -407,18 +418,18 @@ describe("Correção A — semântica parcial do PATCH", () => {
   it("5b. campos ANULÁVEIS (ex.: prova) aceitam null explícito e limpam o campo", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
     db.sqlite.exec(`UPDATE questions SET prova = 'ENEM 2024' WHERE id = '${qId}'`);
-    const result = await updateQuestion(db as never, "autor1", qId, 1, { prova: null } as never);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { prova: null } as never);
     expect(result.ok).toBe(true);
     const row = db.sqlite.prepare("SELECT prova FROM questions WHERE id = ?").get(qId) as { prova: string | null };
     expect(row.prova).toBeNull();
   });
 
-  // 6. falha forçada numa coleção reverte escalar e demais coleções.
-  it("6. falha forçada no INSERT de uma coleção reverte TAMBÉM o UPDATE escalar e as outras coleções", async () => {
+  // 6 / 12. falha forçada numa coleção reverte escalar e demais coleções.
+  it("6/12. falha forçada no INSERT de uma coleção reverte TAMBÉM o UPDATE escalar e as outras coleções", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
     db.failNextMatching(/INSERT INTO question_tags/);
     await expect(
-      updateQuestion(db as never, "autor1", qId, 1, {
+      updateQuestion(db as never, "autor1", qId, 1, mid(), {
         enunciado: "Não deveria persistir de jeito nenhum.",
         tags: ["nova-tag"],
       } as never)
@@ -432,7 +443,7 @@ describe("Correção A — semântica parcial do PATCH", () => {
   // 7. versão desatualizada não altera nada (nenhuma coleção tocada).
   it("7. versão desatualizada não altera NADA — nem escalar, nem coleções explicitamente enviadas", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    const result = await updateQuestion(db as never, "autor1", qId, 999, {
+    const result = await updateQuestion(db as never, "autor1", qId, 999, mid(), {
       enunciado: "Não deveria persistir.",
       tags: ["nao-deveria-persistir"],
     } as never);
@@ -442,7 +453,7 @@ describe("Correção A — semântica parcial do PATCH", () => {
     expect(questionRow(qId).version).toBe(1);
   });
 
-  // 8. mass assignment de status/papel/autor alheio é rejeitado.
+  // 8 (mass assignment). de status/papel/autor alheio é rejeitado.
   it("8. mass assignment via PATCH: editorialStatus/version/autorId/revisorId são ignorados", async () => {
     const token = await seedUserWithSession("editorA8");
     grantRole("editorA8", "editor");
@@ -451,6 +462,7 @@ describe("Correção A — semântica parcial do PATCH", () => {
       method: "PATCH",
       body: JSON.stringify({
         expectedVersion: 1,
+        mutationId: mid(),
         editorialStatus: "published",
         autorId: "outro-usuario",
         revisorId: "outro-usuario",
@@ -468,22 +480,9 @@ describe("Correção A — semântica parcial do PATCH", () => {
     expect(full.revisor_id).not.toBe("outro-usuario");
   });
 
-  // 9. repetição idempotente não duplica histórico/auditoria.
-  it("9. repetir o MESMO PATCH (mesma expectedVersion já obsoleta) não duplica question_history", async () => {
-    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    const first = await updateQuestion(db as never, "autor1", qId, 1, { conteudo: "Conteúdo alterado uma vez." } as never);
-    expect(first.ok).toBe(true);
-    const historyAfterFirst = historyCount(qId);
-
-    // Reenvio idempotente: mesma expectedVersion (1) da chamada original.
-    const retry = await updateQuestion(db as never, "autor1", qId, 1, { conteudo: "Conteúdo alterado uma vez." } as never);
-    expect(retry.ok).toBe(true);
-    expect(historyCount(qId)).toBe(historyAfterFirst); // nunca duplica
-  });
-
   it("histórico registra os NOMES dos grupos alterados, nunca o conteúdo integral", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    await updateQuestion(db as never, "autor1", qId, 1, { enunciado: "Enunciado sensível que não deve vazar no histórico." } as never);
+    await updateQuestion(db as never, "autor1", qId, 1, mid(), { enunciado: "Enunciado sensível que não deve vazar no histórico." } as never);
     const hist = db.sqlite.prepare("SELECT metadata FROM question_history WHERE question_id = ? ORDER BY created_at DESC LIMIT 1").get(qId) as {
       metadata: string;
     };
@@ -491,11 +490,192 @@ describe("Correção A — semântica parcial do PATCH", () => {
     expect(hist.metadata).not.toContain("Enunciado sensível");
   });
 
-  it("nunca cria um db.batch() vazio: um PATCH sem nenhum campo/coleção ainda assim valida a versão de forma atômica", async () => {
+  /* ------------------------- Sprint 7 v1.2, Correção A --------------------- */
+  /* Os 15 cenários exigidos pela ordem de correção final (seção 5).          */
+
+  // 1. retry com mesma mutationId → sucesso sem nova escrita.
+  it("v1.2-1. retry com a MESMA mutationId → sucesso idempotente, sem nova escrita/histórico", async () => {
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
-    const result = await updateQuestion(db as never, "autor1", qId, 1, {} as never);
+    const mutationId = mid();
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { conteudo: "Conteúdo alterado uma vez." } as never);
+    expect(first.ok).toBe(true);
+    expect(first.changed).toBe(true);
+    const historyAfterFirst = historyCount(qId);
+    const versionAfterFirst = questionRow(qId).version;
+
+    // Retry: MESMO mutationId, mesma expectedVersion original (1, já obsoleta).
+    const retry = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { conteudo: "Conteúdo alterado uma vez." } as never);
+    expect(retry.ok).toBe(true);
+    expect(retry.changed).toBe(false);
+    expect(historyCount(qId)).toBe(historyAfterFirst); // nunca duplica
+    expect(questionRow(qId).version).toBe(versionAfterFirst); // nenhuma escrita nova
+  });
+
+  // 2. nova mutationId + versão antiga → 409.
+  it("v1.2-2. mutationId NOVA com versão desatualizada → 409 (conflito real, não idempotência)", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Primeira edição real." } as never);
+    expect(first.ok).toBe(true);
+
+    // mutationId DIFERENTE da primeira, mas expectedVersion=1 (já obsoleta).
+    const second = await updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Segunda tentativa com versão velha." } as never);
+    expect(second.ok).toBe(false);
+    expect(second.conflict).toBe(true);
+  });
+
+  // 3. mesma mutationId usada por outra questão → 409.
+  it("v1.2-3. a MESMA mutationId reutilizada para OUTRA questão → 409 (colisão, nunca retry)", async () => {
+    const qId1 = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const qId2 = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const mutationId = mid();
+    const first = await updateQuestion(db as never, "autor1", qId1, 1, mutationId, { conteudo: "Edição da questão 1." } as never);
+    expect(first.ok).toBe(true);
+
+    const collision = await updateQuestion(db as never, "autor1", qId2, 1, mutationId, { conteudo: "Edição da questão 2." } as never);
+    expect(collision.ok).toBe(false);
+    expect(collision.conflict).toBe(true);
+    // A questão 2 nunca foi tocada.
+    expect(questionRow(qId2).version).toBe(1);
+  });
+
+  // 4. mesma mutationId usada por outro ator → 409.
+  it("v1.2-4. a MESMA mutationId reutilizada por OUTRO ator → 409 (colisão, nunca retry)", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const mutationId = mid();
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { conteudo: "Edição pelo autor1." } as never);
+    expect(first.ok).toBe(true);
+    const versionAfterFirst = questionRow(qId).version;
+
+    const collision = await updateQuestion(db as never, "editor1", qId, versionAfterFirst, mutationId, { conteudo: "Tentativa de outro ator com o mesmo ID." } as never);
+    expect(collision.ok).toBe(false);
+    expect(collision.conflict).toBe(true);
+    expect(questionRow(qId).version).toBe(versionAfterFirst); // não tocado pela colisão
+  });
+
+  // 5/6/7. edição concorrente que muda SÓ tags/DNA/imagens-ou-direitos nunca
+  // é confundida com um retry — exatamente o cenário que a heurística de
+  // conteúdo da v1.1 acertava por acaso (por nunca comparar essas colunas) e
+  // que, olhando de novo, ERA o bug: qualquer PATCH que só tocasse essas
+  // coleções tinha `enunciado/conteudo/dificuldade/origem/fingerprint`
+  // idênticos ao estado anterior — a v1.1 teria classificado uma tentativa
+  // de PATCH com a MESMA versão-alvo e ESSES escalares iguais como "retry",
+  // mesmo sendo uma tentativa síncrona real e válida. Com mutationId como
+  // única prova, cada uma dessas chamadas (mutationId DIFERENTE) é tratada
+  // como sua própria mutação — nunca aceita/rejeitada por parecença de conteúdo.
+  it("v1.2-5. edição que muda SÓ tags nunca é confundida com retry (mutationId diferente = mutação própria)", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mid(), { tags: ["primeira-tag"] } as never);
+    expect(first.ok).toBe(true);
+    const versionAfterFirst = questionRow(qId).version;
+
+    // Segunda chamada: versão correta (não é um conflito de verdade), tags
+    // DIFERENTES, mutationId NOVO — é uma segunda edição real, não um retry.
+    const second = await updateQuestion(db as never, "autor1", qId, versionAfterFirst, mid(), { tags: ["segunda-tag-diferente"] } as never);
+    expect(second.ok).toBe(true);
+    expect(second.changed).toBe(true); // NUNCA seria aceita como idempotente
+    const tags = db.sqlite.prepare("SELECT content FROM question_tags WHERE question_id = ?").all(qId) as Array<{ content: string }>;
+    expect(tags.map((t) => t.content)).toEqual(["segunda-tag-diferente"]);
+  });
+
+  it("v1.2-6. edição que muda SÓ o DNA nunca é confundida com retry", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mid(), { dna: { ...validDna, pista: "Pista versão 1" } } as never);
+    expect(first.ok).toBe(true);
+    const versionAfterFirst = questionRow(qId).version;
+
+    const second = await updateQuestion(db as never, "autor1", qId, versionAfterFirst, mid(), { dna: { ...validDna, pista: "Pista versão 2, bem diferente" } } as never);
+    expect(second.ok).toBe(true);
+    expect(second.changed).toBe(true);
+    expect(dnaRow(qId)?.pista).toBe("Pista versão 2, bem diferente");
+  });
+
+  it("v1.2-7. edição que muda SÓ imagens/direitos nunca é confundida com retry", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mid(), { titularDireitos: "Titular A" } as never);
+    expect(first.ok).toBe(true);
+    const versionAfterFirst = questionRow(qId).version;
+
+    const second = await updateQuestion(db as never, "autor1", qId, versionAfterFirst, mid(), {
+      titularDireitos: "Titular B, completamente diferente",
+      imagens: [{ assetRef: "assets/questoes/nova.png", altText: "Descrição da imagem", caption: null, position: 0 }],
+    } as never);
+    expect(second.ok).toBe(true);
+    expect(second.changed).toBe(true);
+    expect(imageCount(qId)).toBe(1);
+  });
+
+  // 8. PATCH vazio → 400, zero escrita.
+  it("v1.2-8. corpo do PATCH sem NENHUM campo/coleção editável → 400, versão nunca incrementada", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), {} as never);
+    expect(result.ok).toBe(false);
+    expect(result.fieldErrors?._body).toBeDefined();
+    expect(questionRow(qId).version).toBe(1);
+    expect(historyCount(qId)).toBe(0);
+  });
+
+  // 9. no-op (valores idênticos ao atual) → changed:false, zero escrita.
+  it("v1.2-9. PATCH com valores IDÊNTICOS ao estado atual → changed:false, sem nova versão/histórico/auditoria", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = questionRow(qId);
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), {
+      conteudo: "Conteúdo de teste", // mesmo valor já gravado por seedQuestion
+      tags: [],
+    } as never);
     expect(result.ok).toBe(true);
-    expect(altCount(qId)).toBe(5); // nada foi apagado
+    expect(result.changed).toBe(false);
+    expect(questionRow(qId).version).toBe(before.version); // nenhuma escrita
+    expect(historyCount(qId)).toBe(0);
+    expect(auditLogCount(qId)).toBe(0);
+  });
+
+  // 10. histórico condicionado com changes=0 inesperado → operação não aceita sucesso.
+  it("v1.2-10. um INSERT de question_history com changes=0 inesperado (guard NOT EXISTS já satisfeito por outra linha) nunca é aceito como sucesso", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    // Insere manualmente uma linha de histórico JÁ ocupando (question_id, version=2)
+    // com um ID diferente do mutationId desta chamada — simula a anomalia:
+    // o UPDATE escalar vai suceder e levar a questão à version=2, mas o
+    // guard `NOT EXISTS(question_id, version)` do INSERT condicionado da
+    // Correção A falha porque ETA versão já tem um histórico (de outra
+    // origem), então o INSERT do mutationId desta chamada afeta 0 linhas
+    // SILENCIOSAMENTE — exatamente o que a Correção B precisa capturar.
+    db.sqlite.exec(
+      `INSERT INTO question_history (id, question_id, user_id, action, from_status, to_status, version) VALUES ('${mid()}','${qId}','autor1','updated','draft','draft',2)`
+    );
+    await expect(updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Nova tentativa de conteúdo." } as never)).rejects.toThrow(
+      /exatamente 1 linha/i
+    );
+  });
+
+  // 11. falha forçada no histórico → rollback.
+  it("v1.2-11. falha forçada no INSERT de question_history reverte TAMBÉM o UPDATE escalar", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    db.failNextMatching(/INSERT INTO question_history/);
+    await expect(updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Não deveria persistir." } as never)).rejects.toThrow();
+    const row = db.sqlite.prepare("SELECT conteudo, version FROM questions WHERE id = ?").get(qId) as { conteudo: string; version: number };
+    expect(row.conteudo).not.toBe("Não deveria persistir.");
+    expect(row.version).toBe(1);
+  });
+
+  // 13. audit_log só em changed:true.
+  it("v1.2-13. audit_log só é gravado quando changed:true — nunca em no-op nem em retry idempotente", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const mutationId = mid();
+
+    // No-op: sem audit_log.
+    await updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Conteúdo de teste" } as never);
+    expect(auditLogCount(qId)).toBe(0);
+
+    // Mudança real: COM audit_log.
+    const real = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { conteudo: "Conteúdo realmente novo." } as never);
+    expect(real.changed).toBe(true);
+    expect(auditLogCount(qId)).toBe(1);
+
+    // Retry idempotente da mesma mutação: audit_log NÃO duplica.
+    const retryVersion = questionRow(qId).version;
+    const retry = await updateQuestion(db as never, "autor1", qId, retryVersion - 1, mutationId, { conteudo: "Conteúdo realmente novo." } as never);
+    expect(retry.changed).toBe(false);
+    expect(auditLogCount(qId)).toBe(1); // continua 1, nunca 2
   });
 });
 

@@ -183,6 +183,18 @@ export async function listHistory(db: D1Database, questionId: string): Promise<Q
   return result.results ?? [];
 }
 
+/** Sprint 7 v1.2, Correção A — busca um evento de histórico pelo próprio
+ *  `id`, reaproveitado como chave de idempotência de mutação (`mutationId`)
+ *  sem exigir nenhuma migration nova: `question_history.id` já é PRIMARY
+ *  KEY (unicidade global garantida pelo banco), e a linha já registra
+ *  ator (`user_id`), questão (`question_id`), ação (`action`) e versão
+ *  resultante (`version`) — exatamente o que uma checagem de retry precisa
+ *  conferir. */
+export async function findHistoryById(db: D1Database, id: string): Promise<QuestionHistoryRow | null> {
+  const row = await db.prepare("SELECT * FROM question_history WHERE id = ?").bind(id).first<QuestionHistoryRow>();
+  return row ?? null;
+}
+
 export interface QuestionListFilters {
   search: string | null;
   status: QuestionEditorialStatus | null;

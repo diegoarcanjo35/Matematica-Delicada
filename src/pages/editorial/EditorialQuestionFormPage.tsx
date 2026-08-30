@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
@@ -15,6 +15,7 @@ import {
   type QuestionDnaDto,
 } from "../../api/editorialClient";
 import { useEditorialRole } from "../../auth/editorialRoleContext";
+import { computePayloadSignature, isNetworkFailure, resolveMutationId, type MutationRetryState } from "./mutationId";
 import "./editorial.css";
 
 /* Editor de questão — /editorial/questoes/nova e /editorial/questoes/:id,
@@ -63,6 +64,12 @@ export function EditorialQuestionFormPage() {
   const [versionConflict, setVersionConflict] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  // Sprint 7 v1.2, Correção A — estado de retry do PATCH: só populado quando
+  // a ÚLTIMA tentativa falhou por FALHA DE REDE (nunca por 400/409, que já
+  // significam que o servidor processou a requisição). `useRef` porque isto
+  // nunca deve disparar re-render por si só — só é lido/escrito dentro de
+  // handleSave.
+  const patchRetryState = useRef<MutationRetryState | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -139,16 +146,25 @@ export function EditorialQuestionFormPage() {
       imagens: [],
     };
 
+    // Sprint 7 v1.2, Correção A — decide o mutationId ANTES de chamar a API:
+    // reaproveita o ID da última tentativa SÓ SE o payload é idêntico ao
+    // daquela tentativa (prova de que é o MESMO retry, nunca por
+    // "parecença" de conteúdo) — qualquer alteração no formulário desde a
+    // última falha gera um ID novo, mesmo que a tentativa anterior nunca
+    // tenha sido confirmada pelo servidor.
+    const payloadSignature = computePayloadSignature(payload);
+    const mutationId = resolveMutationId(patchRetryState.current, payloadSignature);
+
     try {
       if (isNew) {
         const result = await createQuestion(payload);
         setSavedNotice("Questão criada como rascunho.");
         navigate(`/editorial/questoes/${result.id}`, { replace: true });
       } else if (id && version !== null) {
-        const result = await updateQuestion(id, version, payload);
-        setSavedNotice("Alterações salvas.");
-        setVersion((v) => (v ?? 0) + 1);
-        void result;
+        const result = await updateQuestion(id, version, mutationId, payload);
+        patchRetryState.current = null; // sucesso — próxima edição usa ID novo
+        setSavedNotice(result.changed ? "Alterações salvas." : "Nada para salvar — o conteúdo já está igual ao atual.");
+        if (result.changed) setVersion((v) => (v ?? 0) + 1);
         await load();
       }
     } catch (error) {
@@ -159,8 +175,19 @@ export function EditorialQuestionFormPage() {
           setFieldErrors(error.fields);
           setSaveError(error.message);
         }
+        // Resposta do servidor recebida (mesmo que de erro) — a próxima
+        // tentativa é uma decisão nova do usuário, nunca um retry automático
+        // do mesmo mutationId.
+        patchRetryState.current = null;
       } else {
         setSaveError("Erro inesperado ao salvar.");
+        if (isNetworkFailure(error)) {
+          // A requisição nunca chegou a uma resposta do servidor — se o
+          // usuário clicar Salvar de novo SEM mudar nada, é o MESMO retry.
+          patchRetryState.current = { mutationId, payloadSignature };
+        } else {
+          patchRetryState.current = null;
+        }
       }
     } finally {
       setSaving(false);
