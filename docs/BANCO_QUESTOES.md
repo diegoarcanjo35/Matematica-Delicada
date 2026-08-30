@@ -18,11 +18,17 @@ treino diário, Caderno de Erros, cálculo dos três índices (Reconhecimento,
 Resolução, Domínio), upload remoto de mídia/R2, questões oficiais reais, conteúdo
 pedagógico definitivo, publicação em produção, D1 remoto ou deploy.
 
-## Schema — migration 0008
+## Schema — migrations 0008 e 0009
 
 `migrations/0008_question_bank_editorial.sql` é puramente aditiva (só
 `CREATE TABLE/INDEX IF NOT EXISTS`) sobre o schema das Sprints 1-6. Nenhum
 conteúdo é inserido pela migration.
+
+`migrations/0009_editorial_batch_invariants.sql` (Sprint 7 v1.3) é aditiva
+também (só `CREATE TRIGGER IF NOT EXISTS`) — o trigger que impõe a
+indivisibilidade núcleo+histórico diretamente no banco; ver "Validação do
+lote" abaixo para o mecanismo completo. **Sprint 8 deve começar sua própria
+migration em `0010`** — nunca reaproveitar ou renumerar 0009.
 
 Tabelas criadas:
 
@@ -345,46 +351,77 @@ ausente não gera nenhum statement, então nunca é apagada por omissão. Uma
 falha lançada por QUALQUER statement do lote reverte a transação inteira
 (nenhuma escrita parcial).
 
-### Validação do lote (v1.2, Correção B)
+### Validação do lote (v1.2 → v1.3, Correção B)
 
-> A auditoria encontrou que só `coreResult.meta.changes` era validado após
-> `db.batch()` — um statement condicionado que retorna `changes = 0`
-> SILENCIOSAMENTE (sem lançar) nunca era detectado, então uma inconsistência
-> (ex.: o `UPDATE` escalar mudou mas o `INSERT` de `question_history` não)
-> podia ser relatada como sucesso.
+> **v1.2** validava só em JS, DEPOIS de `db.batch()` retornar —
+> `worker/src/lib/batchValidation.ts:validateBatchResults`. Uma inspeção
+> direta do código (auditoria v1.3) apontou o problema real: `db.batch()` já
+> é uma transação COMMITADA quando esse JS roda. Lançar um erro nesse ponto
+> impede uma resposta HTTP de sucesso falso, mas **não desfaz o que já foi
+> persistido** — se o `UPDATE` central mudasse `questions` mas o `INSERT`
+> condicionado de `question_history` silenciosamente afetasse 0 linhas (sem
+> lançar exceção), o núcleo ficava committido sem o histórico
+> correspondente: uma inconsistência real e não recuperável, não só uma
+> resposta ruim.
 
-`worker/src/lib/batchValidation.ts:validateBatchResults` agora verifica
-TODOS os resultados do lote contra a expectativa declarada de CADA
-statement — nunca assume que tudo deve afetar exatamente 1 linha:
+**v1.3 — mecanismo transacional real, imposto pelo SQLite/D1 antes do
+commit**, via `migrations/0009_editorial_batch_invariants.sql`:
 
-- `DELETE` de uma coleção → expectativa `"any"` (uma coleção já vazia
-  legitimamente afeta 0 linhas);
-- `INSERT`/`UPSERT` guardado de uma linha específica de coleção → `"exactlyOne"`
-  (se o `UPDATE` central mudou, o guard bate e a linha SEMPRE deveria
-  existir);
-- `INSERT` de `question_history` → `"exactlyOne"` (se o core mudou, o
-  histórico sempre deveria ser criado).
+```sql
+CREATE TRIGGER IF NOT EXISTS trg_questions_require_history_after_update
+AFTER UPDATE ON questions
+FOR EACH ROW
+WHEN NEW.version != OLD.version
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM question_history
+      WHERE question_id = NEW.id AND version = NEW.version
+    )
+    THEN RAISE(ABORT, 'invariante violada: questions.version mudou sem question_history correspondente')
+  END;
+END;
+```
 
-Um descompasso lança `BatchInvariantError` — nunca convertida em sucesso.
-Aplicado tanto em `updateQuestion` (PATCH) quanto em `applyTransition`
-(transições de workflow, que também validam o `INSERT` de histórico depois
-do `UPDATE` da transição). **Limitação documentada**: como o `db.batch()` já
-foi commitado quando o descompasso é detectado, D1 (e o FakeD1Database) não
-oferecem uma forma de desfazer statements já aplicados fora de uma transação
-em andamento — a exceção lançada é a melhor forma de "erro controlado"
-alcançável (propaga como 500 opaco via `worker/src/index.ts`, nunca um
-sucesso), mas não é uma transação de compensação real. Na prática, esse
-cenário só é alcançável hoje via manipulação direta de teste (inserir uma
-linha de histórico concorrente com a mesma versão-alvo por fora) — o design
-das guardas (todas condicionadas pela MESMA versão-alvo do `UPDATE` central,
-dentro da MESMA transação) torna o cenário natural, sem interferência
-externa, essencialmente impossível.
+`RAISE(ABORT, ...)` aborta o statement corrente; como o statement dispara
+DENTRO da mesma transação de `db.batch()`, a exceção resultante propaga para
+o JS e o wrapper de transação (FakeD1Database e o D1 real, ambos com a MESMA
+garantia: "se qualquer statement falhar, o lote inteiro é revertido") desfaz
+TUDO — nenhum commit acontece. Provado diretamente: `worker/testing/migration0009.test.ts`
+executa uma transação explícita com um `UPDATE` de `q2` (inócuo) seguido de
+um `UPDATE` de `q1` que dispara o trigger, e confirma que a mudança em `q2`
+— que "rodou" antes do erro — TAMBÉM é revertida, porque a transação inteira
+nunca commitou.
+
+**Ordem exigida** (`worker/src/services/questionService.ts:updateQuestion`
+e `applyTransition`): a linha de `question_history` (e, no PATCH, cada
+coleção presente) é inserida **ANTES** do `UPDATE` central de `questions`,
+no MESMO lote — guardada pela versão **ATUAL/pré-mutação**
+(`expectedVersion`), nunca pela resultante (que só existiria depois do
+`UPDATE`, impossível de checar antes dele rodar). Como o `UPDATE` central
+roda por último, ao efetivamente mudar `version` ele dispara o trigger, que
+exige que o histórico já exista — inserido momentos antes, na mesma
+transação. Todos os guards de coleção passaram a incluir a MESMA condição de
+status do `UPDATE` central (`editorial_status IN ('draft','changes_requested')`
+no PATCH; a `fromStatuses` dinâmica da transição em `applyTransition`) —
+guards IDÊNTICOS só podem concordar (ambos passam ou ambos falham
+simultaneamente), o que é o que torna a reordenação segura.
+
+`worker/src/lib/batchValidation.ts:validateBatchResults` continua em uso
+como **defesa em profundidade** (verifica cada resultado do lote contra a
+expectativa declarada — `"any"` para `DELETE` de coleção,
+`"exactlyOne"` para `INSERT`/`UPSERT` guardado e para o `INSERT` de
+histórico) — mas o trigger é agora o mecanismo PRIMÁRIO e transacional; a
+checagem em JS nunca mais precisaria disparar em operação normal, porque o
+trigger já teria abortado a transação antes desse ponto.
 
 `question_history` registra a ação `updated` com `metadata.fields` — os
 NOMES dos grupos de campos alterados nesta chamada (ex.:
 `"enunciado,alternativas"`), separados por vírgula — **nunca o conteúdo**.
 `audit_log` (`editorial_question_updated`) só é gravado quando
-`changed:true` — nunca em no-op nem em retry idempotente por `mutationId`.
+`changed:true` — nunca em no-op nem em retry idempotente por `mutationId`,
+e nunca alcançável se o trigger abortar a transação (o código nunca chega à
+chamada de `recordAuditEvent`, que roda depois do `db.batch()` bem-sucedido).
 
 ## Importação CSV
 
@@ -502,11 +539,12 @@ pela migration nem por qualquer GET.
   forma incremental (envie o conjunto completo de 5 quando quiser alterar
   alternativas) — só omitir o campo `alternativas` inteiro preserva o estado
   atual sem tocar nele.
-- A validação do lote (Correção B) detecta uma inconsistência pós-commit
-  lançando um erro controlado, mas não a desfaz via uma transação de
-  compensação real — ver "Validação do lote" acima para o motivo e o porquê
-  de o cenário ser, por construção, essencialmente inalcançável fora de
-  manipulação direta de teste.
+- (Resolvida na v1.3) A validação do lote agora é imposta por um trigger SQL
+  (`migrations/0009_editorial_batch_invariants.sql`) que aborta a transação
+  ANTES do commit — ver "Validação do lote" acima. Não há mais dependência
+  de uma checagem em JS pós-commit para este invariante específico
+  (core+histórico); `validateBatchResults` continua só como defesa em
+  profundidade.
 - Cobertura de integração completa da UX de retry de `mutationId` (simular
   uma falha de rede real contra o formulário montado) fica para uma suíte
   E2E futura — hoje só a lógica pura de decisão é testada diretamente

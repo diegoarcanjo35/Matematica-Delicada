@@ -811,3 +811,208 @@ describe("Workflow editorial", () => {
     expect(result.fieldErrors?.readiness).toMatch(/direitos/i);
   });
 });
+
+/* ---------------------------------------------------------------------- */
+/* Sprint 7 v1.3 — invariante transacional CORE+HISTÓRICO (migration 0009) */
+/* Cenários A-G: cada um consulta o banco DIRETAMENTE depois da chamada,   */
+/* nunca só o retorno da função/HTTP.                                      */
+/* ---------------------------------------------------------------------- */
+
+describe("Sprint 7 v1.3 — invariante core+histórico indivisível (trigger 0009)", () => {
+  function coreSnapshot(id: string): { version: number; updated_at: string; enunciado: string; conteudo: string; editorial_status: string } {
+    return db.sqlite
+      .prepare("SELECT version, updated_at, enunciado, conteudo, editorial_status FROM questions WHERE id = ?")
+      .get(id) as never;
+  }
+  function altTexts(id: string): string[] {
+    return (db.sqlite.prepare("SELECT text FROM question_alternatives WHERE question_id = ? ORDER BY letter").all(id) as Array<{ text: string }>).map(
+      (r) => r.text
+    );
+  }
+  function tagContents(id: string): string[] {
+    return (db.sqlite.prepare("SELECT content FROM question_tags WHERE question_id = ? ORDER BY content").all(id) as Array<{ content: string }>).map(
+      (r) => r.content
+    );
+  }
+  function auditLogCount(questionId: string): number {
+    return (
+      db.sqlite
+        .prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = 'editorial_question_updated' AND metadata LIKE ?")
+        .get(`%${questionId}%`) as { total: number }
+    ).total;
+  }
+  function mid(): string {
+    return crypto.randomUUID();
+  }
+
+  // A — o INSERT condicionado de question_history silenciosamente não
+  // insere (guard falso, SEM lançar exceção) enquanto um UPDATE que muda
+  // `version` roda no MESMO lote → o trigger 0009 aborta a transação
+  // INTEIRA. Testado no nível do BATCH diretamente (não via updateQuestion)
+  // porque, por construção do serviço (guards idênticos entre histórico e
+  // core), o serviço nunca produz este cenário sozinho — o trigger existe
+  // como rede de segurança de banco contra exatamente esta classe de bug,
+  // mesmo que introduzida por um código futuro diferente do atual.
+  it("A. histórico condicionado com guard falso (0 linhas, sem exceção) + UPDATE que muda version → transação INTEIRA abortada", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    // Statement de histórico com guard que NUNCA bate ("WHERE 1 = 0") —
+    // simula o guard condicional falhando por algum motivo inesperado:
+    // insere 0 linhas, sem lançar exceção alguma.
+    const neverMatchingHistory = db.sqlite
+      .prepare(
+        `INSERT INTO question_history (id, question_id, user_id, action, from_status, to_status, version)
+         SELECT ?, ?, ?, 'updated', 'draft', 'draft', 2 WHERE 1 = 0`
+      );
+    const realCoreUpdate = db.sqlite.prepare(`UPDATE questions SET version = version + 1, updated_at = datetime('now') WHERE id = ? AND version = 1`);
+
+    expect(() => {
+      db.sqlite.exec("BEGIN");
+      try {
+        neverMatchingHistory.run(crypto.randomUUID(), qId, "autor1");
+        realCoreUpdate.run(qId);
+        db.sqlite.exec("COMMIT");
+      } catch (error) {
+        db.sqlite.exec("ROLLBACK");
+        throw error;
+      }
+    }).toThrow(/invariante violada/i);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version); // rollback comprovado
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(after.enunciado).toBe(before.enunciado);
+    expect(altTexts(qId)).toEqual(["Alternativa A de teste", "Alternativa B de teste", "Alternativa C de teste", "Alternativa D de teste", "Alternativa E de teste"]);
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(auditLogCount(qId)).toBe(0);
+  });
+
+  // B — uma operação de coleção obrigatória produz um resultado
+  // inválido/inesperado (forçado via exceção real numa das linhas) →
+  // rollback completo: núcleo E TODAS as coleções continuam com os valores
+  // PRÉVIOS, zero histórico, zero auditoria — verificado diretamente no banco.
+  it("B. falha numa operação de coleção obrigatória → rollback completo (núcleo e TODAS as coleções inalterados)", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    db.sqlite.exec(`INSERT INTO question_tags (id, question_id, content, position) VALUES ('t-pre','${qId}','tag-original',0)`);
+    const before = coreSnapshot(qId);
+    const altsBefore = altTexts(qId);
+    const tagsBefore = tagContents(qId);
+    const historyBefore = historyCount(qId);
+
+    db.failNextMatching(/INSERT INTO question_tags/);
+    await expect(
+      updateQuestion(db as never, "autor1", qId, 1, mid(), {
+        enunciado: "Enunciado que não deveria persistir de jeito nenhum.",
+        alternativas: validAlternatives as never,
+        tags: ["tag-nova-que-nao-deveria-existir"],
+      } as never)
+    ).rejects.toThrow();
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version);
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(after.enunciado).toBe(before.enunciado);
+    expect(altTexts(qId)).toEqual(altsBefore); // alternativas (outra coleção do MESMO lote) também intactas
+    expect(tagContents(qId)).toEqual(tagsBefore); // a própria coleção que falhou também não mudou nada
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(auditLogCount(qId)).toBe(0);
+  });
+
+  // C — falha SQL real (forçada) no INSERT de question_history → rollback
+  // completo, provado diretamente no banco.
+  it("C. falha forçada no INSERT de question_history → rollback completo provado no banco", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    db.failNextMatching(/INSERT INTO question_history/);
+    await expect(updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Não deveria persistir." } as never)).rejects.toThrow();
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version);
+    expect(after.updated_at).toBe(before.updated_at);
+    const row = db.sqlite.prepare("SELECT conteudo FROM questions WHERE id = ?").get(qId) as { conteudo: string };
+    expect(row.conteudo).not.toBe("Não deveria persistir.");
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(auditLogCount(qId)).toBe(0);
+  });
+
+  // D — caminho normal: exatamente uma mudança no núcleo, exatamente uma
+  // linha de histórico, exatamente uma linha de auditoria.
+  it("D. caminho normal: exatamente 1 mudança de núcleo, 1 histórico, 1 auditoria", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Conteúdo genuinamente novo." } as never);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version + 1); // exatamente 1 mudança de núcleo
+    expect(after.conteudo).toBe("Conteúdo genuinamente novo.");
+    expect(historyCount(qId)).toBe(1);
+    expect(auditLogCount(qId)).toBe(1);
+  });
+
+  // E — retry com a MESMA mutationId → changed:false, version inalterada,
+  // nenhum histórico/auditoria ADICIONAL.
+  it("E. retry com a MESMA mutationId → changed:false, version inalterada, zero histórico/auditoria adicionais", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const mutationId = mid();
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { conteudo: "Conteúdo alterado." } as never);
+    expect(first.ok).toBe(true);
+    const afterFirst = coreSnapshot(qId);
+    const historyAfterFirst = historyCount(qId);
+    const auditAfterFirst = auditLogCount(qId);
+
+    const retry = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { conteudo: "Conteúdo alterado." } as never);
+    expect(retry.ok).toBe(true);
+    expect(retry.changed).toBe(false);
+
+    const afterRetry = coreSnapshot(qId);
+    expect(afterRetry.version).toBe(afterFirst.version); // inalterada
+    expect(afterRetry.updated_at).toBe(afterFirst.updated_at);
+    expect(historyCount(qId)).toBe(historyAfterFirst); // nenhum adicional
+    expect(auditLogCount(qId)).toBe(auditAfterFirst); // nenhum adicional
+  });
+
+  // F — colisão de mutationId → 409, zero mudanças.
+  it("F. colisão de mutationId (outra questão) → 409, zero mudanças no banco", async () => {
+    const qId1 = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const qId2 = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const mutationId = mid();
+    await updateQuestion(db as never, "autor1", qId1, 1, mutationId, { conteudo: "Edição legítima da questão 1." } as never);
+
+    const before2 = coreSnapshot(qId2);
+    const historyBefore2 = historyCount(qId2);
+    const collision = await updateQuestion(db as never, "autor1", qId2, 1, mutationId, { conteudo: "Tentativa de colisão na questão 2." } as never);
+    expect(collision.ok).toBe(false);
+    expect(collision.conflict).toBe(true);
+
+    const after2 = coreSnapshot(qId2);
+    expect(after2.version).toBe(before2.version);
+    expect(after2.conteudo).not.toBe("Tentativa de colisão na questão 2.");
+    expect(historyCount(qId2)).toBe(historyBefore2);
+    expect(auditLogCount(qId2)).toBe(0);
+  });
+
+  // G — no-op com mutationId NOVA (nunca usada antes) → changed:false, zero
+  // escrita, version/histórico/auditoria todos inalterados.
+  it("G. no-op com mutationId NOVA → changed:false, zero escrita, version/histórico/auditoria inalterados", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Conteúdo de teste" } as never); // mesmo valor já gravado
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(false);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version);
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(auditLogCount(qId)).toBe(0);
+  });
+});

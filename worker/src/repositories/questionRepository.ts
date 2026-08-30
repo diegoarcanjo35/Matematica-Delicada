@@ -418,6 +418,21 @@ export function buildUpsertDnaStatement(db: D1Database, questionId: string, dna:
  *  scheduleRepository (lá, cada to_status só é alcançado uma única vez de
  *  verdade; aqui, um mesmo to_status pode se repetir em rodadas diferentes
  *  do workflow, então a versão resultante é o identificador estável). */
+/** Sprint 7 v1.3 — `guardVersion` (a versão ATUAL/pré-mutação, checada
+ *  contra `questions.version` agora) e `versionAfter` (a versão RESULTANTE,
+ *  gravada na linha de histórico e usada na checagem anti-duplicidade) são
+ *  parâmetros DELIBERADAMENTE separados: este statement passou a rodar
+ *  ANTES do UPDATE central de `questions` no mesmo lote (não depois, como
+ *  nas versões anteriores) — ver worker/src/services/questionService.ts e
+ *  migrations/0009_editorial_batch_invariants.sql. Guardar pela versão
+ *  ATUAL (não pela resultante, que só passa a existir quando o UPDATE
+ *  central rodar, momentos depois) é o que torna a reordenação possível: os
+ *  dois statements (histórico e UPDATE central) avaliam a MESMA condição
+ *  sobre o MESMO estado imutável-durante-a-transação, então só podem
+ *  concordar (ambos passam ou ambos falham) — nunca um sem o outro, exceto
+ *  pela checagem adicional `NOT EXISTS` (anti-duplicidade de retry), que é
+ *  exclusiva deste statement e é exatamente o cenário que o trigger de
+ *  0009 precisa capturar se falhar inesperadamente. */
 export function buildConditionalHistoryStatement(
   db: D1Database,
   params: {
@@ -427,15 +442,28 @@ export function buildConditionalHistoryStatement(
     action: string;
     fromStatus: string | null;
     toStatus: string;
+    guardVersion: number;
     versionAfter: number;
     metadata: Record<string, string | number | boolean> | null;
+    /** v1.3 — quando informado, exige que `editorial_status` esteja neste
+     *  conjunto no momento da checagem — SEMPRE a MESMA lista usada pelo
+     *  statement "causa" que este histórico acompanha (`buildUpdateQuestionCoreStatement`'s
+     *  `('draft','changes_requested')` fixo, ou `buildTransitionStatement`'s
+     *  `fromStatuses` dinâmico) — nunca uma lista diferente, para que os
+     *  dois guards só possam concordar. Omitido só para o histórico de
+     *  CRIAÇÃO (`action: 'created'`/`'import_applied'`), onde a linha é
+     *  sempre nova (não há "status errado" possível para um id inédito). */
+    guardStatuses?: string[];
   }
 ): D1PreparedStatement {
+  const statusGuard = params.guardStatuses
+    ? ` AND editorial_status IN (${placeholders(params.guardStatuses.length)})`
+    : "";
   return db
     .prepare(
       `INSERT INTO question_history (id, question_id, user_id, action, from_status, to_status, version, metadata)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?
-       WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)
+       WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?${statusGuard})
        AND NOT EXISTS (SELECT 1 FROM question_history WHERE question_id = ? AND version = ?)`
     )
     .bind(
@@ -448,7 +476,8 @@ export function buildConditionalHistoryStatement(
       params.versionAfter,
       params.metadata ? JSON.stringify(params.metadata) : null,
       params.questionId,
-      params.versionAfter,
+      params.guardVersion,
+      ...(params.guardStatuses ?? []),
       params.questionId,
       params.versionAfter
     );
@@ -520,8 +549,17 @@ export function buildUpdateQuestionCoreStatement(
  *  bumped a questão para `versionAfter`. Se o UPDATE falhou (versão
  *  desatualizada ou status não editável), este DELETE não afeta nenhuma
  *  linha — nada fica parcialmente substituído. */
+/** v1.3 — inclui `editorial_status IN ('draft','changes_requested')` na
+ *  MESMA condição usada por `buildUpdateQuestionCoreStatement` (nunca só a
+ *  versão): como as coleções agora rodam ANTES do UPDATE central no mesmo
+ *  lote (guardadas pela versão ATUAL, não pela resultante — ver
+ *  questionService.ts), sem esta condição de status o guard de uma coleção
+ *  poderia "passar" (versão bate) numa questão cujo status já não é mais
+ *  editável enquanto o UPDATE central (que TAMBÉM checa o status) falharia
+ *  — produzindo uma coleção substituída sem o núcleo/histórico
+ *  correspondentes. Mantendo os guards IDÊNTICOS, eles só podem concordar. */
 function guardedDeleteSql(table: string): string {
-  return `DELETE FROM ${table} WHERE question_id = ? AND EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)`;
+  return `DELETE FROM ${table} WHERE question_id = ? AND EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`;
 }
 
 export function buildDeleteAlternativesStatement(db: D1Database, questionId: string, versionAfter: number): D1PreparedStatement {
@@ -552,7 +590,7 @@ export function buildGuardedInsertAlternativeStatement(
   return db
     .prepare(
       `INSERT INTO question_alternatives (id, question_id, letter, text, is_correct, distractor_explanation, position)
-       SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)`
+       SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
     .bind(id, questionId, alt.letter, alt.text, alt.isCorrect ? 1 : 0, alt.distractorExplanation, position, questionId, versionAfter);
 }
@@ -567,7 +605,7 @@ export function buildGuardedInsertImageStatement(
   return db
     .prepare(
       `INSERT INTO question_images (id, question_id, asset_ref, alt_text, caption, position, titular_direitos, base_licenca)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)`
+       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
     .bind(
       id,
@@ -593,7 +631,7 @@ export function buildGuardedInsertPatternLinkStatement(
   return db
     .prepare(
       `INSERT INTO question_patterns (id, question_id, pattern_id, role)
-       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)`
+       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
     .bind(id, questionId, link.patternId, link.role, questionId, versionAfter);
 }
@@ -609,7 +647,7 @@ export function buildGuardedInsertTagStatement(
   return db
     .prepare(
       `INSERT INTO question_tags (id, question_id, content, position)
-       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)`
+       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
     .bind(id, questionId, content, position, questionId, versionAfter);
 }
@@ -623,7 +661,7 @@ export function buildGuardedUpsertDnaStatement(
   return db
     .prepare(
       `INSERT INTO question_dna (question_id, pista, estrategia, pegadinha, conteudo_apoio, resolucao, atalho, aprendizado_erro, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now') WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ?)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now') WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))
        ON CONFLICT (question_id) DO UPDATE SET
          pista = excluded.pista, estrategia = excluded.estrategia, pegadinha = excluded.pegadinha,
          conteudo_apoio = excluded.conteudo_apoio, resolucao = excluded.resolucao, atalho = excluded.atalho,

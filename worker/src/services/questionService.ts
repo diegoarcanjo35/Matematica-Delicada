@@ -232,6 +232,7 @@ export async function createQuestion(
       action: "created",
       fromStatus: null,
       toStatus: "draft",
+      guardVersion: 1,
       versionAfter: 1,
       metadata: null,
     })
@@ -597,13 +598,21 @@ export async function updateQuestion(
   const versionAfter = expectedVersion + 1;
   const coreUpdate = buildUpdateQuestionCoreStatement(db, questionId, expectedVersion, { ...mergedScalars, fingerprint });
 
-  // Só as coleções EXPLICITAMENTE presentes entram no lote — cada uma como
-  // par DELETE+INSERTs guardado pela MESMA `versionAfter` do UPDATE escalar.
-  // Cada statement além do core declara sua EXPECTATIVA (Correção B) — o
-  // DELETE sempre "any" (uma coleção já vazia legitimamente afeta 0 linhas);
-  // cada INSERT guardado "exactlyOne" (se o core mudou, o guard bate e a
-  // linha específica SEMPRE deveria ser inserida). O array de campos
-  // alterados vira metadado do histórico (nomes só, nunca conteúdo).
+  // v1.3 — REORDENADO: as coleções e o histórico (as "consequências") rodam
+  // ANTES do UPDATE central de `questions` (a "causa"), guardados pela
+  // versão ATUAL/pré-mutação (`expectedVersion`), NÃO pela resultante
+  // (`versionAfter`, que só passaria a existir depois do UPDATE central —
+  // impossível de checar antes dele rodar). Isso é o que permite o trigger
+  // de migrations/0009_editorial_batch_invariants.sql (`AFTER UPDATE ON
+  // questions ... WHEN NEW.version != OLD.version`) abortar a transação
+  // INTEIRA se o UPDATE central de fato mudar a versão mas o histórico
+  // correspondente não existir — porque o histórico já deveria ter sido
+  // inserido momentos antes, na MESMA transação. Cada statement além do
+  // core ainda declara sua EXPECTATIVA (Correção B, mantida como defesa
+  // adicional em profundidade) — o DELETE sempre "any" (uma coleção já
+  // vazia legitimamente afeta 0 linhas); cada INSERT guardado "exactlyOne".
+  // O array de campos alterados vira metadado do histórico (nomes só,
+  // nunca conteúdo).
   const childStatements: Array<{ statement: D1PreparedStatement; expectation: ExpectedBatchStatement }> = [];
   const changedFields: string[] = [];
 
@@ -613,10 +622,10 @@ export async function updateQuestion(
 
   if (alternativesProvided) {
     changedFields.push("alternativas");
-    childStatements.push({ statement: buildDeleteAlternativesStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_alternatives", expected: "any" } });
+    childStatements.push({ statement: buildDeleteAlternativesStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_alternatives", expected: "any" } });
     effectiveAlternatives.forEach((alt, index) => {
       childStatements.push({
-        statement: buildGuardedInsertAlternativeStatement(db, questionId, newId(), alt, index, versionAfter),
+        statement: buildGuardedInsertAlternativeStatement(db, questionId, newId(), alt, index, expectedVersion),
         expectation: { label: `INSERT question_alternatives[${alt.letter}]`, expected: "exactlyOne" },
       });
     });
@@ -624,36 +633,36 @@ export async function updateQuestion(
   if (dnaProvided) {
     changedFields.push("dna");
     childStatements.push({
-      statement: buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, versionAfter),
+      statement: buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, expectedVersion),
       expectation: { label: "UPSERT question_dna", expected: "exactlyOne" },
     });
   }
   if (patternsProvided) {
     changedFields.push("padroes");
-    childStatements.push({ statement: buildDeletePatternLinksStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_patterns", expected: "any" } });
+    childStatements.push({ statement: buildDeletePatternLinksStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_patterns", expected: "any" } });
     patternsResult!.value!.forEach((link) => {
       childStatements.push({
-        statement: buildGuardedInsertPatternLinkStatement(db, questionId, newId(), link, versionAfter),
+        statement: buildGuardedInsertPatternLinkStatement(db, questionId, newId(), link, expectedVersion),
         expectation: { label: `INSERT question_patterns[${link.patternId}]`, expected: "exactlyOne" },
       });
     });
   }
   if (tagsProvided) {
     changedFields.push("tags");
-    childStatements.push({ statement: buildDeleteTagsStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_tags", expected: "any" } });
+    childStatements.push({ statement: buildDeleteTagsStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_tags", expected: "any" } });
     tagsResult!.value!.forEach((tag, index) => {
       childStatements.push({
-        statement: buildGuardedInsertTagStatement(db, questionId, newId(), tag, index, versionAfter),
+        statement: buildGuardedInsertTagStatement(db, questionId, newId(), tag, index, expectedVersion),
         expectation: { label: `INSERT question_tags[${index}]`, expected: "exactlyOne" },
       });
     });
   }
   if (imagesProvided) {
     changedFields.push("imagens");
-    childStatements.push({ statement: buildDeleteImagesStatement(db, questionId, versionAfter), expectation: { label: "DELETE question_images", expected: "any" } });
+    childStatements.push({ statement: buildDeleteImagesStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_images", expected: "any" } });
     imagesResult!.value!.forEach((image, index) => {
       childStatements.push({
-        statement: buildGuardedInsertImageStatement(db, questionId, newId(), image, versionAfter),
+        statement: buildGuardedInsertImageStatement(db, questionId, newId(), image, expectedVersion),
         expectation: { label: `INSERT question_images[${index}]`, expected: "exactlyOne" },
       });
     });
@@ -662,7 +671,8 @@ export async function updateQuestion(
   // mutationId reaproveitado como question_history.id — a chave de
   // idempotência da operação inteira (Correção A). A checagem de colisão já
   // rodou no topo da função, então este INSERT é sempre seguro (nenhum
-  // conflito de PK esperado nesta linha).
+  // conflito de PK esperado nesta linha). Guardado pela versão ATUAL
+  // (`expectedVersion`) — roda ANTES do UPDATE central (v1.3).
   childStatements.push({
     statement: buildConditionalHistoryStatement(db, {
       id: mutationId,
@@ -671,19 +681,32 @@ export async function updateQuestion(
       action: "updated",
       fromStatus: before.editorial_status,
       toStatus: before.editorial_status,
+      guardVersion: expectedVersion,
       versionAfter,
+      // MESMA lista de status editáveis do UPDATE central
+      // (buildUpdateQuestionCoreStatement) — guards idênticos, só podem
+      // concordar (v1.3).
+      guardStatuses: ["draft", "changes_requested"],
       // Só os NOMES dos grupos alterados — nunca o conteúdo integral.
       metadata: { fields: changedFields.join(",") },
     }),
     expectation: { label: "INSERT question_history", expected: "exactlyOne" },
   });
 
-  const allStatements = [coreUpdate, ...childStatements.map((c) => c.statement)];
-  // Uma falha lançada por QUALQUER statement do lote (ex.: erro forçado)
-  // propaga a exceção do `db.batch()` inteiro, revertendo TUDO (nenhuma
-  // escrita parcial) — garantia já existente do FakeD1Database/D1 real.
+  // v1.3 — ORDEM: filhos (coleções + histórico) PRIMEIRO, UPDATE central
+  // POR ÚLTIMO. Se `expectedVersion` não bater com a versão atual real, TODOS
+  // os guards (filhos e central) falham consistentemente (mesma condição,
+  // mesmo estado imutável durante a transação) — nenhuma escrita parcial.
+  // Se bater, os filhos inserem primeiro e o UPDATE central, ao rodar por
+  // último, dispara o trigger de 0009, que exige que o histórico já exista.
+  const allStatements = [...childStatements.map((c) => c.statement), coreUpdate];
+  // Uma falha lançada por QUALQUER statement do lote (ex.: erro forçado, OU
+  // o RAISE(ABORT) do trigger de 0009) propaga a exceção do `db.batch()`
+  // inteiro, revertendo TUDO (nenhuma escrita parcial) — garantia nativa do
+  // FakeD1Database (node:sqlite real)/D1 real, provada por teste consultando
+  // o banco diretamente depois da falha, nunca só a resposta HTTP.
   const results = await db.batch(allStatements);
-  const coreResult = results[0];
+  const coreResult = results[results.length - 1];
 
   if (coreResult.meta.changes !== 1) {
     const after = await findQuestionById(db, questionId);
@@ -693,11 +716,13 @@ export async function updateQuestion(
   }
 
   // v1.2, Correção B — valida TODOS os demais resultados do lote contra a
-  // expectativa declarada de cada statement; lança BatchInvariantError (erro
-  // controlado, nunca um sucesso silencioso) se algum descompasso aparecer —
-  // em particular, se o histórico afetar 0 linhas mesmo com o core tendo mudado.
+  // expectativa declarada de cada statement (defesa em profundidade — o
+  // trigger de 0009 já teria abortado a transação inteira antes deste ponto
+  // se o histórico estivesse ausente; esta checagem cobre outras
+  // inconsistências, ex. numa coleção, e nunca deveria disparar em operação
+  // normal).
   validateBatchResults(
-    results.slice(1),
+    results.slice(0, -1),
     childStatements.map((c) => c.expectation)
   );
 
@@ -954,6 +979,11 @@ async function applyTransition(
     toStatus: params.to,
     revisorId: params.revisorId,
   });
+  // v1.3 — guardado pela versão ATUAL (`params.expectedVersion`), não pela
+  // resultante, e inserido ANTES do UPDATE da transição no mesmo lote (ver
+  // nota extensa em updateQuestion acima e
+  // migrations/0009_editorial_batch_invariants.sql): se a transição de fato
+  // mudar `version`, o trigger exige que este histórico já exista.
   const historyStatement = buildConditionalHistoryStatement(db, {
     id: newId(),
     questionId: params.questionId,
@@ -961,16 +991,22 @@ async function applyTransition(
     action: params.action,
     fromStatus: before.editorial_status,
     toStatus: params.to,
+    guardVersion: params.expectedVersion,
     versionAfter,
+    // MESMA lista `fromStatuses` do UPDATE da transição
+    // (buildTransitionStatement) — guards idênticos, só podem concordar (v1.3).
+    guardStatuses: params.from,
     metadata: params.metadata ?? null,
   });
 
-  const [updateResult, historyResult] = await db.batch([transitionStatement, historyStatement]);
+  // v1.3 — histórico PRIMEIRO, UPDATE da transição POR ÚLTIMO (dispara o
+  // trigger de 0009 quando `version` realmente muda).
+  const [historyResult, updateResult] = await db.batch([historyStatement, transitionStatement]);
   if (updateResult.meta.changes === 1) {
-    // v1.2, Correção B — não basta o UPDATE da transição ter mudado; o
-    // INSERT de question_history TAMBÉM precisa ter afetado exatamente 1
-    // linha. Um `changes = 0` silencioso aqui (sem exceção) nunca pode ser
-    // relatado como sucesso.
+    // v1.2, Correção B — mantida como defesa em profundidade: o trigger de
+    // 0009 já teria abortado a transação inteira (RAISE(ABORT)) antes deste
+    // ponto se o histórico estivesse ausente — esta checagem nunca deveria
+    // disparar em operação normal.
     validateBatchResults([historyResult], [{ label: "INSERT question_history (transição)", expected: "exactlyOne" }]);
     return { ok: true, changed: true };
   }

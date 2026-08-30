@@ -549,6 +549,7 @@ export async function applyImport(db: D1Database, actorUserId: string, batchId: 
         action: "import_applied",
         fromStatus: null,
         toStatus: "draft",
+        guardVersion: 1,
         versionAfter: 1,
         metadata: { batchId },
       })

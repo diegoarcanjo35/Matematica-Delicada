@@ -481,6 +481,23 @@ CREATE TABLE question_import_items (
   question_id TEXT REFERENCES questions (id)
 );
 CREATE INDEX idx_question_import_items_batch ON question_import_items (batch_id);
+
+-- Sprint 7 v1.3 (migration 0009) — invariante CORE+HISTÓRICO indivisível.
+-- Espelho manual do DDL de migrations/0009_editorial_batch_invariants.sql —
+-- os dois precisam ser mantidos em sincronia.
+CREATE TRIGGER trg_questions_require_history_after_update
+AFTER UPDATE ON questions
+FOR EACH ROW
+WHEN NEW.version != OLD.version
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM question_history
+      WHERE question_id = NEW.id AND version = NEW.version
+    )
+    THEN RAISE(ABORT, 'invariante violada: questions.version mudou sem question_history correspondente')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {

@@ -375,7 +375,13 @@ describe("undoImport", () => {
 
   it("undo é bloqueado se a questão do lote já saiu de draft (ex.: enviada para revisão)", async () => {
     const { batchId, questionIds } = await applyValidBatch();
-    db.sqlite.exec(`UPDATE questions SET editorial_status = 'in_review', version = 2 WHERE id = '${questionIds[0]}'`);
+    // Sprint 7 v1.3 — não bumpar `version` aqui: o trigger
+    // trg_questions_require_history_after_update (migrations/0009) exige
+    // uma linha de question_history correspondente para toda MUDANÇA de
+    // version; este teste só precisa que o status não seja mais 'draft' —
+    // um UPDATE direto por SQL que muda só o status (nunca a version) não
+    // aciona o trigger.
+    db.sqlite.exec(`UPDATE questions SET editorial_status = 'in_review' WHERE id = '${questionIds[0]}'`);
     const result = await undoImport(db as never, "admin1", batchId);
     expect(result.ok).toBe(false);
     expect(result.blocked).toBe(true);
