@@ -120,6 +120,19 @@ describe("checkDeployableConfig", () => {
     expect(result.errors.some((e: string) => e.includes("ENABLE_LOCAL_SCHEDULE_FIXTURES"))).toBe(true);
   });
 
+  it("ID válido com flag de fixtures de padrões na config implantável -> bloqueia", () => {
+    const filePath = writeFixture({
+      ...BASE_CONFIG,
+      vars: { ENABLE_LOCAL_PATTERN_FIXTURES: "true" },
+      d1_databases: [
+        { binding: "DB", database_name: "x", database_id: "a1b2c3d4-e5f6-4a5b-9c8d-1234567890ab" },
+      ],
+    });
+    const result = checkDeployableConfig(filePath);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e: string) => e.includes("ENABLE_LOCAL_PATTERN_FIXTURES"))).toBe(true);
+  });
+
   it("database_id só com zeros -> bloqueia", () => {
     const filePath = writeFixture({
       ...BASE_CONFIG,

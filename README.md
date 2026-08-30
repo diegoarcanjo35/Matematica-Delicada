@@ -12,6 +12,7 @@ Fonte de verdade de produto e pedagogia: [`Documento_Mestre_Plataforma_Matematic
 Arquitetura: [`docs/ARQUITETURA.md`](./docs/ARQUITETURA.md).
 Autenticação e segurança: [`docs/AUTENTICACAO.md`](./docs/AUTENTICACAO.md).
 Sistema visual: [`docs/SISTEMA_VISUAL.md`](./docs/SISTEMA_VISUAL.md).
+Padrões ENEM (taxonomia, gate local e os três índices): [`docs/PADROES_ENEM.md`](./docs/PADROES_ENEM.md).
 
 ## Requisitos
 
@@ -182,7 +183,9 @@ wrangler.local.jsonc    configuração EXCLUSIVAMENTE LOCAL — nunca usada para
 | `/confirmar-email?token=...` | Confirmar e-mail | público |
 | `/termos`, `/privacidade` | Placeholder (conteúdo jurídico pendente) | público |
 | `/` | Dashboard do aluno (dados mock) | **exige sessão** |
-| `/treino-diario`, `/padroes-enem`, `/reconheca-o-padrao`, `/banco-de-questoes`, `/simulados`, `/caderno-de-erros`, `/desempenho`, `/aulas-e-estrategias`, `/conquistas` | Placeholder | **exige sessão** |
+| `/padroes-enem` | Catálogo de padrões ENEM (Sprint 6 — ver `docs/PADROES_ENEM.md`) | **exige sessão** |
+| `/padroes-enem/:slug` | Ficha técnica de um padrão | **exige sessão** |
+| `/treino-diario`, `/reconheca-o-padrao`, `/banco-de-questoes`, `/simulados`, `/caderno-de-erros`, `/desempenho`, `/aulas-e-estrategias`, `/conquistas` | Placeholder | **exige sessão** |
 | `/configuracoes`, `/ajuda`, `/assinatura` | Placeholder | **exige sessão** |
 | qualquer outra rota | Página 404 | público |
 

@@ -14,7 +14,13 @@ import { expect, test, type Page } from "@playwright/test";
    `webServer` global do playwright.config.ts) porque é o único consumidor:
    mantê-lo rodando durante a suíte inteira dobraria a carga de CPU da
    máquina local pela duração toda e causava flakiness por timeout em testes
-   sem nenhuma relação com o diagnóstico. */
+   sem nenhuma relação com o diagnóstico.
+
+   Sprint 6 v1.0 — wrangler.local.no-diagnostic.jsonc também NÃO define
+   ENABLE_LOCAL_PATTERN_FIXTURES, então este mesmo servidor já é o ambiente
+   "gate de padrões desligado" exigido pela seção 6.2 da ordem da Sprint 6.
+   Os testes de padrões abaixo reaproveitam este servidor em vez de subir um
+   terceiro `wrangler dev` (que dobraria de novo o custo da suíte). */
 
 const BASE_URL = "http://localhost:8790";
 const HEALTH_URL = `${BASE_URL}/api/health`;
@@ -135,5 +141,37 @@ test.describe("Diagnóstico — gate de indisponibilidade (fixtures locais desli
     await page.goto("/diagnostico");
     await expect(page.getByRole("heading", { name: "Diagnóstico em preparação" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Vamos conhecer seu ponto de partida" })).not.toBeVisible();
+  });
+});
+
+test.describe("Padrões ENEM — gate de indisponibilidade (fixtures locais desligadas)", () => {
+  test("GET /api/patterns responde available:false, sem nenhum padrão", async ({ page }) => {
+    await createConfirmedUserWithOnboarding(page, "pad-gate-lista");
+    const response = await page.request.get("/api/patterns");
+    expect(response.ok()).toBe(true);
+    const body = await response.json();
+    expect(body).toMatchObject({ ok: true, available: false });
+    expect(body.message).toBe("O catálogo de padrões está em preparação pedagógica.");
+    expect(body.patterns).toBeUndefined();
+    expect(body.total).toBeUndefined();
+  });
+
+  test("GET /api/patterns/:slug e /progress também respondem indisponível, nunca 404/500", async ({ page }) => {
+    await createConfirmedUserWithOnboarding(page, "pad-gate-ficha");
+
+    const detail = await page.request.get("/api/patterns/razao-em-grafico");
+    expect(detail.status()).toBe(200);
+    expect(await detail.json()).toMatchObject({ ok: true, available: false });
+
+    const progress = await page.request.get("/api/patterns/razao-em-grafico/progress");
+    expect(progress.status()).toBe(200);
+    expect(await progress.json()).toMatchObject({ ok: true, available: false });
+  });
+
+  test("/padroes-enem renderiza o estado 'em preparação' na UI, nunca o catálogo", async ({ page }) => {
+    await createConfirmedUserWithOnboarding(page, "pad-gate-ui");
+    await page.goto("/padroes-enem");
+    await expect(page.getByRole("heading", { name: "Padrões ENEM em preparação" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Razão em Gráfico" })).toHaveCount(0);
   });
 });

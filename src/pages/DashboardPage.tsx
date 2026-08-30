@@ -8,6 +8,7 @@ import { ProgressBar } from "../components/ProgressBar";
 import { useAuth } from "../auth/useAuth";
 import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
 import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClient";
+import { fetchPatterns } from "../api/patternsClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_ENEM_MAP,
@@ -27,6 +28,15 @@ function timeOfDayGreeting(): string {
 export function DashboardPage() {
   const [isMapModalOpen, setIsMapModalOpen] = useState(false);
   const [scheduleSummary, setScheduleSummary] = useState<ScheduleSummary | null>(null);
+  /* Sprint 6 — resumo REAL do catálogo de padrões, sem nenhuma métrica
+     fabricada: `total` é quantos padrões publicados o Worker devolveu e
+     `withEvidence` é quantos deles têm evidência realmente registrada para
+     ESTE aluno (filtro evidencia=com_evidencia, escopado por sessão no SQL).
+     Enquanto não houver evidência, o card mostra apenas o convite a conhecer
+     os padrões — nunca um domínio, gargalo ou percentual inventado. */
+  const [patternsSummary, setPatternsSummary] = useState<
+    { available: boolean; total: number; withEvidence: number } | null
+  >(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
   const firstName = user?.name.trim().split(/\s+/)[0] ?? MOCK_STUDENT.firstName;
@@ -44,6 +54,28 @@ export function DashboardPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Duas leituras puras do MESMO endpoint somente-leitura (GET /api/patterns)
+    // — nenhuma delas cria padrão, progresso ou qualquer linha.
+    Promise.all([fetchPatterns({ limite: 1 }), fetchPatterns({ limite: 1, evidencia: "com_evidencia" })])
+      .then(([all, withEvidence]) => {
+        if (cancelled) return;
+        setPatternsSummary({
+          available: all.available,
+          total: all.total ?? 0,
+          withEvidence: withEvidence.total ?? 0,
+        });
+      })
+      .catch(() => {
+        // Sem catálogo disponível — o card mostra o estado "em preparação".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const goalLabel =
     profile?.goalType === "acertos"
       ? `${profile.goalValue} acertos`
@@ -54,8 +86,8 @@ export function DashboardPage() {
   return (
     <div className="dashboard">
       <p className="dashboard__mock-notice">
-        Sequência, Mapa ENEM e demais números abaixo (exceto o card de Cronograma) são
-        dados de demonstração — ainda não refletem seu progresso real.
+        Sequência, Mapa ENEM e demais números abaixo (exceto os cards de Cronograma e
+        Padrões ENEM) são dados de demonstração — ainda não refletem seu progresso real.
       </p>
 
       <header className="dashboard__greeting">
@@ -128,6 +160,41 @@ export function DashboardPage() {
           ) : (
             <p className="dashboard__message">
               O cronograma adaptativo está em preparação técnica — ainda não disponível.
+            </p>
+          )}
+        </Card>
+
+        <Card className="dashboard__card">
+          <h3>Padrões ENEM</h3>
+          {patternsSummary?.available ? (
+            patternsSummary.withEvidence === 0 ? (
+              <>
+                <p className="dashboard__message">
+                  Ainda sem evidências suficientes para resumir seu domínio por padrão. Comece
+                  conhecendo como cada padrão é reconhecido.
+                </p>
+                <Link to="/padroes-enem" className="btn btn--primary">
+                  <span>Conhecer os padrões</span>
+                </Link>
+              </>
+            ) : (
+              <>
+                <p className="dashboard__stat">
+                  {patternsSummary.withEvidence} de {patternsSummary.total} padrões publicados já
+                  têm evidência registrada
+                </p>
+                <p className="dashboard__message">
+                  As fórmulas dos três índices ainda estão em definição — nenhum domínio é
+                  calculado nesta etapa.
+                </p>
+                <Link to="/padroes-enem" className="btn btn--primary">
+                  <span>Ver padrões</span>
+                </Link>
+              </>
+            )
+          ) : (
+            <p className="dashboard__message">
+              O catálogo de padrões está em preparação pedagógica — ainda não disponível.
             </p>
           )}
         </Card>

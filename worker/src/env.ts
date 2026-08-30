@@ -14,6 +14,8 @@ export interface Env {
   ENABLE_LOCAL_DIAGNOSTIC_FIXTURES?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   ENABLE_LOCAL_SCHEDULE_FIXTURES?: string;
+  /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
+  ENABLE_LOCAL_PATTERN_FIXTURES?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -109,6 +111,20 @@ export function isLocalScheduleFixturesAllowed(env: Env, url: URL): boolean {
   return (
     hasLocalDevEnvironmentValue(env) &&
     isTrue(env.ENABLE_LOCAL_SCHEDULE_FIXTURES) &&
+    isRecognizedLocalHostname(url)
+  );
+}
+
+/* Sprint 6 v1.0 — mesmo padrão de falha fechada para os cinco padrões
+   recorrentes do ENEM citados no Documento Mestre (CONTEÚDO TÉCNICO
+   PROVISÓRIO PARA DESENVOLVIMENTO LOCAL — NÃO PUBLICAR — ver
+   scripts/fixtures/patterns-fixtures.local.sql). Fora das três condições
+   simultâneas, a API de padrões responde "catálogo em preparação" sem
+   tocar nas tabelas patterns/pattern_*. */
+export function isLocalPatternFixturesAllowed(env: Env, url: URL): boolean {
+  return (
+    hasLocalDevEnvironmentValue(env) &&
+    isTrue(env.ENABLE_LOCAL_PATTERN_FIXTURES) &&
     isRecognizedLocalHostname(url)
   );
 }

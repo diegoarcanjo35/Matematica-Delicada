@@ -6,6 +6,7 @@ import { handleDevRequest } from "./routes/dev";
 import { handleOnboardingRequest } from "./routes/onboarding";
 import { handleDiagnosticRequest } from "./routes/diagnostic";
 import { handleScheduleRequest } from "./routes/schedule";
+import { handlePatternsRequest } from "./routes/patterns";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -32,6 +33,9 @@ export default {
 
         const scheduleResponse = await handleScheduleRequest(request, env, url);
         if (scheduleResponse) return scheduleResponse;
+
+        const patternsResponse = await handlePatternsRequest(request, env, url);
+        if (patternsResponse) return patternsResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

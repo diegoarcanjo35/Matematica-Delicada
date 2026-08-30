@@ -42,12 +42,20 @@ test.describe("Evidências visuais — dashboard autenticado", () => {
     await page.screenshot({ path: "evidence/screenshots/mobile-menu-aberto.png" });
   });
 
+  /* Sprint 6 v1.0 — esta evidência usava /padroes-enem, que DEIXOU de ser
+     placeholder nesta sprint (virou o catálogo real). Para continuar
+     provando o que sempre provou — que uma rota ainda não implementada
+     renderiza a página de placeholder —, passou a usar /reconheca-o-padrao,
+     que segue sendo placeholder. O PNG antigo
+     (evidence/screenshots/pagina-placeholder-padroes-enem.png) permanece no
+     repositório como evidência histórica da Sprint 1 e não é mais
+     regenerado por nenhum teste. */
   test("pagina-placeholder", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto("/padroes-enem");
-    await expect(page.getByRole("heading", { name: "Padrões ENEM" })).toBeVisible();
+    await page.goto("/reconheca-o-padrao");
+    await expect(page.getByRole("heading", { name: "Reconheça o Padrão" })).toBeVisible();
     await page.screenshot({
-      path: "evidence/screenshots/pagina-placeholder-padroes-enem.png",
+      path: "evidence/screenshots/pagina-placeholder-reconheca-o-padrao.png",
       fullPage: false,
     });
   });

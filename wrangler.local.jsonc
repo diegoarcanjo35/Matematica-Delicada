@@ -46,7 +46,13 @@
   // scripts/fixtures/schedule-fixtures.local.sql. Mesmo padrão de falha
   // fechada — ver worker/src/env.ts:isLocalScheduleFixturesAllowed.
   //
-  // Estas cinco flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
+  // Sprint 6 v1.0 — ENABLE_LOCAL_PATTERN_FIXTURES habilita os cinco padrões
+  // recorrentes do ENEM citados no Documento Mestre (CONTEÚDO TÉCNICO
+  // PROVISÓRIO PARA DESENVOLVIMENTO LOCAL — NÃO PUBLICAR), inseridos só
+  // localmente via scripts/fixtures/patterns-fixtures.local.sql. Mesmo
+  // padrão de falha fechada — ver worker/src/env.ts:isLocalPatternFixturesAllowed.
+  //
+  // Estas seis flags são EXCLUSIVAS deste arquivo. `scripts/check-deployable-d1-config.mjs`
   // falha o deploy se qualquer uma delas aparecer em wrangler.jsonc.
   // ============================================================================
   "name": "matematica-delicada",
@@ -63,7 +69,8 @@
     "ALLOW_INSECURE_LOCAL_COOKIE": "true",
     "ALLOW_TEST_RATE_LIMIT_ISOLATION": "true",
     "ENABLE_LOCAL_DIAGNOSTIC_FIXTURES": "true",
-    "ENABLE_LOCAL_SCHEDULE_FIXTURES": "true"
+    "ENABLE_LOCAL_SCHEDULE_FIXTURES": "true",
+    "ENABLE_LOCAL_PATTERN_FIXTURES": "true"
   },
   "d1_databases": [
     {

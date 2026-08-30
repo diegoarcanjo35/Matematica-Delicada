@@ -243,6 +243,84 @@ CREATE TABLE schedule_plan_previews (
   expires_at TEXT NOT NULL,
   applied_at TEXT
 );
+
+-- Sprint 6 v1.0 (migration 0007) — fundação da taxonomia de padrões ENEM.
+-- Espelho manual do DDL de migrations/0007_patterns_foundation.sql; os dois
+-- precisam ser mantidos em sincronia (worker/testing/migration0007.test.ts
+-- executa o SQL REAL da migration, então uma divergência de constraint é
+-- pega lá).
+CREATE TABLE patterns (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  recognition_phrase TEXT NOT NULL,
+  description TEXT NOT NULL,
+  main_strategy TEXT NOT NULL,
+  introductory_example TEXT NOT NULL,
+  strategic_summary TEXT NOT NULL,
+  editorial_status TEXT NOT NULL DEFAULT 'draft' CHECK (editorial_status IN (
+    'draft', 'in_review', 'changes_requested', 'approved', 'published', 'archived'
+  )),
+  version INTEGER NOT NULL DEFAULT 1,
+  is_local_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_local_fixture IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX idx_patterns_code ON patterns (code);
+CREATE UNIQUE INDEX idx_patterns_slug ON patterns (slug);
+CREATE INDEX idx_patterns_editorial_status ON patterns (editorial_status);
+
+CREATE TABLE pattern_attributes (
+  id TEXT PRIMARY KEY,
+  pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  attribute_type TEXT NOT NULL CHECK (attribute_type IN (
+    'frequent_clue',
+    'recurring_phrase',
+    'recurring_visual_element',
+    'alternative_strategy',
+    'required_content',
+    'prerequisite_content',
+    'common_mistake',
+    'tag'
+  )),
+  position INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_pattern_attributes_lookup
+  ON pattern_attributes (pattern_id, attribute_type, position);
+
+CREATE TABLE pattern_relations (
+  id TEXT PRIMARY KEY,
+  from_pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  to_pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  relation_type TEXT NOT NULL CHECK (relation_type IN ('related', 'prerequisite', 'often_confused_with')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (from_pattern_id != to_pattern_id)
+);
+
+CREATE UNIQUE INDEX idx_pattern_relations_unique
+  ON pattern_relations (from_pattern_id, to_pattern_id, relation_type);
+CREATE INDEX idx_pattern_relations_to ON pattern_relations (to_pattern_id);
+
+CREATE TABLE student_pattern_progress (
+  user_id TEXT NOT NULL REFERENCES users (id),
+  pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  last_practiced_at TEXT,
+  next_review_at TEXT,
+  raw_evidence_count INTEGER NOT NULL DEFAULT 0,
+  recognition_index REAL,
+  resolution_index REAL,
+  mastery_index REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, pattern_id)
+);
+
+CREATE INDEX idx_student_pattern_progress_user ON student_pattern_progress (user_id);
 `;
 
 export interface FakeD1RunResult {

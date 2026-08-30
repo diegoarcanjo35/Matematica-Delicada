@@ -1,0 +1,242 @@
+/* Catálogo e ficha de padrões ENEM — Sprint 6 v1.0. Mesmas convenções de
+   src/pages/schedule/SchedulePage.css: tokens do sistema visual, grade
+   fluida (sem largura fixa que force rolagem horizontal em 360/390 px) e
+   foco visível herdado de src/index.css. Nenhum estado é comunicado só por
+   cor — todo estado tem texto. */
+
+.patterns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 100%;
+}
+
+.patterns--centered {
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.patterns__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.patterns__intro {
+  color: var(--color-text-secondary);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.patterns__search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.patterns__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.patterns__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.patterns__field-label {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.patterns__field input,
+.patterns__field select {
+  width: 100%;
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  font: inherit;
+  color: inherit;
+}
+
+.patterns__results-count {
+  min-height: 1.5em;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.patterns__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.patterns__card {
+  text-align: left;
+}
+
+.patterns__provisional-notice {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.patterns__card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.patterns__card-code {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.patterns__card-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-lg);
+}
+
+.patterns__card-phrase {
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-3);
+}
+
+.patterns__card-contents,
+.patterns__card-progress {
+  font-size: var(--font-size-sm);
+  margin: 0 0 var(--space-2);
+}
+
+.patterns__card-label {
+  font-weight: 700;
+}
+
+.patterns__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-3);
+}
+
+.patterns__chip {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.patterns__pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+.patterns__pagination-status {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* --- Ficha --- */
+
+.patterns__detail {
+  max-width: 76ch;
+}
+
+.patterns__back {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.patterns__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.patterns__section h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.patterns__section p {
+  margin: 0;
+}
+
+.patterns__list {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.patterns__indices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.patterns__index-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.patterns__index-label {
+  font-weight: 700;
+}
+
+.patterns__index-value {
+  color: var(--color-text-secondary);
+}
+
+/* O estado "indisponível" é comunicado pelo TEXTO ("Ainda sem evidências
+   suficientes"); o itálico é só reforço visual, nunca o único sinal. */
+.patterns__index-value--unavailable {
+  font-style: italic;
+}
+
+.patterns__index-note,
+.patterns__training-note {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 480px) {
+  .patterns__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .patterns__field {
+    flex-basis: 100%;
+  }
+}

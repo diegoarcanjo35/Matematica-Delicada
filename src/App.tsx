@@ -18,9 +18,14 @@ import { ConfirmEmailPage } from "./pages/auth/ConfirmEmailPage";
 import { OnboardingPage } from "./pages/onboarding/OnboardingPage";
 import { DiagnosticPage } from "./pages/diagnostic/DiagnosticPage";
 import { SchedulePage } from "./pages/schedule/SchedulePage";
+import { PatternsPage } from "./pages/patterns/PatternsPage";
+import { PatternDetailPage } from "./pages/patterns/PatternDetailPage";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
-const PLACEHOLDER_ITEMS = STUDENT_NAV_ITEMS.filter((item) => item.path !== "/" && item.path !== "/cronograma");
+// Rotas do menu do aluno que já têm tela real e por isso NÃO recebem
+// placeholder: dashboard (/), cronograma (Sprint 5) e padrões ENEM (Sprint 6).
+const IMPLEMENTED_NAV_PATHS = new Set(["/", "/cronograma", "/padroes-enem"]);
+const PLACEHOLDER_ITEMS = STUDENT_NAV_ITEMS.filter((item) => !IMPLEMENTED_NAV_PATHS.has(item.path));
 
 export function App() {
   return (
@@ -91,6 +96,8 @@ export function App() {
             ))}
             <Route path="/diagnostico" element={<DiagnosticPage />} />
             <Route path="/cronograma" element={<SchedulePage />} />
+            <Route path="/padroes-enem" element={<PatternsPage />} />
+            <Route path="/padroes-enem/:slug" element={<PatternDetailPage />} />
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route
               path="/ajuda"
