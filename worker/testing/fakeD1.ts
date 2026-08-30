@@ -164,6 +164,12 @@ CREATE TABLE diagnostic_help_opens (
   opened_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (attempt_id, question_id, layer)
 );
+
+-- Sprint 4 v1.2 (migration 0005) — no máximo uma tentativa in_progress por
+-- usuário, garantido no banco.
+CREATE UNIQUE INDEX idx_diagnostic_attempts_one_active_per_user
+  ON diagnostic_attempts (user_id)
+  WHERE status = 'in_progress';
 `;
 
 export interface FakeD1RunResult {

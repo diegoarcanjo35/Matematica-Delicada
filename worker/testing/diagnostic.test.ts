@@ -245,6 +245,164 @@ describe("diagnóstico — camadas de ajuda", () => {
   });
 });
 
+/* Correção v1.2 (Correcao_Final_Sprint_4_v1.2.md), seção 3 — a progressão
+   1→2→3→4 das camadas de ajuda estava protegida só no frontend; a API
+   aceitava diretamente uma camada posterior. Agora o gate vive dentro do
+   próprio statement atômico (buildInsertHelpOpenStatement), nunca numa
+   leitura separada antes da escrita. */
+describe("diagnóstico — progressão das camadas é imposta no Worker (correção v1.2)", () => {
+  it("camada 4 solicitada diretamente (sem 1-3 abertas) é bloqueada — sem conteúdo, sem persistir", async () => {
+    await seedUser("user-help-skip-4");
+    const attempt = await createAttempt(db as never, "user-help-skip-4", FIXTURES_ALLOWED, false);
+
+    const result = await openHelp(db as never, "user-help-skip-4", attempt.attemptId!, "test-q1", 4);
+    expect(result.ok).toBe(false);
+    expect(result.content).toBeUndefined();
+
+    const row = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM diagnostic_help_opens WHERE attempt_id = ? AND question_id = ?")
+      .get(attempt.attemptId, "test-q1") as { count: number };
+    expect(row.count).toBe(0);
+  });
+
+  it("camada 3 sem a camada 2 aberta é bloqueada, mesmo com a camada 1 já aberta", async () => {
+    await seedUser("user-help-skip-3");
+    const attempt = await createAttempt(db as never, "user-help-skip-3", FIXTURES_ALLOWED, false);
+
+    await openHelp(db as never, "user-help-skip-3", attempt.attemptId!, "test-q1", 1);
+    const result = await openHelp(db as never, "user-help-skip-3", attempt.attemptId!, "test-q1", 3);
+    expect(result.ok).toBe(false);
+    expect(result.content).toBeUndefined();
+
+    const row = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM diagnostic_help_opens WHERE attempt_id = ? AND question_id = ? AND layer = 3")
+      .get(attempt.attemptId, "test-q1") as { count: number };
+    expect(row.count).toBe(0);
+  });
+
+  it("reabertura idempotente da mesma camada não duplica o evento diagnostic_help_opened", async () => {
+    const token = await seedUserWithSession("user-help-idempotent-audit");
+    const localEnv = { DB: db, ENVIRONMENT: "test", ENABLE_LOCAL_DIAGNOSTIC_FIXTURES: "true" } as never;
+
+    const createRequest = requestWithCookie("/api/diagnostic/attempts", "POST", token, {});
+    const createResponse = await handleDiagnosticRequest(
+      createRequest,
+      localEnv,
+      new URL("http://localhost/api/diagnostic/attempts")
+    );
+    const { attemptId } = (await createResponse!.json()) as { attemptId: string };
+
+    for (let i = 0; i < 2; i++) {
+      const helpRequest = requestWithCookie(
+        `/api/diagnostic/attempts/${attemptId}/help/test-q1/1`,
+        "POST",
+        token
+      );
+      const helpResponse = await handleDiagnosticRequest(
+        helpRequest,
+        localEnv,
+        new URL(`http://localhost/api/diagnostic/attempts/${attemptId}/help/test-q1/1`)
+      );
+      expect(helpResponse?.status).toBe(200);
+    }
+
+    const events = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM audit_log WHERE user_id = ? AND event_type = 'diagnostic_help_opened'")
+      .get("user-help-idempotent-audit") as { count: number };
+    expect(events.count).toBe(1);
+  });
+
+  it("conclusão concorrente com abertura de ajuda não entrega conteúdo não persistido", async () => {
+    await seedUser("user-help-vs-complete");
+    const attempt = await createAttempt(db as never, "user-help-vs-complete", FIXTURES_ALLOWED, false);
+    await saveResponse(db as never, "user-help-vs-complete", attempt.attemptId!, "test-q1", { optionId: "test-q1-a" });
+    await saveResponse(db as never, "user-help-vs-complete", attempt.attemptId!, "test-q2", { optionId: "test-q2-b" });
+    await saveResponse(db as never, "user-help-vs-complete", attempt.attemptId!, "test-q3", { isDontKnow: true });
+    await completeAttempt(db as never, "user-help-vs-complete", attempt.attemptId!);
+
+    // Tentativa já concluída — abrir uma camada nova não pode entregar
+    // conteúdo nem persistir, mesmo que a checagem inicial de posse já
+    // tenha lido a tentativa antes de saber que estava concluída.
+    const result = await openHelp(db as never, "user-help-vs-complete", attempt.attemptId!, "test-q2", 1);
+    expect(result.ok).toBe(false);
+    expect(result.content).toBeUndefined();
+
+    const row = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM diagnostic_help_opens WHERE attempt_id = ? AND question_id = ?")
+      .get(attempt.attemptId, "test-q2") as { count: number };
+    expect(row.count).toBe(0);
+  });
+});
+
+/* Correção v1.2, seção 4 — no máximo uma tentativa in_progress por usuário,
+   garantido pelo índice único parcial da migration 0005, dentro da mesma
+   transação do db.batch(). */
+describe("diagnóstico — uma única tentativa ativa por usuário (correção v1.2)", () => {
+  it("corrida de duas criações iniciais concorrentes resulta em exatamente uma tentativa ativa", async () => {
+    await seedUser("user-race-create");
+
+    const [a, b] = await Promise.all([
+      createAttempt(db as never, "user-race-create", FIXTURES_ALLOWED, false),
+      createAttempt(db as never, "user-race-create", FIXTURES_ALLOWED, false),
+    ]);
+
+    const succeeded = [a, b].filter((result) => result.ok);
+    const failed = [a, b].filter((result) => !result.ok);
+    expect(succeeded).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect(failed[0].reason).toBe("active_exists");
+
+    const row = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM diagnostic_attempts WHERE user_id = ? AND status = 'in_progress'")
+      .get("user-race-create") as { count: number };
+    expect(row.count).toBe(1);
+  });
+
+  it("corrida de dois reinícios concorrentes mantém uma tentativa ativa e preserva o histórico da anterior", async () => {
+    await seedUser("user-race-restart");
+    const first = await createAttempt(db as never, "user-race-restart", FIXTURES_ALLOWED, false);
+    await saveResponse(db as never, "user-race-restart", first.attemptId!, "test-q1", { optionId: "test-q1-a" });
+
+    const [a, b] = await Promise.all([
+      createAttempt(db as never, "user-race-restart", FIXTURES_ALLOWED, true),
+      createAttempt(db as never, "user-race-restart", FIXTURES_ALLOWED, true),
+    ]);
+
+    const succeeded = [a, b].filter((result) => result.ok);
+    expect(succeeded).toHaveLength(1);
+
+    const activeRow = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM diagnostic_attempts WHERE user_id = ? AND status = 'in_progress'")
+      .get("user-race-restart") as { count: number };
+    expect(activeRow.count).toBe(1);
+
+    // A tentativa original vira abandoned (nunca deleted) e sua resposta
+    // continua no banco — nenhum lote perdedor conseguiu deixar vínculo
+    // parcial nem reabandonar a vencedora.
+    const oldAttempt = await findAttempt(db as never, first.attemptId!);
+    expect(oldAttempt?.status).toBe("abandoned");
+    const oldResponses = await listResponses(db as never, first.attemptId!);
+    expect(oldResponses).toHaveLength(1);
+  });
+
+  it("falha forçada durante reinício reverte tudo — tentativa anterior permanece em andamento", async () => {
+    await seedUser("user-restart-rollback");
+    const first = await createAttempt(db as never, "user-restart-rollback", FIXTURES_ALLOWED, false);
+
+    db.failNextMatching(/INSERT INTO diagnostic_attempt_questions/);
+    await expect(
+      createAttempt(db as never, "user-restart-rollback", FIXTURES_ALLOWED, true)
+    ).rejects.toThrow();
+
+    const oldAttempt = await findAttempt(db as never, first.attemptId!);
+    expect(oldAttempt?.status).toBe("in_progress");
+    const row = db.sqlite
+      .prepare("SELECT COUNT(*) as count FROM diagnostic_attempts WHERE user_id = ? AND status = 'in_progress'")
+      .get("user-restart-rollback") as { count: number };
+    expect(row.count).toBe(1);
+  });
+});
+
 describe("diagnóstico — conclusão", () => {
   async function answerAll(userId: string, attemptId: string) {
     await saveResponse(db as never, userId, attemptId, "test-q1", { optionId: "test-q1-a" });
@@ -536,18 +694,54 @@ describe("diagnóstico — origem e limites do tempo registrado", () => {
     expect(result.fieldErrors?.timeSpentMs).toBeDefined();
   });
 
-  it("tempo absurdamente alto (payload adulterado) é saturado, nunca rejeitado nem aceito integralmente", async () => {
-    await seedUser("user-time-huge");
-    const attempt = await createAttempt(db as never, "user-time-huge", FIXTURES_ALLOWED, false);
+  it("tempo exatamente no teto (TIME_SPENT_MS_MAX) é aceito", async () => {
+    await seedUser("user-time-at-cap");
+    const attempt = await createAttempt(db as never, "user-time-at-cap", FIXTURES_ALLOWED, false);
 
-    const result = await saveResponse(db as never, "user-time-huge", attempt.attemptId!, "test-q1", {
+    const result = await saveResponse(db as never, "user-time-at-cap", attempt.attemptId!, "test-q1", {
       optionId: "test-q1-a",
-      timeSpentMs: 999_999_999,
+      timeSpentMs: TIME_SPENT_MS_MAX,
     });
     expect(result.ok).toBe(true);
 
     const responses = await listResponses(db as never, attempt.attemptId!);
     expect(responses[0].time_spent_ms).toBe(TIME_SPENT_MS_MAX);
+  });
+
+  it("tempo acima do teto (payload adulterado) é rejeitado — nada é persistido, nunca saturado", async () => {
+    await seedUser("user-time-huge");
+    const attempt = await createAttempt(db as never, "user-time-huge", FIXTURES_ALLOWED, false);
+
+    const result = await saveResponse(db as never, "user-time-huge", attempt.attemptId!, "test-q1", {
+      optionId: "test-q1-a",
+      timeSpentMs: TIME_SPENT_MS_MAX + 1,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.fieldErrors?.timeSpentMs).toBeDefined();
+
+    const responses = await listResponses(db as never, attempt.attemptId!);
+    expect(responses).toHaveLength(0);
+  });
+
+  it("sobrescrita adulterada (tempo acima do teto) não modifica uma resposta válida já persistida", async () => {
+    await seedUser("user-time-overwrite");
+    const attempt = await createAttempt(db as never, "user-time-overwrite", FIXTURES_ALLOWED, false);
+
+    await saveResponse(db as never, "user-time-overwrite", attempt.attemptId!, "test-q1", {
+      optionId: "test-q1-a",
+      timeSpentMs: 5_000,
+    });
+
+    const overwriteAttempt = await saveResponse(db as never, "user-time-overwrite", attempt.attemptId!, "test-q1", {
+      optionId: "test-q1-b",
+      timeSpentMs: 999_999_999,
+    });
+    expect(overwriteAttempt.ok).toBe(false);
+
+    const responses = await listResponses(db as never, attempt.attemptId!);
+    expect(responses).toHaveLength(1);
+    expect(responses[0].selected_option_id).toBe("test-q1-a");
+    expect(responses[0].time_spent_ms).toBe(5_000);
   });
 
   it("retomada (nova leitura da tentativa) não duplica nem zera o tempo já persistido de outra questão", async () => {

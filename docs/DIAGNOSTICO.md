@@ -46,6 +46,15 @@ cronograma adaptativo.
 | `diagnostic_responses` | uma resposta por questão por tentativa (PK composta); `is_correct` e `recognition_is_correct` são sempre calculados pelo Worker |
 | `diagnostic_help_opens` | camadas de ajuda abertas por tentativa/questão (PK composta evita duplicidade) |
 
+## Schema — migration 0005 (correção v1.2)
+
+Aditiva, sem reescrever a 0004: só um índice único parcial —
+`idx_diagnostic_attempts_one_active_per_user`, em `diagnostic_attempts
+(user_id) WHERE status = 'in_progress'` — garantindo no banco que nenhum
+usuário tem mais de uma tentativa `in_progress` ao mesmo tempo, sem limitar
+a quantidade de tentativas `completed`/`abandoned` (histórico nunca é
+afetado). Ver `worker/testing/migration0005.test.ts`.
+
 Eventos da tentativa reaproveitam a tabela `audit_log` já existente (Sprint 2)
 com novos tipos de evento, em vez de uma tabela paralela.
 
@@ -131,11 +140,15 @@ forma independente a partir dos timestamps de suas próprias requisições. Por
 isso o motor trata esse número como **tempo aproximado**, nunca como medida
 pedagógica:
 
-- `worker/src/lib/diagnosticValidation.ts:validateTimeSpentMs` rejeita valores
-  negativos, não numéricos ou fracionários, e **satura** (nunca aceita
-  integralmente) qualquer valor acima de `TIME_SPENT_MS_MAX` (30 minutos) —
-  um payload adulterado não pode inflar o tempo registrado além desse teto,
-  mas também não é motivo de erro (é telemetria, não nota).
+- `worker/src/lib/diagnosticValidation.ts:validateTimeSpentMs` aceita somente
+  inteiro entre `0` e `TIME_SPENT_MS_MAX` (30 minutos) inclusive — valor
+  negativo, não numérico, fracionário **ou acima do teto** é **rejeitado**
+  (correção v1.2: versões anteriores saturavam em vez de rejeitar, o que
+  permitia um payload adulterado sobrescrever uma resposta válida já
+  persistida com um tempo artificialmente alto). A resposta inteira falha
+  como erro de validação — nada é gravado nem substitui a resposta anterior.
+  Esta telemetria não pode alimentar nenhum índice pedagógico enquanto
+  continuar dependente de medição do lado do cliente.
 - `totalTimeMs`/`averageTimeMs` do resultado são somados/calculados no Worker
   a partir do `time_spent_ms` já persistido de cada resposta
   (`getResult` em `worker/src/services/diagnosticService.ts`) — o cliente
@@ -151,19 +164,49 @@ pedagógica:
   o número de "tempo aproximado", nunca de tempo de resolução preciso.
 
 Testes específicos: `worker/testing/diagnostic.test.ts`, describe "diagnóstico
-— origem e limites do tempo registrado" (payload negativo/inválido rejeitado,
-payload absurdo saturado, retomada não duplica/zera, resultado bate
+— origem e limites do tempo registrado" (tempo exatamente no teto aceito,
+acima do teto rejeitado sem persistir, sobrescrita adulterada não modifica
+resposta válida anterior, retomada não duplica/zera, resultado bate
 exatamente com a soma dos tempos persistidos).
+
+## Progressão das camadas de ajuda (correção v1.2)
+
+A ordem 1→2→3→4 é imposta no **Worker**, não só na interface. O gate vive
+dentro do mesmo statement atômico que insere a abertura
+(`buildInsertHelpOpenStatement` em `worker/src/repositories/
+diagnosticRepository.ts`): a camada 1 é sempre permitida; a camada N>1 exige
+que exista uma linha de abertura da camada N-1 para a mesma tentativa/questão
+— avaliado como parte da própria condição SQL da inserção, nunca por uma
+leitura separada antes de gravar. Isso elimina a corrida em que a tentativa
+poderia mudar de estado (ou a camada anterior deixar de "estar aberta")
+entre checar e escrever.
+
+Como `meta.changes = 0` pode significar tanto "já estava aberta" (idempotente)
+quanto "o gate bloqueou" (pré-requisito ausente ou tentativa inválida),
+`openHelp()` (em `worker/src/services/diagnosticService.ts`) distingue os
+dois casos com uma leitura de estado **depois** da tentativa de escrita — não
+é uma corrida, é só classificar um resultado que já é definitivo. Só
+abertura nova persistida (`outcome: "opened"`) gera o evento de auditoria
+`diagnostic_help_opened`; reabertura idempotente não duplica evento.
 
 ## Atomicidade
 
-Criação de tentativa (+ vínculos de questões), salvamento de resposta,
-registro de ajuda e conclusão (+ resumo) usam `env.DB.batch()` e validam
-`meta.changes` de cada mutação — nunca assumem sucesso só porque nada
-lançou exceção. Testes de rollback simulam falha nas operações críticas
-(`worker/testing/diagnostic.test.ts`). Conclusão é idempotente e uma corrida
-de conclusão não gera dois resumos (PK composta em `diagnostic_responses` e
-verificação de estado atômica).
+Criação de tentativa, salvamento de resposta, registro de ajuda e conclusão
+(+ resumo) usam `env.DB.batch()`. As mutações condicionadas por `WHERE`
+(salvar resposta, abrir ajuda, concluir) usam esse guard como proteção
+primária contra corrida — `meta.changes` depois decide a interpretação do
+resultado (sucesso novo vs. idempotente vs. bloqueado), não é numa contagem
+isolada que a segurança se apoia. `createAttempt()` valida explicitamente
+que cada statement do lote afetou exatamente uma linha e, além disso, conta
+com o índice único parcial da migration 0005 (`idx_diagnostic_attempts_
+one_active_per_user`) para garantir no banco — não só na aplicação — que
+nenhum usuário fica com duas tentativas `in_progress` simultâneas; uma
+violação dessa constraint (corrida de duas criações/reinícios concorrentes)
+é tratada como resultado controlado (`active_exists`), nunca um erro 500.
+Testes de rollback simulam falha nas operações críticas de criação e de
+reinício (`worker/testing/diagnostic.test.ts`). Conclusão é idempotente e
+uma corrida de conclusão não gera dois resumos (PK composta em
+`diagnostic_responses` e verificação de estado atômica).
 
 ## Métricas factuais exibidas × proibidas
 

@@ -201,6 +201,19 @@ export async function listHelpOpens(db: D1Database, attemptId: string): Promise<
   return result.results ?? [];
 }
 
+export async function findHelpOpen(
+  db: D1Database,
+  attemptId: string,
+  questionId: string,
+  layer: number
+): Promise<DiagnosticHelpOpenRow | null> {
+  const row = await db
+    .prepare("SELECT * FROM diagnostic_help_opens WHERE attempt_id = ? AND question_id = ? AND layer = ?")
+    .bind(attemptId, questionId, layer)
+    .first<DiagnosticHelpOpenRow>();
+  return row ?? null;
+}
+
 /* ---- Statements atômicos (para compor db.batch() no serviço) ---- */
 
 export function buildCreateAttemptStatement(
@@ -296,8 +309,17 @@ export function buildUpsertResponseStatement(
 
 /** Registra a abertura de uma camada de ajuda — idempotente por natureza da
  *  chave primária composta (attempt_id, question_id, layer): reabrir a
- *  mesma camada não duplica nem atualiza timestamp. Também condicionado à
- *  tentativa em andamento. */
+ *  mesma camada não duplica nem atualiza timestamp. Condicionado, dentro do
+ *  MESMO statement (nunca uma corrida entre ler e gravar — correção v1.2,
+ *  seção 3 da ordem):
+ *   - tentativa em andamento;
+ *   - camada 1 sempre permitida; camada N>1 exige que a camada N-1 já
+ *     tenha sido aberta (linha nunca é apagada, então uma vez aberta a
+ *     camada anterior continua satisfazendo o pré-requisito para sempre —
+ *     inclusive ao reabrir uma camada posterior já aberta antes).
+ *  meta.changes decide o resultado no serviço: 1 = abertura nova persistida;
+ *  0 = ou já estava aberta (idempotente) ou o gate acima bloqueou — o
+ *  serviço distingue os dois lendo o estado após a tentativa. */
 export function buildInsertHelpOpenStatement(
   db: D1Database,
   attemptId: string,
@@ -311,9 +333,12 @@ export function buildInsertHelpOpenStatement(
       `INSERT INTO diagnostic_help_opens (attempt_id, question_id, layer, opened_at)
        SELECT ?, ?, ?, datetime('now')
        WHERE ${guard}
+         AND (? <= 1 OR EXISTS (
+           SELECT 1 FROM diagnostic_help_opens WHERE attempt_id = ? AND question_id = ? AND layer = ? - 1
+         ))
        ON CONFLICT (attempt_id, question_id, layer) DO NOTHING`
     )
-    .bind(attemptId, questionId, layer, attemptId, userId);
+    .bind(attemptId, questionId, layer, attemptId, userId, layer, attemptId, questionId, layer);
 }
 
 /** Conclui a tentativa de forma idempotente e segura contra corrida: só a

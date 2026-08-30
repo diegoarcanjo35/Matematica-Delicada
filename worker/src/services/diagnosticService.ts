@@ -8,6 +8,7 @@ import {
   findActiveAttemptForUser,
   findAttempt,
   findHelpLayerContent,
+  findHelpOpen,
   findLatestCompletedAttemptForUser,
   findQuestion,
   listAttemptQuestionIds,
@@ -57,15 +58,38 @@ export async function getStatus(
 
 export interface CreateAttemptResult {
   ok: boolean;
-  reason?: "unavailable" | "active_exists" | "no_questions";
+  reason?: "unavailable" | "active_exists" | "no_questions" | "conflict";
   attemptId?: string;
+}
+
+function isUniqueActiveAttemptViolation(error: unknown): boolean {
+  // SQLite/D1 reportam violação de UNIQUE constraint na mensagem do erro
+  // (não há código estruturado disponível no seam de teste nem, de forma
+  // documentada, na API real do D1) — checar o nome da tabela junto do texto
+  // padrão evita capturar por engano uma violação de outro índice único.
+  return (
+    error instanceof Error &&
+    /UNIQUE constraint failed/i.test(error.message) &&
+    error.message.includes("diagnostic_attempts")
+  );
 }
 
 /** Cria uma nova tentativa com o catálogo atual de questões (ordem
  *  determinística). Se já existir uma tentativa em andamento, só cria uma
  *  nova mediante `restart: true` explícito — e a anterior é marcada
  *  `abandoned`, nunca apagada (seção 5.1 da ordem: reinício exige
- *  confirmação e preserva o histórico). */
+ *  confirmação e preserva o histórico).
+ *
+ *  A checagem de `active` acima é só um atalho de UX (evita uma viagem ao
+ *  banco desnecessária no caminho feliz) — quem garante de verdade que
+ *  nenhum usuário fica com duas tentativas in_progress simultâneas é o
+ *  índice único parcial da migration 0005, dentro da MESMA transação do
+ *  `db.batch()`. Duas criações/reinícios concorrentes: o statement de
+ *  INSERT que perder a corrida viola a constraint, o D1/SQLite reverte o
+ *  lote inteiro (nada fica parcialmente persistido — nem o abandono da
+ *  tentativa vencedora, nem vínculos de questão órfãos) e devolvemos o
+ *  mesmo resultado controlado de "já existe uma tentativa ativa", nunca um
+ *  erro 500 (correção v1.2, seções 4/5 da ordem). */
 export async function createAttempt(
   db: D1Database,
   userId: string,
@@ -92,7 +116,25 @@ export async function createAttempt(
     statements.push(buildInsertAttemptQuestionStatement(db, newAttemptId, question.id, index));
   });
 
-  await db.batch(statements);
+  let results: Awaited<ReturnType<D1Database["batch"]>>;
+  try {
+    results = await db.batch(statements);
+  } catch (error) {
+    if (isUniqueActiveAttemptViolation(error)) {
+      const stillActive = await findActiveAttemptForUser(db, userId);
+      return { ok: false, reason: "active_exists", attemptId: stillActive?.id };
+    }
+    throw error;
+  }
+
+  // Cada statement do lote deve afetar exatamente uma linha — qualquer
+  // contagem diferente indica um estado inesperado (nunca deveria acontecer
+  // dado o desenho acima); não fingimos sucesso nesse caso.
+  const unexpectedCount = results.some((result) => result.meta.changes !== 1);
+  if (unexpectedCount) {
+    return { ok: false, reason: "conflict" };
+  }
+
   return { ok: true, attemptId: newAttemptId };
 }
 
@@ -283,8 +325,20 @@ export interface OpenHelpResult {
   notFound?: boolean;
   fieldErrors?: Record<string, string>;
   content?: string;
+  // Distingue os dois casos de sucesso para o chamador decidir se audita
+  // (correção v1.2, seção 3/5: só abertura nova gera diagnostic_help_opened).
+  outcome?: "opened" | "already_open";
 }
 
+/** Abre uma camada de ajuda. O gate de negócio (tentativa em andamento +
+ *  progressão 1→2→3→4) vive DENTRO do statement atômico
+ *  (buildInsertHelpOpenStatement), nunca numa leitura separada antes da
+ *  escrita — elimina a corrida entre checar e gravar (correção v1.2, seção
+ *  3 da ordem). Depois do batch, meta.changes por si só não distingue
+ *  "já estava aberta" (idempotente) de "gate bloqueou" (pré-requisito
+ *  ausente ou tentativa inválida) — os dois dão changes=0 — então uma
+ *  leitura de estado (não uma corrida: é só para classificar um resultado
+ *  que já é definitivo) decide qual dos dois aconteceu. */
 export async function openHelp(
   db: D1Database,
   userId: string,
@@ -294,14 +348,6 @@ export async function openHelp(
 ): Promise<OpenHelpResult> {
   const attempt = await findAttempt(db, attemptId);
   if (!attempt || attempt.user_id !== userId) return { ok: false, notFound: true };
-  // Checagem de negócio feita aqui, sobre o estado lido: só uma tentativa em
-  // andamento pode abrir ajuda. O statement atômico abaixo reavalia a mesma
-  // condição dentro da transação (defesa em profundidade contra a corrida
-  // rara de conclusão acontecer entre esta leitura e a gravação); nesse caso
-  // raríssimo, o registro de abertura simplesmente não é persistido, mas a
-  // resposta ainda é tratada como sucesso — não é uma violação de segurança,
-  // só um estado de UI ligeiramente otimista.
-  if (attempt.status !== "in_progress") return { ok: false, notFound: true };
 
   const questionIds = await listAttemptQuestionIds(db, attemptId);
   if (!questionIds.includes(questionId)) return { ok: false, notFound: true };
@@ -314,8 +360,38 @@ export async function openHelp(
   if (!helpLayer) return { ok: false, notFound: true };
 
   const statement = buildInsertHelpOpenStatement(db, attemptId, userId, questionId, layer);
-  await db.batch([statement]);
-  return { ok: true, content: helpLayer.content };
+  const [result] = await db.batch([statement]);
+
+  if (result.meta.changes === 1) {
+    return { ok: true, content: helpLayer.content, outcome: "opened" };
+  }
+
+  // changes === 0: já estava aberta OU o gate bloqueou. Reler o estado real
+  // (pós-escrita, não uma corrida) para decidir a resposta correta.
+  const alreadyOpen = await findHelpOpen(db, attemptId, questionId, layer);
+  if (alreadyOpen) {
+    return { ok: true, content: helpLayer.content, outcome: "already_open" };
+  }
+
+  const freshAttempt = await findAttempt(db, attemptId);
+  if (!freshAttempt || freshAttempt.status !== "in_progress") {
+    // Tentativa concluída/abandonada (inclusive por corrida com a conclusão
+    // acontecendo entre a leitura do início desta função e a gravação) não
+    // recebe nem revela ajuda nova.
+    return { ok: false, notFound: true };
+  }
+
+  if (layer > 1) {
+    return {
+      ok: false,
+      fieldErrors: { layer: "Abra a camada anterior antes desta." },
+    };
+  }
+
+  // Não deveria ser alcançável (camada 1 nunca tem pré-requisito e a
+  // tentativa está em andamento) — estado inesperado, tratado como erro de
+  // validação genérico em vez de fingir sucesso.
+  return { ok: false, fieldErrors: { layer: "Não foi possível abrir esta camada agora." } };
 }
 
 export interface CompleteAttemptSummary {

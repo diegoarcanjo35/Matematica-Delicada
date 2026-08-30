@@ -4,9 +4,12 @@
 export const HELP_LAYER_MIN = 1;
 export const HELP_LAYER_MAX = 4;
 
-// Limite de sanidade técnica — nunca uma medida pedagógica. Impede que um
-// cliente malicioso/quebrado grave um tempo absurdo; não é usado para
-// pontuar nem para gerar índice algum nesta sprint.
+// Limite de sanidade técnica — nunca uma medida pedagógica. Um valor acima
+// deste teto é REJEITADO (não saturado — correção v1.2, seção 2 da ordem):
+// saturar significava que um payload adulterado ainda conseguia sobrescrever
+// uma resposta válida já persistida com um tempo artificialmente alto. Essa
+// telemetria não pode alimentar índice pedagógico algum enquanto depender de
+// medição do lado do cliente (ver docs/DIAGNOSTICO.md).
 export const TIME_SPENT_MS_MAX = 30 * 60 * 1000; // 30 minutos por questão
 
 export interface FieldValidationResult<T> {
@@ -31,11 +34,10 @@ export function validateLayer(value: unknown): FieldValidationResult<number> {
 
 export function validateTimeSpentMs(value: unknown): FieldValidationResult<number> {
   if (value === undefined || value === null) return ok(0);
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > TIME_SPENT_MS_MAX) {
     return fail("Tempo registrado inválido.");
   }
-  // Nunca rejeita por exceder o limite — só satura (é telemetria, não nota).
-  return ok(Math.min(value, TIME_SPENT_MS_MAX));
+  return ok(value);
 }
 
 export function validateIsDontKnow(value: unknown): FieldValidationResult<boolean> {

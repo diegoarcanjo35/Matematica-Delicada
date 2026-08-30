@@ -92,6 +92,12 @@ export async function handleDiagnosticRequest(
           { status: 409 }
         );
       }
+      if (result.reason === "conflict") {
+        return json(
+          { error: { code: "conflict", message: "Não foi possível iniciar o diagnóstico agora. Tente novamente." } },
+          { status: 409 }
+        );
+      }
       return Errors.badRequest("Não foi possível iniciar o diagnóstico.");
     }
 
@@ -143,8 +149,12 @@ export async function handleDiagnosticRequest(
       );
     }
 
-    // ID interno e camada — nunca o texto da ajuda em si.
-    await audit(env, "diagnostic_help_opened", user.id, { questionId, layer });
+    // ID interno e camada — nunca o texto da ajuda em si. Só abertura nova
+    // persistida gera evento; reabertura idempotente não duplica auditoria
+    // (correção v1.2, seção 3 da ordem).
+    if (result.outcome === "opened") {
+      await audit(env, "diagnostic_help_opened", user.id, { questionId, layer });
+    }
     return json({ ok: true, content: result.content });
   }
 
