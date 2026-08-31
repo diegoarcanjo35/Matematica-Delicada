@@ -1,9 +1,22 @@
-# Banco de Questões e Importação Editorial — Sprint 7 v1.1
+# Banco de Questões e Importação Editorial — Sprint 7 v1.4
 
 > v1.1 corrige três pontos apontados na auditoria da v1.0: semântica PATCH
 > parcial de verdade (Correção A), política CSV que não bloqueia matemática
 > legítima (Correção B), e algoritmo de fingerprint explícito, documentado e
 > testado diretamente (Correção C, ver seção "Fingerprint" abaixo).
+>
+> v1.2 substitui a heurística de idempotência por comparação de conteúdo por
+> uma chave de operação explícita (`mutationId`) e adiciona validação de
+> todo resultado do lote (não só o `UPDATE` central) — ver "Validação do
+> lote" abaixo.
+>
+> v1.3 substitui a validação pós-`db.batch()` (tarde demais para reverter um
+> commit já efetivado) por um trigger SQL que aborta a transação ANTES do
+> commit — mas só cobre a direção "núcleo mudou sem histórico".
+>
+> v1.4 fecha as direções restantes (núcleo mudou mas o histórico/coleção
+> não, e vice-versa) com um segundo trigger — ver "Validação do lote (v1.3 →
+> v1.4)" abaixo.
 
 ## Escopo e não escopo
 
@@ -18,7 +31,7 @@ treino diário, Caderno de Erros, cálculo dos três índices (Reconhecimento,
 Resolução, Domínio), upload remoto de mídia/R2, questões oficiais reais, conteúdo
 pedagógico definitivo, publicação em produção, D1 remoto ou deploy.
 
-## Schema — migrations 0008 e 0009
+## Schema — migrations 0008, 0009 e 0010
 
 `migrations/0008_question_bank_editorial.sql` é puramente aditiva (só
 `CREATE TABLE/INDEX IF NOT EXISTS`) sobre o schema das Sprints 1-6. Nenhum
@@ -26,9 +39,25 @@ conteúdo é inserido pela migration.
 
 `migrations/0009_editorial_batch_invariants.sql` (Sprint 7 v1.3) é aditiva
 também (só `CREATE TRIGGER IF NOT EXISTS`) — o trigger que impõe a
-indivisibilidade núcleo+histórico diretamente no banco; ver "Validação do
-lote" abaixo para o mecanismo completo. **Sprint 8 deve começar sua própria
-migration em `0010`** — nunca reaproveitar ou renumerar 0009.
+indivisibilidade núcleo+histórico diretamente no banco (uma única direção:
+"se `version` mudou, o histórico correspondente precisa existir"); ver
+"Validação do lote" abaixo para o mecanismo completo.
+
+`migrations/0010_editorial_bidirectional_invariants.sql` (Sprint 7 v1.4)
+fecha as direções que 0009 sozinha não cobria — ver "Validação do lote
+(v1.3 → v1.4)" abaixo. Também é aditiva quanto a conteúdo e a
+tabelas/triggers pré-existentes (nenhuma linha é apagada, nenhuma tabela
+removida ou renomeada, 0009 nunca é tocada), mas acrescenta uma coluna nova
+(`version_stamp`, nullable) às 5 tabelas de coleção via `ALTER TABLE` — a
+ÚNICA parte deste projeto (0001-0010) que usa `ALTER TABLE` em vez de
+`CREATE ... IF NOT EXISTS`, porque a versão do SQLite empacotada aqui não
+aceita `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`; por isso essas 5 linhas,
+ao contrário de todo o resto da migration, não são idempotentes por
+reaplicação manual direta — o que nunca acontece em uso real, já que
+Wrangler/D1 aplicam cada arquivo de migration exatamente uma vez (ver
+comentário extenso no próprio arquivo `.sql` e
+`worker/testing/migration0010.test.ts`). **Sprint 8 deve começar sua
+própria migration em `0011`** — nunca reaproveitar ou renumerar 0009/0010.
 
 Tabelas criadas:
 
@@ -423,6 +452,72 @@ NOMES dos grupos de campos alterados nesta chamada (ex.:
 e nunca alcançável se o trigger abortar a transação (o código nunca chega à
 chamada de `recordAuditEvent`, que roda depois do `db.batch()` bem-sucedido).
 
+### Validação do lote (v1.3 → v1.4) — invariante bidirecional
+
+> O trigger de 0009 cobre só UMA direção: "se `questions.version` mudou, um
+> `question_history` correspondente precisa existir". A auditoria v1.4
+> apontou o buraco na direção OPOSTA: se o `UPDATE` central de `questions`
+> afeta 0 linhas SILENCIOSAMENTE (guard não bate, sem lançar exceção)
+> enquanto o `INSERT` condicionado de `question_history` RODOU com sucesso
+> (guard bateu, roda ANTES do central no mesmo lote — v1.3), o trigger de
+> 0009 NUNCA dispara: ele só reage a um `UPDATE` que de fato mudou uma
+> linha. O lote inteiro poderia commitar com um histórico órfão e coleções
+> substituídas, mas sem a mudança de versão correspondente — e o mesmo vale
+> ao contrário: uma coleção substituída sem o núcleo mudar.
+
+**v1.4 — mecanismo do marcador incondicional**, via
+`migrations/0010_editorial_bidirectional_invariants.sql`: toda mutação
+(`updateQuestion`/`applyTransition`) insere, como o ÚLTIMO statement do
+lote, uma linha SEM WHERE-guard algum (sempre grava exatamente 1 linha) em
+`editorial_mutation_checks`, declarando o que a mutação esperava alcançar
+(questão, versão resultante e, por coleção tocada, a contagem esperada de
+linhas). Por não ter guard, esse `INSERT` sempre dispara seu próprio
+trigger `AFTER INSERT` (`trg_editorial_mutation_checks_bidirectional`) —
+mesmo que o `UPDATE` central, statement anterior no mesmo lote, tenha
+afetado 0 linhas sem lançar. Rodando por último, o trigger enxerga o estado
+(ainda não commitado) de tudo que os statements anteriores da mesma
+transação fizeram, e confere três coisas, todas verdadeiras juntas ou todas
+falsas juntas — nunca uma combinação dividida:
+
+1. **Núcleo <-> histórico**: `EXISTS(questions no version esperado)` deve
+   coincidir com `EXISTS(question_history para question_id+version
+   esperados)`. Checado por `(question_id, version)`, **nunca** por um id de
+   linha específico desta chamada — um reenvio idempotente legítimo (mesma
+   operação, `expectedVersion` que já foi correta mas ficou obsoleta porque
+   a primeira tentativa já teve sucesso) tem seu histórico real gravado por
+   uma chamada ANTERIOR, com um id diferente; checar por id quebraria esse
+   reenvio válido.
+2. **Núcleo <-> cada coleção tocada** (só quando `expected_count` não é
+   `NULL`, ou seja, a mutação de fato tocou aquela coleção): quando
+   `expected_count > 0`, confere `COUNT(linhas com version_stamp =
+   expected_version) = expected_count`. A nova coluna `version_stamp`
+   (gravada pelo mesmo `INSERT`/`UPSERT` guardado que já escreve cada linha,
+   com o mesmo valor da versão resultante) é o que evita um falso-positivo:
+   uma contagem "crua" (sem filtrar por versão) poderia coincidir por acaso
+   com o estado antigo remanescente de um guard que falhou, abortando por
+   engano uma tentativa que deveria só receber 409 — exatamente como
+   `question_history.version` já protege o histórico.
+3. **Coleção esvaziada** (`expected_count = 0`, ex. `tags: []`): uma
+   contagem carimbada é sempre 0 neste caso, tenha o guard passado ou
+   falhado (não há linha para carimbar quando a intenção é não inserir
+   nada) — o carimbo não distingue os dois casos aqui. Este caso é
+   **exemptado da checagem por contagem** e se apoia numa garantia
+   estrutural, não de runtime: o `DELETE` guardado da coleção usa a MESMA
+   condição de guard, byte a byte, que o `UPDATE` central
+   (`guardedDeleteSql`), então sempre que o núcleo muda o `DELETE`
+   necessariamente também rodou (mesmo guard, mesma transação, mesmo
+   instante imutável) e vice-versa.
+
+Uma divergência dispara `RAISE(ABORT, ...)`, revertendo a transação
+INTEIRA — núcleo, histórico, coleções e a própria linha-marcador, sem
+nenhum registro residual. Provado diretamente contra SQL real
+(`worker/testing/migration0010.test.ts`, 17 cenários incluindo o reenvio
+idempotente e o falso-positivo de contagem corrigido) e via um teste
+adversarial que constrói o lote diretamente pelo repositório, bypassando o
+serviço, com uma versão deliberadamente errada no `UPDATE` central
+enquanto o histórico usa a versão correta (`worker/testing/questions.test.ts`,
+describe "Sprint 7 v1.4").
+
 ## Importação CSV
 
 `docs/templates/questoes-importacao-v1.csv` (ver `docs/templates/README.md`
@@ -545,6 +640,10 @@ pela migration nem por qualquer GET.
   de uma checagem em JS pós-commit para este invariante específico
   (core+histórico); `validateBatchResults` continua só como defesa em
   profundidade.
+- (Resolvida na v1.4) A direção OPOSTA (núcleo não mudou mas histórico/coleção
+  sim, ou vice-versa) agora também é imposta no banco, por um segundo trigger
+  (`migrations/0010_editorial_bidirectional_invariants.sql`) — ver "Validação
+  do lote (v1.3 → v1.4)" acima.
 - Cobertura de integração completa da UX de retry de `mutationId` (simular
   uma falha de rede real contra o formulário montado) fica para uma suíte
   E2E futura — hoje só a lógica pura de decisão é testada diretamente

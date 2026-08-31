@@ -17,6 +17,11 @@ import {
   submitForReview,
   updateQuestion,
 } from "../src/services/questionService";
+import {
+  buildConditionalHistoryStatement,
+  buildMutationCheckStatement,
+  buildUpdateQuestionCoreStatement,
+} from "../src/repositories/questionRepository";
 
 let db: FakeD1Database;
 
@@ -1014,5 +1019,107 @@ describe("Sprint 7 v1.3 — invariante core+histórico indivisível (trigger 000
     expect(after.updated_at).toBe(before.updated_at);
     expect(historyCount(qId)).toBe(historyBefore);
     expect(auditLogCount(qId)).toBe(0);
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* Sprint 7 v1.4 — invariante BIDIRECIONAL núcleo<->histórico (migration    */
+/* 0010): cobre a direção que o trigger de 0009 NÃO cobre — histórico       */
+/* condicionado bate seu próprio guard e insere de verdade, mas o UPDATE    */
+/* central de `questions` é construído com uma versão deliberadamente       */
+/* ERRADA (bypass do serviço, direto no repositório) e afeta 0 linhas       */
+/* SILENCIOSAMENTE, sem lançar exceção alguma — cenário que jamais dispara  */
+/* o `AFTER UPDATE` de 0009 (só reage a uma linha que de fato mudou).       */
+/* Prova exigida: db.batch() lança, e o banco é consultado DIRETAMENTE      */
+/* depois da falha para confirmar ausência de QUALQUER resíduo — núcleo,    */
+/* histórico E a própria tabela de checagem (editorial_mutation_checks).    */
+/* ---------------------------------------------------------------------- */
+describe("Sprint 7 v1.4 — invariante bidirecional núcleo<->histórico (trigger 0010)", () => {
+  function coreSnapshot(id: string): { version: number; updated_at: string; enunciado: string; editorial_status: string } {
+    return db.sqlite.prepare("SELECT version, updated_at, enunciado, editorial_status FROM questions WHERE id = ?").get(id) as never;
+  }
+  function mutationChecksCount(): number {
+    return (db.sqlite.prepare("SELECT COUNT(*) as total FROM editorial_mutation_checks").get() as { total: number }).total;
+  }
+  function auditLogCount(questionId: string): number {
+    return (
+      db.sqlite
+        .prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = 'editorial_question_updated' AND metadata LIKE ?")
+        .get(`%${questionId}%`) as { total: number }
+    ).total;
+  }
+
+  it("histórico condicionado bate seu PRÓPRIO guard e insere de verdade, mas o UPDATE central usa uma versão deliberadamente ERRADA e afeta 0 linhas silenciosamente → o marcador final aborta a transação INTEIRA, sem exceção prévia de nenhum statement individual", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+    const auditBefore = auditLogCount(qId);
+    const markerBefore = mutationChecksCount();
+
+    // Histórico: guard usa a versão REAL/atual (1) — bate de verdade,
+    // insere 1 linha para (question_id=qId, version=2).
+    const historyStatement = buildConditionalHistoryStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      userId: "autor1",
+      action: "updated",
+      fromStatus: "draft",
+      toStatus: "draft",
+      guardVersion: 1,
+      versionAfter: 2,
+      guardStatuses: ["draft", "changes_requested"],
+      metadata: null,
+    });
+
+    // UPDATE central: construído com expectedVersion = 999 (DELIBERADAMENTE
+    // errado, simulando um bug num código futuro que desalinhe o guard do
+    // core do guard do histórico) — o guard não bate, afeta 0 linhas, SEM
+    // lançar exceção alguma.
+    const coreUpdateWithWrongVersion = buildUpdateQuestionCoreStatement(db as never, qId, 999, {
+      enunciado: before.enunciado,
+      resolucaoComentada: "",
+      conteudo: "",
+      subconteudo: "",
+      habilidade: "",
+      competencia: "",
+      dificuldade: "media",
+      origem: "autoral",
+      prova: null,
+      ano: null,
+      tempoEstimadoSegundos: null,
+      tipoCalculo: "misto",
+      necessitaCalculadora: 0,
+      titularDireitos: null,
+      baseLicenca: null,
+      textoAtribuicao: null,
+      fingerprint: "fp-nao-deveria-persistir",
+    });
+
+    // Marcador final e incondicional: declara a expectativa real da
+    // mutação (versão resultante 2) — sempre insere exatamente 1 linha,
+    // sempre dispara seu próprio trigger.
+    const mutationCheck = buildMutationCheckStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      expectedVersion: 2,
+      alternativesExpectedCount: null,
+      dnaExpectedCount: null,
+      patternsExpectedCount: null,
+      tagsExpectedCount: null,
+      imagesExpectedCount: null,
+    });
+
+    await expect(db.batch([historyStatement, coreUpdateWithWrongVersion, mutationCheck])).rejects.toThrow(/invariante violada/i);
+
+    // Nenhum resíduo de NENHUM tipo: nem núcleo, nem histórico (mesmo tendo
+    // seu PRÓPRIO guard satisfeito e "conseguido" inserir dentro da
+    // transação), nem a própria linha-marcador, nem auditoria.
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version);
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(after.enunciado).toBe(before.enunciado);
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(auditLogCount(qId)).toBe(auditBefore);
+    expect(mutationChecksCount()).toBe(markerBefore);
   });
 });

@@ -576,23 +576,34 @@ export function buildDeleteTagsStatement(db: D1Database, questionId: string, ver
 }
 
 /** INSERT guardado pela mesma condição — só insere se a questão estiver
- *  exatamente em `versionAfter` (garante que o DELETE irmão, acima, também
+ *  exatamente em `guardVersion` (garante que o DELETE irmão, acima, também
  *  rodou de verdade nesta transação, nunca um INSERT "órfão" somado a
- *  linhas antigas não removidas). */
+ *  linhas antigas não removidas).
+ *
+ *  Sprint 7 v1.4 — `versionAfter` (a versão RESULTANTE desta mutação, ex.
+ *  `guardVersion + 1`) é gravada na nova coluna `version_stamp`
+ *  (migrations/0010_editorial_bidirectional_invariants.sql), exatamente com
+ *  o MESMO valor que `editorial_mutation_checks.expected_version` vai
+ *  registrar para esta mesma mutação. Isso é o que permite ao trigger
+ *  bidirecional de 0010 diferenciar "estas linhas são realmente o produto
+ *  DESTA mutação" de "estas linhas só coincidem em CONTAGEM com o estado
+ *  antigo não tocado (guard falhou)" — mesmo raciocínio que já protege
+ *  `question_history.version` desde a Sprint 7 v1.0. */
 export function buildGuardedInsertAlternativeStatement(
   db: D1Database,
   questionId: string,
   id: string,
   alt: AlternativeInput,
   position: number,
+  guardVersion: number,
   versionAfter: number
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO question_alternatives (id, question_id, letter, text, is_correct, distractor_explanation, position)
-       SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
+      `INSERT INTO question_alternatives (id, question_id, letter, text, is_correct, distractor_explanation, position, version_stamp)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
-    .bind(id, questionId, alt.letter, alt.text, alt.isCorrect ? 1 : 0, alt.distractorExplanation, position, questionId, versionAfter);
+    .bind(id, questionId, alt.letter, alt.text, alt.isCorrect ? 1 : 0, alt.distractorExplanation, position, versionAfter, questionId, guardVersion);
 }
 
 export function buildGuardedInsertImageStatement(
@@ -600,12 +611,13 @@ export function buildGuardedInsertImageStatement(
   questionId: string,
   id: string,
   image: QuestionImageInput,
+  guardVersion: number,
   versionAfter: number
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO question_images (id, question_id, asset_ref, alt_text, caption, position, titular_direitos, base_licenca)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
+      `INSERT INTO question_images (id, question_id, asset_ref, alt_text, caption, position, titular_direitos, base_licenca, version_stamp)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
     .bind(
       id,
@@ -616,8 +628,9 @@ export function buildGuardedInsertImageStatement(
       image.position,
       image.titularDireitos,
       image.baseLicenca,
+      versionAfter,
       questionId,
-      versionAfter
+      guardVersion
     );
 }
 
@@ -626,14 +639,15 @@ export function buildGuardedInsertPatternLinkStatement(
   questionId: string,
   id: string,
   link: QuestionPatternInput,
+  guardVersion: number,
   versionAfter: number
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO question_patterns (id, question_id, pattern_id, role)
-       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
+      `INSERT INTO question_patterns (id, question_id, pattern_id, role, version_stamp)
+       SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
-    .bind(id, questionId, link.patternId, link.role, questionId, versionAfter);
+    .bind(id, questionId, link.patternId, link.role, versionAfter, questionId, guardVersion);
 }
 
 export function buildGuardedInsertTagStatement(
@@ -642,32 +656,46 @@ export function buildGuardedInsertTagStatement(
   id: string,
   content: string,
   position: number,
+  guardVersion: number,
   versionAfter: number
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO question_tags (id, question_id, content, position)
-       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
+      `INSERT INTO question_tags (id, question_id, content, position, version_stamp)
+       SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`
     )
-    .bind(id, questionId, content, position, questionId, versionAfter);
+    .bind(id, questionId, content, position, versionAfter, questionId, guardVersion);
 }
 
 export function buildGuardedUpsertDnaStatement(
   db: D1Database,
   questionId: string,
   dna: QuestionDnaInput,
+  guardVersion: number,
   versionAfter: number
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO question_dna (question_id, pista, estrategia, pegadinha, conteudo_apoio, resolucao, atalho, aprendizado_erro, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now') WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))
+      `INSERT INTO question_dna (question_id, pista, estrategia, pegadinha, conteudo_apoio, resolucao, atalho, aprendizado_erro, version_stamp, updated_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now') WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))
        ON CONFLICT (question_id) DO UPDATE SET
          pista = excluded.pista, estrategia = excluded.estrategia, pegadinha = excluded.pegadinha,
          conteudo_apoio = excluded.conteudo_apoio, resolucao = excluded.resolucao, atalho = excluded.atalho,
-         aprendizado_erro = excluded.aprendizado_erro, updated_at = datetime('now')`
+         aprendizado_erro = excluded.aprendizado_erro, version_stamp = excluded.version_stamp, updated_at = datetime('now')`
     )
-    .bind(questionId, dna.pista, dna.estrategia, dna.pegadinha, dna.conteudoApoio, dna.resolucao, dna.atalho, dna.aprendizadoErro, questionId, versionAfter);
+    .bind(
+      questionId,
+      dna.pista,
+      dna.estrategia,
+      dna.pegadinha,
+      dna.conteudoApoio,
+      dna.resolucao,
+      dna.atalho,
+      dna.aprendizadoErro,
+      versionAfter,
+      questionId,
+      guardVersion
+    );
 }
 
 /* --------------------------------- Transições -------------------------------- */
@@ -730,4 +758,55 @@ export async function listPatternLinksForQuestions(db: D1Database, questionIds: 
     .bind(...questionIds)
     .all<QuestionPatternRow>();
   return result.results ?? [];
+}
+
+/** Sprint 7 v1.4 — statement final e INCONDICIONAL de toda mutação
+ *  (updateQuestion/applyTransition): sempre insere exatamente 1 linha (sem
+ *  WHERE/guard algum) em `editorial_mutation_checks`, garantindo que seu
+ *  próprio trigger `AFTER INSERT` (`trg_editorial_mutation_checks_bidirectional`,
+ *  migrations/0010_editorial_bidirectional_invariants.sql) SEMPRE dispara —
+ *  ao contrário de um UPDATE/INSERT condicionado, que nunca dispara seu
+ *  próprio trigger quando afeta 0 linhas silenciosamente. Rodando por ÚLTIMO
+ *  no lote, o trigger enxerga o estado (ainda não commitado) de tudo que os
+ *  statements anteriores da MESMA transação fizeram (ou deixaram de fazer) e
+ *  aborta a transação inteira se núcleo/histórico/coleções divergirem — sem
+ *  registro residual, nem desta própria linha-marcador. Um campo de
+ *  contagem `null` significa "esta coleção não foi tocada por esta
+ *  mutação" — o trigger não checa nada para ela nesse caso.
+ *
+ *  Sprint 7 v1.4 — NÃO recebe um `historyId` específico desta chamada: o
+ *  trigger confere a existência do histórico por `(question_id,
+ *  expected_version)`, nunca por um id de linha específico — necessário
+ *  para não quebrar um reenvio idempotente legítimo, cujo histórico real já
+ *  foi gravado por uma chamada ANTERIOR com um id diferente (ver nota
+ *  extensa em migrations/0010_editorial_bidirectional_invariants.sql). */
+export function buildMutationCheckStatement(
+  db: D1Database,
+  params: {
+    id: string;
+    questionId: string;
+    expectedVersion: number;
+    alternativesExpectedCount: number | null;
+    dnaExpectedCount: number | null;
+    patternsExpectedCount: number | null;
+    tagsExpectedCount: number | null;
+    imagesExpectedCount: number | null;
+  }
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO editorial_mutation_checks
+         (id, question_id, expected_version, alternatives_expected_count, dna_expected_count, patterns_expected_count, tags_expected_count, images_expected_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      params.id,
+      params.questionId,
+      params.expectedVersion,
+      params.alternativesExpectedCount,
+      params.dnaExpectedCount,
+      params.patternsExpectedCount,
+      params.tagsExpectedCount,
+      params.imagesExpectedCount
+    );
 }

@@ -50,6 +50,7 @@ import {
   buildInsertPatternLinkStatement,
   buildInsertQuestionStatement,
   buildInsertTagStatement,
+  buildMutationCheckStatement,
   buildTransitionStatement,
   buildUpdateQuestionCoreStatement,
   buildUpsertDnaStatement,
@@ -625,7 +626,10 @@ export async function updateQuestion(
     childStatements.push({ statement: buildDeleteAlternativesStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_alternatives", expected: "any" } });
     effectiveAlternatives.forEach((alt, index) => {
       childStatements.push({
-        statement: buildGuardedInsertAlternativeStatement(db, questionId, newId(), alt, index, expectedVersion),
+        // v1.4 — `versionAfter` carimba `version_stamp` (ver nota em
+        // questionRepository.ts), nunca confundir com `expectedVersion`
+        // (guard, valor PRÉ-mutação).
+        statement: buildGuardedInsertAlternativeStatement(db, questionId, newId(), alt, index, expectedVersion, versionAfter),
         expectation: { label: `INSERT question_alternatives[${alt.letter}]`, expected: "exactlyOne" },
       });
     });
@@ -633,7 +637,7 @@ export async function updateQuestion(
   if (dnaProvided) {
     changedFields.push("dna");
     childStatements.push({
-      statement: buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, expectedVersion),
+      statement: buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, expectedVersion, versionAfter),
       expectation: { label: "UPSERT question_dna", expected: "exactlyOne" },
     });
   }
@@ -642,7 +646,7 @@ export async function updateQuestion(
     childStatements.push({ statement: buildDeletePatternLinksStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_patterns", expected: "any" } });
     patternsResult!.value!.forEach((link) => {
       childStatements.push({
-        statement: buildGuardedInsertPatternLinkStatement(db, questionId, newId(), link, expectedVersion),
+        statement: buildGuardedInsertPatternLinkStatement(db, questionId, newId(), link, expectedVersion, versionAfter),
         expectation: { label: `INSERT question_patterns[${link.patternId}]`, expected: "exactlyOne" },
       });
     });
@@ -652,7 +656,7 @@ export async function updateQuestion(
     childStatements.push({ statement: buildDeleteTagsStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_tags", expected: "any" } });
     tagsResult!.value!.forEach((tag, index) => {
       childStatements.push({
-        statement: buildGuardedInsertTagStatement(db, questionId, newId(), tag, index, expectedVersion),
+        statement: buildGuardedInsertTagStatement(db, questionId, newId(), tag, index, expectedVersion, versionAfter),
         expectation: { label: `INSERT question_tags[${index}]`, expected: "exactlyOne" },
       });
     });
@@ -662,7 +666,7 @@ export async function updateQuestion(
     childStatements.push({ statement: buildDeleteImagesStatement(db, questionId, expectedVersion), expectation: { label: "DELETE question_images", expected: "any" } });
     imagesResult!.value!.forEach((image, index) => {
       childStatements.push({
-        statement: buildGuardedInsertImageStatement(db, questionId, newId(), image, expectedVersion),
+        statement: buildGuardedInsertImageStatement(db, questionId, newId(), image, expectedVersion, versionAfter),
         expectation: { label: `INSERT question_images[${index}]`, expected: "exactlyOne" },
       });
     });
@@ -693,20 +697,45 @@ export async function updateQuestion(
     expectation: { label: "INSERT question_history", expected: "exactlyOne" },
   });
 
+  // v1.4 — statement final e INCONDICIONAL: registra o que esta mutação
+  // ESPERA ter acontecido (núcleo na versão resultante, histórico com este
+  // mutationId, e a contagem esperada de cada coleção REALMENTE tocada nesta
+  // chamada — `null` para as não tocadas). Por não ter WHERE algum, este
+  // INSERT sempre grava exatamente 1 linha e SEMPRE dispara seu próprio
+  // trigger `AFTER INSERT` (migrations/0010_editorial_bidirectional_invariants.sql),
+  // que enxerga o estado (ainda não commitado) de tudo que os statements
+  // anteriores desta mesma transação fizeram — mesmo se o UPDATE central,
+  // logo antes dele, tiver silenciosamente afetado 0 linhas sem lançar
+  // exceção. Isso fecha a direção que o trigger de 0009 (reage só a um
+  // UPDATE que de fato mudou uma linha) não cobre.
+  const mutationCheck = buildMutationCheckStatement(db, {
+    id: newId(),
+    questionId,
+    expectedVersion: versionAfter,
+    alternativesExpectedCount: alternativesProvided ? effectiveAlternatives.length : null,
+    dnaExpectedCount: dnaProvided ? 1 : null,
+    patternsExpectedCount: patternsProvided ? patternsResult!.value!.length : null,
+    tagsExpectedCount: tagsProvided ? tagsResult!.value!.length : null,
+    imagesExpectedCount: imagesProvided ? imagesResult!.value!.length : null,
+  });
+
   // v1.3 — ORDEM: filhos (coleções + histórico) PRIMEIRO, UPDATE central
   // POR ÚLTIMO. Se `expectedVersion` não bater com a versão atual real, TODOS
   // os guards (filhos e central) falham consistentemente (mesma condição,
   // mesmo estado imutável durante a transação) — nenhuma escrita parcial.
   // Se bater, os filhos inserem primeiro e o UPDATE central, ao rodar por
   // último, dispara o trigger de 0009, que exige que o histórico já exista.
-  const allStatements = [...childStatements.map((c) => c.statement), coreUpdate];
+  // v1.4 — a checagem-marcador (`mutationCheck`) roda por ÚLTIMO de todos,
+  // depois do UPDATE central, para poder enxergar o resultado real dele.
+  const allStatements = [...childStatements.map((c) => c.statement), coreUpdate, mutationCheck];
   // Uma falha lançada por QUALQUER statement do lote (ex.: erro forçado, OU
-  // o RAISE(ABORT) do trigger de 0009) propaga a exceção do `db.batch()`
-  // inteiro, revertendo TUDO (nenhuma escrita parcial) — garantia nativa do
-  // FakeD1Database (node:sqlite real)/D1 real, provada por teste consultando
-  // o banco diretamente depois da falha, nunca só a resposta HTTP.
+  // o RAISE(ABORT) de qualquer um dos triggers de 0009/0010) propaga a
+  // exceção do `db.batch()` inteiro, revertendo TUDO (nenhuma escrita
+  // parcial) — garantia nativa do FakeD1Database (node:sqlite real)/D1 real,
+  // provada por teste consultando o banco diretamente depois da falha,
+  // nunca só a resposta HTTP.
   const results = await db.batch(allStatements);
-  const coreResult = results[results.length - 1];
+  const coreResult = results[results.length - 2];
 
   if (coreResult.meta.changes !== 1) {
     const after = await findQuestionById(db, questionId);
@@ -716,13 +745,15 @@ export async function updateQuestion(
   }
 
   // v1.2, Correção B — valida TODOS os demais resultados do lote contra a
-  // expectativa declarada de cada statement (defesa em profundidade — o
-  // trigger de 0009 já teria abortado a transação inteira antes deste ponto
-  // se o histórico estivesse ausente; esta checagem cobre outras
-  // inconsistências, ex. numa coleção, e nunca deveria disparar em operação
-  // normal).
+  // expectativa declarada de cada statement (defesa em profundidade — os
+  // triggers de 0009/0010 já teriam abortado a transação inteira antes
+  // deste ponto se núcleo/histórico/coleções divergissem; esta checagem
+  // cobre outras inconsistências e nunca deveria disparar em operação
+  // normal). Exclui tanto o UPDATE central quanto a checagem-marcador
+  // (últimos dois statements) — só os filhos (coleções + histórico) têm
+  // expectativa declarada aqui.
   validateBatchResults(
-    results.slice(0, -1),
+    results.slice(0, -2),
     childStatements.map((c) => c.expectation)
   );
 
@@ -984,8 +1015,9 @@ async function applyTransition(
   // nota extensa em updateQuestion acima e
   // migrations/0009_editorial_batch_invariants.sql): se a transição de fato
   // mudar `version`, o trigger exige que este histórico já exista.
+  const historyId = newId();
   const historyStatement = buildConditionalHistoryStatement(db, {
-    id: newId(),
+    id: historyId,
     questionId: params.questionId,
     userId: params.actorUserId,
     action: params.action,
@@ -999,14 +1031,31 @@ async function applyTransition(
     metadata: params.metadata ?? null,
   });
 
+  // v1.4 — mesmo mecanismo de marker-row de updateQuestion: transição nunca
+  // toca coleções, então todas as contagens ficam `null` (nada a conferir
+  // além de núcleo<->histórico).
+  const mutationCheck = buildMutationCheckStatement(db, {
+    id: newId(),
+    questionId: params.questionId,
+    expectedVersion: versionAfter,
+    alternativesExpectedCount: null,
+    dnaExpectedCount: null,
+    patternsExpectedCount: null,
+    tagsExpectedCount: null,
+    imagesExpectedCount: null,
+  });
+
   // v1.3 — histórico PRIMEIRO, UPDATE da transição POR ÚLTIMO (dispara o
-  // trigger de 0009 quando `version` realmente muda).
-  const [historyResult, updateResult] = await db.batch([historyStatement, transitionStatement]);
+  // trigger de 0009 quando `version` realmente muda). v1.4 — a
+  // checagem-marcador roda por ÚLTIMA de todas, depois do UPDATE da
+  // transição, para poder enxergar o resultado real dele mesmo quando ele
+  // afeta 0 linhas silenciosamente.
+  const [historyResult, updateResult] = await db.batch([historyStatement, transitionStatement, mutationCheck]);
   if (updateResult.meta.changes === 1) {
-    // v1.2, Correção B — mantida como defesa em profundidade: o trigger de
-    // 0009 já teria abortado a transação inteira (RAISE(ABORT)) antes deste
-    // ponto se o histórico estivesse ausente — esta checagem nunca deveria
-    // disparar em operação normal.
+    // v1.2, Correção B — mantida como defesa em profundidade: os triggers de
+    // 0009/0010 já teriam abortado a transação inteira (RAISE(ABORT)) antes
+    // deste ponto se núcleo/histórico divergissem — esta checagem nunca
+    // deveria disparar em operação normal.
     validateBatchResults([historyResult], [{ label: "INSERT question_history (transição)", expected: "exactlyOne" }]);
     return { ok: true, changed: true };
   }

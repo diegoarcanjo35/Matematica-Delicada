@@ -387,6 +387,9 @@ CREATE TABLE question_alternatives (
   is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1)),
   distractor_explanation TEXT,
   position INTEGER NOT NULL,
+  -- Sprint 7 v1.4 (migration 0010) - carimbo da versao de questions que
+  -- esta linha corresponde; ver nota extensa em migrations/0010_editorial_bidirectional_invariants.sql.
+  version_stamp INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -402,6 +405,7 @@ CREATE TABLE question_images (
   position INTEGER NOT NULL DEFAULT 0,
   titular_direitos TEXT,
   base_licenca TEXT,
+  version_stamp INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -412,6 +416,7 @@ CREATE TABLE question_patterns (
   question_id TEXT NOT NULL REFERENCES questions (id),
   pattern_id TEXT NOT NULL REFERENCES patterns (id),
   role TEXT NOT NULL CHECK (role IN ('principal', 'secundario')),
+  version_stamp INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE UNIQUE INDEX idx_question_patterns_unique ON question_patterns (question_id, pattern_id);
@@ -423,6 +428,7 @@ CREATE TABLE question_tags (
   question_id TEXT NOT NULL REFERENCES questions (id),
   content TEXT NOT NULL CHECK (length(trim(content)) > 0),
   position INTEGER NOT NULL DEFAULT 0,
+  version_stamp INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE UNIQUE INDEX idx_question_tags_unique ON question_tags (question_id, content);
@@ -437,6 +443,7 @@ CREATE TABLE question_dna (
   resolucao TEXT NOT NULL DEFAULT '',
   atalho TEXT,
   aprendizado_erro TEXT NOT NULL DEFAULT '',
+  version_stamp INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -496,6 +503,85 @@ BEGIN
       WHERE question_id = NEW.id AND version = NEW.version
     )
     THEN RAISE(ABORT, 'invariante violada: questions.version mudou sem question_history correspondente')
+  END;
+END;
+
+-- Sprint 7 v1.4 (migration 0010) — invariante BIDIRECIONAL núcleo<->histórico<->coleções.
+-- Espelho manual do DDL de migrations/0010_editorial_bidirectional_invariants.sql —
+-- os dois precisam ser mantidos em sincronia.
+CREATE TABLE editorial_mutation_checks (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL,
+  expected_version INTEGER NOT NULL,
+  alternatives_expected_count INTEGER,
+  dna_expected_count INTEGER,
+  patterns_expected_count INTEGER,
+  tags_expected_count INTEGER,
+  images_expected_count INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TRIGGER trg_editorial_mutation_checks_bidirectional
+AFTER INSERT ON editorial_mutation_checks
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN (
+      EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+    ) != (
+      EXISTS (SELECT 1 FROM question_history WHERE question_id = NEW.question_id AND version = NEW.expected_version)
+    )
+    THEN RAISE(ABORT, 'invariante violada: núcleo (questions.version) e question_history divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.alternatives_expected_count IS NOT NULL AND NEW.alternatives_expected_count > 0
+     AND (
+       (SELECT COUNT(*) FROM question_alternatives WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.alternatives_expected_count
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_alternatives divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.dna_expected_count IS NOT NULL AND NEW.dna_expected_count > 0
+     AND (
+       (SELECT COUNT(*) FROM question_dna WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.dna_expected_count
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_dna divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.patterns_expected_count IS NOT NULL AND NEW.patterns_expected_count > 0
+     AND (
+       (SELECT COUNT(*) FROM question_patterns WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.patterns_expected_count
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_patterns divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.tags_expected_count IS NOT NULL AND NEW.tags_expected_count > 0
+     AND (
+       (SELECT COUNT(*) FROM question_tags WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.tags_expected_count
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_tags divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.images_expected_count IS NOT NULL AND NEW.images_expected_count > 0
+     AND (
+       (SELECT COUNT(*) FROM question_images WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.images_expected_count
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_images divergem para esta mutação')
   END;
 END;
 `;
