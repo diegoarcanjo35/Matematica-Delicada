@@ -584,6 +584,89 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada: núcleo e question_images divergem para esta mutação')
   END;
 END;
+
+-- Sprint 7 v1.5 (migration 0011) - recibo de mutacao por colecao, fecha o buraco de 0010 para colecoes esvaziadas.
+-- Espelho manual do DDL de migrations/0011_editorial_collection_mutation_receipts.sql -
+-- os dois precisam ser mantidos em sincronia.
+CREATE TABLE question_collection_mutation_receipts (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL,
+  collection TEXT NOT NULL,
+  expected_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_question_collection_mutation_receipts_lookup ON question_collection_mutation_receipts (question_id, collection, expected_version);
+
+CREATE TRIGGER trg_editorial_mutation_checks_collection_receipts
+AFTER INSERT ON editorial_mutation_checks
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NEW.alternatives_expected_count IS NOT NULL
+     AND (
+       EXISTS (
+         SELECT 1 FROM question_collection_mutation_receipts
+         WHERE question_id = NEW.question_id AND collection = 'question_alternatives' AND expected_version = NEW.expected_version
+       )
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_alternatives divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.dna_expected_count IS NOT NULL
+     AND (
+       EXISTS (
+         SELECT 1 FROM question_collection_mutation_receipts
+         WHERE question_id = NEW.question_id AND collection = 'question_dna' AND expected_version = NEW.expected_version
+       )
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_dna divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.patterns_expected_count IS NOT NULL
+     AND (
+       EXISTS (
+         SELECT 1 FROM question_collection_mutation_receipts
+         WHERE question_id = NEW.question_id AND collection = 'question_patterns' AND expected_version = NEW.expected_version
+       )
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_patterns divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.tags_expected_count IS NOT NULL
+     AND (
+       EXISTS (
+         SELECT 1 FROM question_collection_mutation_receipts
+         WHERE question_id = NEW.question_id AND collection = 'question_tags' AND expected_version = NEW.expected_version
+       )
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_tags divergem para esta mutação')
+  END;
+
+  SELECT CASE
+    WHEN NEW.images_expected_count IS NOT NULL
+     AND (
+       EXISTS (
+         SELECT 1 FROM question_collection_mutation_receipts
+         WHERE question_id = NEW.question_id AND collection = 'question_images' AND expected_version = NEW.expected_version
+       )
+     ) != (
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+     )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_images divergem para esta mutação')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {

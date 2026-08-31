@@ -1,4 +1,4 @@
-# Banco de Questões e Importação Editorial — Sprint 7 v1.4
+# Banco de Questões e Importação Editorial — Sprint 7 v1.5
 
 > v1.1 corrige três pontos apontados na auditoria da v1.0: semântica PATCH
 > parcial de verdade (Correção A), política CSV que não bloqueia matemática
@@ -17,6 +17,15 @@
 > v1.4 fecha as direções restantes (núcleo mudou mas o histórico/coleção
 > não, e vice-versa) com um segundo trigger — ver "Validação do lote (v1.3 →
 > v1.4)" abaixo.
+>
+> v1.5 fecha o último buraco: quando uma coleção é ESVAZIADA (ex. `tags:
+> []`), a contagem carimbada por versão do v1.4 é sempre zero, tenha o
+> guard passado ou falhado — nada para contar não prova nada. Um terceiro
+> trigger, mais um "recibo" de mutação por coleção, prova que o `DELETE`
+> guardado rodou de verdade, desacoplado da contagem — ver "Validação do
+> lote (v1.4 → v1.5)" abaixo. Também remove a própria linha-marcador/recibo
+> ao fim de cada chamada bem-sucedida, para nenhuma das duas tabelas técnicas
+> crescer sem limite.
 
 ## Escopo e não escopo
 
@@ -31,7 +40,7 @@ treino diário, Caderno de Erros, cálculo dos três índices (Reconhecimento,
 Resolução, Domínio), upload remoto de mídia/R2, questões oficiais reais, conteúdo
 pedagógico definitivo, publicação em produção, D1 remoto ou deploy.
 
-## Schema — migrations 0008, 0009 e 0010
+## Schema — migrations 0008, 0009, 0010 e 0011
 
 `migrations/0008_question_bank_editorial.sql` é puramente aditiva (só
 `CREATE TABLE/INDEX IF NOT EXISTS`) sobre o schema das Sprints 1-6. Nenhum
@@ -56,8 +65,15 @@ ao contrário de todo o resto da migration, não são idempotentes por
 reaplicação manual direta — o que nunca acontece em uso real, já que
 Wrangler/D1 aplicam cada arquivo de migration exatamente uma vez (ver
 comentário extenso no próprio arquivo `.sql` e
-`worker/testing/migration0010.test.ts`). **Sprint 8 deve começar sua
-própria migration em `0011`** — nunca reaproveitar ou renumerar 0009/0010.
+`worker/testing/migration0010.test.ts`).
+
+`migrations/0011_editorial_collection_mutation_receipts.sql` (Sprint 7 v1.5)
+fecha o buraco que 0010 sozinha deixava para coleções ESVAZIADAS — ver
+"Validação do lote (v1.4 → v1.5)" abaixo. Aditiva e não destrutiva (só
+`CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS`, nenhum `ALTER TABLE` desta vez —
+totalmente idempotente por reaplicação, ao contrário de 0010); não toca
+0009 nem 0010. **Sprint 8 deve começar sua própria migration em `0012`** —
+nunca reaproveitar ou renumerar 0009/0010/0011.
 
 Tabelas criadas:
 
@@ -510,13 +526,77 @@ falsas juntas — nunca uma combinação dividida:
 
 Uma divergência dispara `RAISE(ABORT, ...)`, revertendo a transação
 INTEIRA — núcleo, histórico, coleções e a própria linha-marcador, sem
-nenhum registro residual. Provado diretamente contra SQL real
-(`worker/testing/migration0010.test.ts`, 17 cenários incluindo o reenvio
-idempotente e o falso-positivo de contagem corrigido) e via um teste
-adversarial que constrói o lote diretamente pelo repositório, bypassando o
-serviço, com uma versão deliberadamente errada no `UPDATE` central
-enquanto o histórico usa a versão correta (`worker/testing/questions.test.ts`,
-describe "Sprint 7 v1.4").
+nenhum registro residual (a partir da v1.5 — ver abaixo; na v1.4 original a
+linha-marcador sobrevivia, o que a v1.5 corrigiu). Provado diretamente
+contra SQL real (`worker/testing/migration0010.test.ts`, 17 cenários
+incluindo o reenvio idempotente e o falso-positivo de contagem corrigido) e
+via um teste adversarial que constrói o lote diretamente pelo repositório,
+bypassando o serviço, com uma versão deliberadamente errada no `UPDATE`
+central enquanto o histórico usa a versão correta
+(`worker/testing/questions.test.ts`, describe "Sprint 7 v1.4").
+
+### Validação do lote (v1.4 → v1.5) — recibo por coleção e limpeza técnica
+
+> A auditoria v1.5 apontou dois problemas remanescentes na v1.4. **(1)** o
+> caso `*_expected_count = 0` (coleção enviada vazia, ex. `tags: []`) era
+> deliberadamente PULADO na checagem por contagem de 0010 (`> 0` na
+> condição) — porque uma contagem carimbada por `version_stamp` é SEMPRE
+> zero nesse caso, tenha o `DELETE` guardado realmente rodado (limpando de
+> verdade) ou silenciosamente afetado 0 linhas (guard não bateu, sem lançar
+> exceção, deixando linhas antigas para trás). A v1.4 original só cobria
+> esse caso com um argumento de CÓDIGO ("o `DELETE` e o `UPDATE` central
+> usam o MESMO texto de guard, então não podem divergir") — a auditoria
+> rejeitou isso como insuficiente: convenção de código não é garantia
+> imposta pelo banco numa transação real. **(2)** `editorial_mutation_checks`
+> acumulava uma linha por chamada (sucesso, retry, conflito, no-op) para
+> sempre — não é um registro de auditoria/negócio, só uma prova técnica
+> instantânea, e não deveria crescer sem limite.
+
+**Recibo por coleção** (`migrations/0011_editorial_collection_mutation_receipts.sql`):
+para cada coleção presente num PATCH, o serviço grava, no MESMO lote, um
+INSERT a mais em `question_collection_mutation_receipts` — guardado pela
+EXATA MESMA condição do `DELETE` daquela coleção
+(`collectionGuardCondition()`, reaproveitada literalmente pelos dois em
+`worker/src/repositories/questionRepository.ts` — nunca um texto duplicado
+"igual por convenção"). O recibo só é gravado se o guard genuinamente
+bateu, não importa quantas linhas sobraram depois (0 ou N) — prova "o
+`DELETE` guardado desta coleção rodou de verdade", desacoplado de contar
+linhas. Um SEGUNDO trigger, independente do de 0010 (SQLite permite
+múltiplos triggers no mesmo evento/tabela — os dois disparam no MESMO
+INSERT incondicional do marcador), confere: para cada coleção cujo
+`*_expected_count` não é `NULL` (tocada nesta mutação), a EXISTÊNCIA do
+recibo deve coincidir com "o núcleo está na versão esperada" — mesmo padrão
+XNOR do trigger de 0010, nunca uma implicação unidirecional simples
+("tocou logo TEM que ter recibo"), porque isso reproduziria, para o
+recibo, o MESMO falso-positivo que 0010 já precisou corrigir para a
+contagem: um PATCH legítimo com `expectedVersion` desatualizada falha o
+guard de TUDO consistentemente (nenhum recibo é gravado, mas o núcleo
+também não muda) — um 409 gracioso, não uma corrupção. 0010 continua
+rodando e válida, como camada adicional para o caso N>0.
+
+**Limpeza técnica**: logo após o INSERT incondicional do marcador, o mesmo
+`db.batch()` inclui um `DELETE FROM editorial_mutation_checks WHERE id = ?`
+para a própria linha-marcador, e um `DELETE ... WHERE id = ?` para cada
+recibo gravado nesta chamada. Como os statements de uma transação rodam em
+ORDEM, essas limpezas só são alcançadas se os dois triggers (0010 e 0011)
+já passaram sem abortar — se algum tivesse abortado, `db.batch()` já teria
+lançado antes de chegar a elas, e nada (nem a limpeza) seria commitado. Por
+isso a limpeza só roda no caminho de sucesso, e sempre afeta exatamente 1
+linha por `DELETE`. Depois de QUALQUER chamada (sucesso, retry idempotente,
+conflito de versão ou no-op), `editorial_mutation_checks` e
+`question_collection_mutation_receipts` mostram zero linhas relacionadas a
+ela.
+
+Provado diretamente contra SQL real (`worker/testing/migration0011.test.ts`)
+e por seis cenários end-to-end no serviço/repositório
+(`worker/testing/questions.test.ts`, describe "Sprint 7 v1.5"): limpeza
+válida de uma coleção não vazia para vazia; falha silenciosa forçada no
+`DELETE` de uma coleção (construída bypassando o serviço, igual ao teste
+adversarial v1.4) com as linhas antigas sobrevivendo intocadas depois do
+abort; recibo omitido do lote mesmo com núcleo e `DELETE` genuinamente bem
+sucedidos; retry idempotente; conflito de versão; e mutação normal com
+coleção terminando não vazia — todos com zero resíduo técnico em ambas as
+tabelas.
 
 ## Importação CSV
 
@@ -644,6 +724,13 @@ pela migration nem por qualquer GET.
   sim, ou vice-versa) agora também é imposta no banco, por um segundo trigger
   (`migrations/0010_editorial_bidirectional_invariants.sql`) — ver "Validação
   do lote (v1.3 → v1.4)" acima.
+- (Resolvida na v1.5) O caso de uma coleção ESVAZIADA (`tags: []` etc.) agora
+  também é imposto no banco, por um recibo de mutação por coleção e um
+  terceiro trigger (`migrations/0011_editorial_collection_mutation_receipts.sql`)
+  — ver "Validação do lote (v1.4 → v1.5)" acima. `editorial_mutation_checks`
+  e `question_collection_mutation_receipts` também deixaram de acumular
+  linhas indefinidamente: ambas são limpas no mesmo lote, sempre que a
+  mutação não aborta.
 - Cobertura de integração completa da UX de retry de `mutationId` (simular
   uma falha de rede real contra o formulário montado) fica para uma suíte
   E2E futura — hoje só a lógica pura de decisão é testada diretamente

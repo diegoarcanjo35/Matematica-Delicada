@@ -557,9 +557,20 @@ export function buildUpdateQuestionCoreStatement(
  *  poderia "passar" (versão bate) numa questão cujo status já não é mais
  *  editável enquanto o UPDATE central (que TAMBÉM checa o status) falharia
  *  — produzindo uma coleção substituída sem o núcleo/histórico
- *  correspondentes. Mantendo os guards IDÊNTICOS, eles só podem concordar. */
+ *  correspondentes. Mantendo os guards IDÊNTICOS, eles só podem concordar.
+ *
+ *  Sprint 7 v1.5 — o fragmento de condição vive em `collectionGuardCondition()`,
+ *  reaproveitado literalmente tanto pelo `DELETE` de cada coleção quanto pelo
+ *  "recibo" de mutação (`buildCollectionMutationReceiptStatement` abaixo) —
+ *  usar a MESMA função garante que os dois nunca podem divergir por um
+ *  descuido futuro (nunca dois textos de guard mantidos "iguais" só por
+ *  convenção manual). */
+function collectionGuardCondition(): string {
+  return `EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`;
+}
+
 function guardedDeleteSql(table: string): string {
-  return `DELETE FROM ${table} WHERE question_id = ? AND EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested'))`;
+  return `DELETE FROM ${table} WHERE question_id = ? AND ${collectionGuardCondition()}`;
 }
 
 export function buildDeleteAlternativesStatement(db: D1Database, questionId: string, versionAfter: number): D1PreparedStatement {
@@ -809,4 +820,49 @@ export function buildMutationCheckStatement(
       params.tagsExpectedCount,
       params.imagesExpectedCount
     );
+}
+
+/** Sprint 7 v1.5 — "recibo" de que o `DELETE` guardado de UMA coleção
+ *  específica rodou de verdade nesta transação, DESACOPLADO de quantas
+ *  linhas sobraram depois (0 ou N). Existia um buraco em 0010: quando a
+ *  coleção-alvo é vazia (`*_expected_count = 0`, ex. `tags: []`), uma
+ *  contagem carimbada por `version_stamp` é SEMPRE zero, tenha o guard
+ *  passado ou falhado — nada para contar não prova nada. Este recibo prova
+ *  a coisa certa: ele só é gravado se `collectionGuardCondition()` bateu,
+ *  usando o MESMO texto de guard do `DELETE` irmão (nunca um texto "igual
+ *  por convenção") — nenhuma linha, guard falhando, nenhum recibo.
+ *
+ *  `expected_version` aqui é a versão RESULTANTE da mutação (mesma que
+ *  `editorial_mutation_checks.expected_version`) — não a de guard — para
+ *  que o trigger de migrations/0011_editorial_collection_mutation_receipts.sql
+ *  consiga casar o recibo com o marcador da MESMA mutação por
+ *  `(question_id, collection, expected_version)`. */
+export function buildCollectionMutationReceiptStatement(
+  db: D1Database,
+  params: { id: string; questionId: string; collection: string; guardVersion: number; expectedVersion: number }
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO question_collection_mutation_receipts (id, question_id, collection, expected_version)
+       SELECT ?, ?, ?, ? WHERE ${collectionGuardCondition()}`
+    )
+    .bind(params.id, params.questionId, params.collection, params.expectedVersion, params.questionId, params.guardVersion);
+}
+
+/** Sprint 7 v1.5 — limpeza técnica, SEMPRE o(s) último(s) statement(s) do
+ *  lote, depois do marcador incondicional: por rodar em ORDEM dentro da
+ *  MESMA transação, só é alcançado se TODOS os triggers de 0010/0011 já
+ *  passaram sem abortar — se algum tivesse abortado, `db.batch()` já teria
+ *  lançado antes de chegar aqui, e nada (nem esta limpeza) seria commitado.
+ *  Por isso é seguro remover a própria linha-marcador/recibo aqui: ela já
+ *  cumpriu seu papel técnico (provar a invariante) no exato instante em que
+ *  foi inserida, e não deve virar um registro de negócio/auditoria que
+ *  cresce sem limite. Sempre afeta exatamente 1 linha (a que foi inserida
+ *  incondicionalmente momentos antes, nesta mesma transação). */
+export function buildDeleteMutationCheckStatement(db: D1Database, id: string): D1PreparedStatement {
+  return db.prepare(`DELETE FROM editorial_mutation_checks WHERE id = ?`).bind(id);
+}
+
+export function buildDeleteCollectionMutationReceiptStatement(db: D1Database, id: string): D1PreparedStatement {
+  return db.prepare(`DELETE FROM question_collection_mutation_receipts WHERE id = ?`).bind(id);
 }

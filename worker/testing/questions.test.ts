@@ -18,7 +18,9 @@ import {
   updateQuestion,
 } from "../src/services/questionService";
 import {
+  buildCollectionMutationReceiptStatement,
   buildConditionalHistoryStatement,
+  buildDeleteTagsStatement,
   buildMutationCheckStatement,
   buildUpdateQuestionCoreStatement,
 } from "../src/repositories/questionRepository";
@@ -1121,5 +1123,290 @@ describe("Sprint 7 v1.4 — invariante bidirecional núcleo<->histórico (trigge
     expect(historyCount(qId)).toBe(historyBefore);
     expect(auditLogCount(qId)).toBe(auditBefore);
     expect(mutationChecksCount()).toBe(markerBefore);
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* Sprint 7 v1.5 — recibo de mutação por coleção (migration 0011): fecha o  */
+/* buraco que 0010 sozinha deixava para coleções ESVAZIADAS. Cenários A-F,  */
+/* cada um consultando o banco DIRETAMENTE, nunca só o retorno da função.   */
+/* ---------------------------------------------------------------------- */
+describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", () => {
+  function coreSnapshot(id: string): { version: number; updated_at: string; editorial_status: string } {
+    return db.sqlite.prepare("SELECT version, updated_at, editorial_status FROM questions WHERE id = ?").get(id) as never;
+  }
+  function tagContents(id: string): string[] {
+    return (db.sqlite.prepare("SELECT content FROM question_tags WHERE question_id = ? ORDER BY content").all(id) as Array<{ content: string }>).map(
+      (r) => r.content
+    );
+  }
+  function auditLogCount(questionId: string): number {
+    return (
+      db.sqlite
+        .prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = 'editorial_question_updated' AND metadata LIKE ?")
+        .get(`%${questionId}%`) as { total: number }
+    ).total;
+  }
+  function mutationChecksCount(): number {
+    return (db.sqlite.prepare("SELECT COUNT(*) as total FROM editorial_mutation_checks").get() as { total: number }).total;
+  }
+  function receiptsCount(): number {
+    return (db.sqlite.prepare("SELECT COUNT(*) as total FROM question_collection_mutation_receipts").get() as { total: number }).total;
+  }
+  function seedTag(questionId: string, id: string, content: string, position: number): void {
+    db.sqlite
+      .prepare("INSERT INTO question_tags (id, question_id, content, position, version_stamp) VALUES (?, ?, ?, ?, ?)")
+      .run(id, questionId, content, position, 1);
+  }
+  function mid(): string {
+    return crypto.randomUUID();
+  }
+
+  // A — limpeza VÁLIDA de uma coleção não vazia para vazia, pelo caminho
+  // normal do serviço: coleção termina vazia, núcleo avança, exatamente 1
+  // histórico, exatamente 1 auditoria, zero resíduo técnico (marcador E
+  // recibo).
+  it("A. PATCH com tags:[] limpa uma coleção não vazia de verdade — núcleo avança, 1 histórico, 1 auditoria, zero resíduo técnico", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    seedTag(qId, "t1", "tag-antiga-1", 0);
+    seedTag(qId, "t2", "tag-antiga-2", 1);
+    const before = coreSnapshot(qId);
+
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { tags: [] } as never);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version + 1);
+    expect(tagContents(qId)).toEqual([]); // coleção genuinamente vazia
+    expect(historyCount(qId)).toBe(1);
+    expect(auditLogCount(qId)).toBe(1);
+    expect(mutationChecksCount()).toBe(0); // v1.5 — sem resíduo do marcador
+    expect(receiptsCount()).toBe(0); // v1.5 — sem resíduo do recibo
+  });
+
+  // B — falha silenciosa forçada no DELETE de uma coleção que deveria ficar
+  // vazia (construído diretamente pelo repositório, bypassando o serviço,
+  // igual ao teste adversarial v1.4): núcleo e histórico usam o guard
+  // CORRETO (sucesso genuíno), mas o DELETE de tags é construído com uma
+  // versão deliberadamente ERRADA — afeta 0 linhas, SEM lançar. O recibo,
+  // construído com a MESMA versão errada (replicando fielmente como o
+  // serviço sempre usa o mesmo guardVersion para DELETE e recibo), também
+  // não é gravado. O trigger de 0011 detecta a divergência (núcleo mudou,
+  // recibo ausente) e aborta TUDO — inclusive o núcleo e o histórico, que
+  // tinham "conseguido" no resto da transação.
+  it("B. DELETE guardado de uma coleção afeta 0 linhas silenciosamente (versão errada) enquanto núcleo e histórico usam o guard correto → trigger 0011 aborta a transação INTEIRA; as linhas antigas da coleção sobrevivem intocadas", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    seedTag(qId, "t1", "tag-antiga", 0);
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+    const auditBefore = auditLogCount(qId);
+
+    const historyStatement = buildConditionalHistoryStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      userId: "autor1",
+      action: "updated",
+      fromStatus: "draft",
+      toStatus: "draft",
+      guardVersion: 1,
+      versionAfter: 2,
+      guardStatuses: ["draft", "changes_requested"],
+      metadata: null,
+    });
+    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, {
+      enunciado: "Enunciado inalterado.",
+      resolucaoComentada: "",
+      conteudo: "",
+      subconteudo: "",
+      habilidade: "",
+      competencia: "",
+      dificuldade: "media",
+      origem: "autoral",
+      prova: null,
+      ano: null,
+      tempoEstimadoSegundos: null,
+      tipoCalculo: "misto",
+      necessitaCalculadora: 0,
+      titularDireitos: null,
+      baseLicenca: null,
+      textoAtribuicao: null,
+      fingerprint: "fp-b-nao-deveria-persistir",
+    });
+    // Versão deliberadamente ERRADA (999) — simula o guard do DELETE não
+    // avaliando como esperado; afeta 0 linhas, sem lançar.
+    const brokenDeleteTags = buildDeleteTagsStatement(db as never, qId, 999);
+    // Recibo construído com a MESMA versão errada — fiel ao fato de que, no
+    // serviço real, DELETE e recibo SEMPRE recebem o mesmo `guardVersion`.
+    const receipt = buildCollectionMutationReceiptStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      collection: "question_tags",
+      guardVersion: 999,
+      expectedVersion: 2,
+    });
+    const mutationCheck = buildMutationCheckStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      expectedVersion: 2,
+      alternativesExpectedCount: null,
+      dnaExpectedCount: null,
+      patternsExpectedCount: null,
+      tagsExpectedCount: 0,
+      imagesExpectedCount: null,
+    });
+
+    await expect(db.batch([historyStatement, coreUpdate, brokenDeleteTags, receipt, mutationCheck])).rejects.toThrow(/invariante violada/i);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version); // núcleo revertido
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(tagContents(qId)).toEqual(["tag-antiga"]); // linha antiga sobreviveu — prova que o abort preveniu mutação parcial
+    expect(historyCount(qId)).toBe(historyBefore); // histórico revertido, mesmo tendo "conseguido" inserir
+    expect(auditLogCount(qId)).toBe(auditBefore);
+    expect(mutationChecksCount()).toBe(0);
+    expect(receiptsCount()).toBe(0);
+  });
+
+  // C — núcleo E o DELETE da coleção têm sucesso genuíno (tags realmente
+  // ficam vazias), mas o statement de RECIBO é OMITIDO inteiramente do lote
+  // (simula uma regressão futura que esqueceu de gravá-lo para algum tipo
+  // de coleção) — o trigger de 0011 ainda assim aborta, porque a garantia
+  // não depende de "o resultado por acaso está certo", e sim da PROVA
+  // (recibo) de que o guard rodou. Rollback completo, inclusive do DELETE
+  // que genuinamente funcionou.
+  it("C. núcleo e DELETE da coleção têm sucesso genuíno, mas o recibo é OMITIDO do lote → trigger 0011 aborta mesmo assim, revertendo inclusive o DELETE que funcionou de verdade", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    seedTag(qId, "t1", "tag-antiga", 0);
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+    const auditBefore = auditLogCount(qId);
+
+    const historyStatement = buildConditionalHistoryStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      userId: "autor1",
+      action: "updated",
+      fromStatus: "draft",
+      toStatus: "draft",
+      guardVersion: 1,
+      versionAfter: 2,
+      guardStatuses: ["draft", "changes_requested"],
+      metadata: null,
+    });
+    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, {
+      enunciado: "Enunciado inalterado.",
+      resolucaoComentada: "",
+      conteudo: "",
+      subconteudo: "",
+      habilidade: "",
+      competencia: "",
+      dificuldade: "media",
+      origem: "autoral",
+      prova: null,
+      ano: null,
+      tempoEstimadoSegundos: null,
+      tipoCalculo: "misto",
+      necessitaCalculadora: 0,
+      titularDireitos: null,
+      baseLicenca: null,
+      textoAtribuicao: null,
+      fingerprint: "fp-c-nao-deveria-persistir",
+    });
+    // DELETE com o guard CORRETO — de fato limpa as tags.
+    const realDeleteTags = buildDeleteTagsStatement(db as never, qId, 1);
+    const mutationCheck = buildMutationCheckStatement(db as never, {
+      id: crypto.randomUUID(),
+      questionId: qId,
+      expectedVersion: 2,
+      alternativesExpectedCount: null,
+      dnaExpectedCount: null,
+      patternsExpectedCount: null,
+      tagsExpectedCount: 0,
+      imagesExpectedCount: null,
+    });
+
+    // SEM nenhum statement de recibo — omitido de propósito.
+    await expect(db.batch([historyStatement, coreUpdate, realDeleteTags, mutationCheck])).rejects.toThrow(/invariante violada/i);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version);
+    expect(tagContents(qId)).toEqual(["tag-antiga"]); // o DELETE que funcionou também foi revertido
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(auditLogCount(qId)).toBe(auditBefore);
+    expect(mutationChecksCount()).toBe(0);
+    expect(receiptsCount()).toBe(0);
+  });
+
+  // D — retry idempotente (mesma mutationId): zero escrita de negócio,
+  // zero resíduo técnico.
+  it("D. retry idempotente com a MESMA mutationId → zero escrita de negócio, zero resíduo técnico (marcador e recibo)", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    seedTag(qId, "t1", "tag-1", 0);
+    const mutationId = mid();
+
+    const first = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { tags: [] } as never);
+    expect(first.ok).toBe(true);
+    expect(first.changed).toBe(true);
+    expect(mutationChecksCount()).toBe(0);
+    expect(receiptsCount()).toBe(0);
+
+    const afterFirst = coreSnapshot(qId);
+    const historyAfterFirst = historyCount(qId);
+    const auditAfterFirst = auditLogCount(qId);
+
+    const retry = await updateQuestion(db as never, "autor1", qId, 1, mutationId, { tags: [] } as never);
+    expect(retry.ok).toBe(true);
+    expect(retry.changed).toBe(false);
+
+    const afterRetry = coreSnapshot(qId);
+    expect(afterRetry.version).toBe(afterFirst.version);
+    expect(historyCount(qId)).toBe(historyAfterFirst);
+    expect(auditLogCount(qId)).toBe(auditAfterFirst);
+    expect(mutationChecksCount()).toBe(0);
+    expect(receiptsCount()).toBe(0);
+  });
+
+  // E — conflito de versão (expectedVersion desatualizada) tocando uma
+  // coleção: zero escrita de negócio, zero resíduo técnico — a mesma classe
+  // de correção que 0010 já precisou para a contagem também se aplica aqui,
+  // para o recibo.
+  it("E. conflito de versão tocando uma coleção → 409, zero escrita de negócio, zero resíduo técnico (marcador e recibo)", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    seedTag(qId, "t1", "tag-1", 0);
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    const result = await updateQuestion(db as never, "autor1", qId, 999, mid(), { tags: [] } as never);
+    expect(result.ok).toBe(false);
+    expect(result.conflict).toBe(true);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version);
+    expect(tagContents(qId)).toEqual(["tag-1"]); // intocada
+    expect(historyCount(qId)).toBe(historyBefore);
+    expect(mutationChecksCount()).toBe(0);
+    expect(receiptsCount()).toBe(0);
+  });
+
+  // F — mutação normal com uma coleção terminando NÃO vazia (comportamento
+  // v1.3/v1.4 já coberto alhures): a NOVA asserção aqui é que a limpeza
+  // técnica também se aplica ao caso N>0, não só ao caso recém-corrigido
+  // (vazio).
+  it("F. mutação normal com coleção terminando NÃO vazia → comportamento v1.3/v1.4 preservado, e zero resíduo técnico também neste caso", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+
+    const result = await updateQuestion(db as never, "autor1", qId, 1, mid(), { tags: ["tag-nova-1", "tag-nova-2"] } as never);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version + 1);
+    expect(tagContents(qId)).toEqual(["tag-nova-1", "tag-nova-2"]);
+    expect(historyCount(qId)).toBe(1);
+    expect(auditLogCount(qId)).toBe(1);
+    expect(mutationChecksCount()).toBe(0); // v1.5 — sem resíduo, também no caso N>0
+    expect(receiptsCount()).toBe(0);
   });
 });

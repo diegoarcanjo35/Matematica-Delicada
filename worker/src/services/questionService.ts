@@ -35,9 +35,12 @@ import {
 import type { EditorialRole } from "../lib/rbac";
 import { roleSatisfies } from "../lib/rbac";
 import {
+  buildCollectionMutationReceiptStatement,
   buildConditionalHistoryStatement,
   buildDeleteAlternativesStatement,
+  buildDeleteCollectionMutationReceiptStatement,
   buildDeleteImagesStatement,
+  buildDeleteMutationCheckStatement,
   buildDeletePatternLinksStatement,
   buildDeleteTagsStatement,
   buildGuardedInsertAlternativeStatement,
@@ -616,9 +619,31 @@ export async function updateQuestion(
   // nunca conteúdo).
   const childStatements: Array<{ statement: D1PreparedStatement; expectation: ExpectedBatchStatement }> = [];
   const changedFields: string[] = [];
+  // v1.5 — um id de recibo por coleção REALMENTE tocada nesta chamada,
+  // gerado aqui para poder: (a) construir o INSERT do recibo (guardado) e
+  // (b) construir o DELETE de limpeza correspondente (incondicional, roda
+  // só depois do marcador — ver mais abaixo) usando o MESMO id.
+  const receiptIds: string[] = [];
 
   for (const field of ALL_SCALAR_FIELDS) {
     if (isProvided(input, field)) changedFields.push(field);
+  }
+
+  // v1.5 — "recibo" de mutação por coleção: prova que o DELETE guardado
+  // daquela coleção especificamente rodou de verdade nesta transação,
+  // desacoplado de quantas linhas sobraram depois (0 ou N) — fecha o
+  // buraco que 0010 sozinha deixava para coleções esvaziadas (ver nota
+  // extensa em migrations/0011_editorial_collection_mutation_receipts.sql).
+  // Guardado pela EXATA MESMA condição do DELETE irmão (reaproveitando
+  // `collectionGuardCondition()` dentro do repositório) — nunca um texto
+  // "igual por convenção".
+  function pushCollectionReceipt(collection: string): void {
+    const receiptId = newId();
+    receiptIds.push(receiptId);
+    childStatements.push({
+      statement: buildCollectionMutationReceiptStatement(db, { id: receiptId, questionId, collection, guardVersion: expectedVersion, expectedVersion: versionAfter }),
+      expectation: { label: `INSERT question_collection_mutation_receipts[${collection}]`, expected: "exactlyOne" },
+    });
   }
 
   if (alternativesProvided) {
@@ -633,6 +658,7 @@ export async function updateQuestion(
         expectation: { label: `INSERT question_alternatives[${alt.letter}]`, expected: "exactlyOne" },
       });
     });
+    pushCollectionReceipt("question_alternatives");
   }
   if (dnaProvided) {
     changedFields.push("dna");
@@ -640,6 +666,7 @@ export async function updateQuestion(
       statement: buildGuardedUpsertDnaStatement(db, questionId, dnaResult!.value!, expectedVersion, versionAfter),
       expectation: { label: "UPSERT question_dna", expected: "exactlyOne" },
     });
+    pushCollectionReceipt("question_dna");
   }
   if (patternsProvided) {
     changedFields.push("padroes");
@@ -650,6 +677,7 @@ export async function updateQuestion(
         expectation: { label: `INSERT question_patterns[${link.patternId}]`, expected: "exactlyOne" },
       });
     });
+    pushCollectionReceipt("question_patterns");
   }
   if (tagsProvided) {
     changedFields.push("tags");
@@ -660,6 +688,7 @@ export async function updateQuestion(
         expectation: { label: `INSERT question_tags[${index}]`, expected: "exactlyOne" },
       });
     });
+    pushCollectionReceipt("question_tags");
   }
   if (imagesProvided) {
     changedFields.push("imagens");
@@ -670,6 +699,7 @@ export async function updateQuestion(
         expectation: { label: `INSERT question_images[${index}]`, expected: "exactlyOne" },
       });
     });
+    pushCollectionReceipt("question_images");
   }
 
   // mutationId reaproveitado como question_history.id — a chave de
@@ -708,8 +738,9 @@ export async function updateQuestion(
   // logo antes dele, tiver silenciosamente afetado 0 linhas sem lançar
   // exceção. Isso fecha a direção que o trigger de 0009 (reage só a um
   // UPDATE que de fato mudou uma linha) não cobre.
+  const mutationCheckId = newId();
   const mutationCheck = buildMutationCheckStatement(db, {
-    id: newId(),
+    id: mutationCheckId,
     questionId,
     expectedVersion: versionAfter,
     alternativesExpectedCount: alternativesProvided ? effectiveAlternatives.length : null,
@@ -719,23 +750,41 @@ export async function updateQuestion(
     imagesExpectedCount: imagesProvided ? imagesResult!.value!.length : null,
   });
 
-  // v1.3 — ORDEM: filhos (coleções + histórico) PRIMEIRO, UPDATE central
-  // POR ÚLTIMO. Se `expectedVersion` não bater com a versão atual real, TODOS
-  // os guards (filhos e central) falham consistentemente (mesma condição,
-  // mesmo estado imutável durante a transação) — nenhuma escrita parcial.
-  // Se bater, os filhos inserem primeiro e o UPDATE central, ao rodar por
-  // último, dispara o trigger de 0009, que exige que o histórico já exista.
-  // v1.4 — a checagem-marcador (`mutationCheck`) roda por ÚLTIMO de todos,
-  // depois do UPDATE central, para poder enxergar o resultado real dele.
-  const allStatements = [...childStatements.map((c) => c.statement), coreUpdate, mutationCheck];
+  // v1.5 — limpeza técnica: DELETE da própria linha-marcador e de cada
+  // recibo de coleção gravado nesta chamada, IMEDIATAMENTE APÓS o marcador
+  // no MESMO lote. Como os statements de uma transação rodam em ORDEM, só
+  // são alcançados se os triggers de 0010/0011 (disparados pelo INSERT do
+  // marcador, statement anterior) já passaram sem abortar — se algum
+  // tivesse abortado, `db.batch()` já teria lançado, e esta limpeza nunca
+  // rodaria (nem ela seria commitada). Por isso é seguro remover aqui:
+  // nenhuma das duas tabelas é um registro de auditoria/negócio, só uma
+  // prova técnica instantânea — sem esta limpeza, cresceriam sem limite a
+  // cada chamada (sucesso, retry, conflito, no-op).
+  const cleanupStatements = [buildDeleteMutationCheckStatement(db, mutationCheckId), ...receiptIds.map((id) => buildDeleteCollectionMutationReceiptStatement(db, id))];
+
+  // v1.3 — ORDEM: filhos (coleções + recibos + histórico) PRIMEIRO, UPDATE
+  // central POR ÚLTIMO. Se `expectedVersion` não bater com a versão atual
+  // real, TODOS os guards (filhos e central) falham consistentemente (mesma
+  // condição, mesmo estado imutável durante a transação) — nenhuma escrita
+  // parcial. Se bater, os filhos inserem primeiro e o UPDATE central, ao
+  // rodar por último, dispara o trigger de 0009, que exige que o histórico
+  // já exista. v1.4/v1.5 — a checagem-marcador (`mutationCheck`) roda logo
+  // depois do UPDATE central, para poder enxergar o resultado real dele, e
+  // dispara os triggers de 0010 E 0011 (dois triggers independentes no
+  // mesmo evento); a limpeza roda por ÚLTIMO de todos, só alcançada em caso
+  // de sucesso completo.
+  const coreIndex = childStatements.length;
+  const markerIndex = coreIndex + 1;
+  const allStatements = [...childStatements.map((c) => c.statement), coreUpdate, mutationCheck, ...cleanupStatements];
   // Uma falha lançada por QUALQUER statement do lote (ex.: erro forçado, OU
-  // o RAISE(ABORT) de qualquer um dos triggers de 0009/0010) propaga a
+  // o RAISE(ABORT) de qualquer um dos triggers de 0009/0010/0011) propaga a
   // exceção do `db.batch()` inteiro, revertendo TUDO (nenhuma escrita
-  // parcial) — garantia nativa do FakeD1Database (node:sqlite real)/D1 real,
-  // provada por teste consultando o banco diretamente depois da falha,
-  // nunca só a resposta HTTP.
+  // parcial, nem a limpeza) — garantia nativa do FakeD1Database (node:sqlite
+  // real)/D1 real, provada por teste consultando o banco diretamente depois
+  // da falha, nunca só a resposta HTTP.
   const results = await db.batch(allStatements);
-  const coreResult = results[results.length - 2];
+  const coreResult = results[coreIndex];
+  void markerIndex; // só documentado — o resultado do marcador em si nunca precisa ser inspecionado.
 
   if (coreResult.meta.changes !== 1) {
     const after = await findQuestionById(db, questionId);
@@ -744,18 +793,14 @@ export async function updateQuestion(
     return { ok: false, fieldErrors: { editorial_status: "Questão não está num status editável." } };
   }
 
-  // v1.2, Correção B — valida TODOS os demais resultados do lote contra a
-  // expectativa declarada de cada statement (defesa em profundidade — os
-  // triggers de 0009/0010 já teriam abortado a transação inteira antes
-  // deste ponto se núcleo/histórico/coleções divergissem; esta checagem
-  // cobre outras inconsistências e nunca deveria disparar em operação
-  // normal). Exclui tanto o UPDATE central quanto a checagem-marcador
-  // (últimos dois statements) — só os filhos (coleções + histórico) têm
-  // expectativa declarada aqui.
-  validateBatchResults(
-    results.slice(0, -2),
-    childStatements.map((c) => c.expectation)
-  );
+  // v1.2, Correção B — valida TODOS os resultados dos FILHOS do lote contra
+  // a expectativa declarada de cada statement (defesa em profundidade — os
+  // triggers de 0009/0010/0011 já teriam abortado a transação inteira antes
+  // deste ponto se núcleo/histórico/coleções/recibos divergissem; esta
+  // checagem cobre outras inconsistências e nunca deveria disparar em
+  // operação normal). Só os filhos (índices 0..coreIndex-1) têm expectativa
+  // declarada aqui — núcleo, marcador e limpeza ficam de fora.
+  validateBatchResults(results.slice(0, coreIndex), childStatements.map((c) => c.expectation));
 
   // audit_log só quando a mutação REALMENTE aconteceu (changed:true) —
   // nunca em no-op nem em retry idempotente (ambos retornam antes de chegar
@@ -1033,9 +1078,12 @@ async function applyTransition(
 
   // v1.4 — mesmo mecanismo de marker-row de updateQuestion: transição nunca
   // toca coleções, então todas as contagens ficam `null` (nada a conferir
-  // além de núcleo<->histórico).
+  // além de núcleo<->histórico, e nenhum recibo de coleção é necessário
+  // aqui — 0011 só entra em jogo quando algum `*_expected_count` não é
+  // NULL).
+  const mutationCheckId = newId();
   const mutationCheck = buildMutationCheckStatement(db, {
-    id: newId(),
+    id: mutationCheckId,
     questionId: params.questionId,
     expectedVersion: versionAfter,
     alternativesExpectedCount: null,
@@ -1044,18 +1092,22 @@ async function applyTransition(
     tagsExpectedCount: null,
     imagesExpectedCount: null,
   });
+  // v1.5 — limpeza técnica da própria linha-marcador, mesmo raciocínio de
+  // updateQuestion: só alcançada se os triggers de 0010/0011 já passaram
+  // sem abortar (senão `db.batch()` já teria lançado antes de chegar aqui).
+  const mutationCheckCleanup = buildDeleteMutationCheckStatement(db, mutationCheckId);
 
   // v1.3 — histórico PRIMEIRO, UPDATE da transição POR ÚLTIMO (dispara o
   // trigger de 0009 quando `version` realmente muda). v1.4 — a
-  // checagem-marcador roda por ÚLTIMA de todas, depois do UPDATE da
-  // transição, para poder enxergar o resultado real dele mesmo quando ele
-  // afeta 0 linhas silenciosamente.
-  const [historyResult, updateResult] = await db.batch([historyStatement, transitionStatement, mutationCheck]);
+  // checagem-marcador roda logo depois do UPDATE da transição, para poder
+  // enxergar o resultado real dele mesmo quando ele afeta 0 linhas
+  // silenciosamente. v1.5 — a limpeza roda por ÚLTIMA de todas.
+  const [historyResult, updateResult] = await db.batch([historyStatement, transitionStatement, mutationCheck, mutationCheckCleanup]);
   if (updateResult.meta.changes === 1) {
     // v1.2, Correção B — mantida como defesa em profundidade: os triggers de
-    // 0009/0010 já teriam abortado a transação inteira (RAISE(ABORT)) antes
-    // deste ponto se núcleo/histórico divergissem — esta checagem nunca
-    // deveria disparar em operação normal.
+    // 0009/0010/0011 já teriam abortado a transação inteira (RAISE(ABORT))
+    // antes deste ponto se núcleo/histórico divergissem — esta checagem
+    // nunca deveria disparar em operação normal.
     validateBatchResults([historyResult], [{ label: "INSERT question_history (transição)", expected: "exactlyOne" }]);
     return { ok: true, changed: true };
   }
