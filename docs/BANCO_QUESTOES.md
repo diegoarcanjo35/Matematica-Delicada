@@ -1,4 +1,4 @@
-# Banco de Questões e Importação Editorial — Sprint 7 v1.5
+# Banco de Questões e Importação Editorial — Sprint 7 v1.6
 
 > v1.1 corrige três pontos apontados na auditoria da v1.0: semântica PATCH
 > parcial de verdade (Correção A), política CSV que não bloqueia matemática
@@ -26,6 +26,19 @@
 > lote (v1.4 → v1.5)" abaixo. Também remove a própria linha-marcador/recibo
 > ao fim de cada chamada bem-sucedida, para nenhuma das duas tabelas técnicas
 > crescer sem limite.
+>
+> v1.6 corrige um colapso real de identidade: os triggers de 0010/0011
+> verificavam "o núcleo está NUMA versão X?", que confunde QUALQUER mutação
+> mirando o mesmo número de versão resultante — sob concorrência otimista
+> real, uma segunda mutação com `expectedVersion` já obsoleta podia lançar
+> uma exceção de banco em vez de um 409, porque seu marcador via "núcleo em
+> vX" (verdadeiro, graças à mutação vencedora) contra "existe recibo/
+> histórico para X" (falso, ou pior — no caso do recibo — sistematicamente
+> falso, já que a própria limpeza da v1.5 já o apagou). Uma nova coluna
+> (`questions.last_mutation_id`) e uma identidade explícita por mutação
+> (reaproveitada como `id` do marcador/recibo) substituem "existe ALGO para
+> esta versão?" por "existe o QUE EU MESMO deveria ter inserido?" — ver
+> "Validação do lote (v1.5 → v1.6)" abaixo.
 
 ## Escopo e não escopo
 
@@ -40,7 +53,7 @@ treino diário, Caderno de Erros, cálculo dos três índices (Reconhecimento,
 Resolução, Domínio), upload remoto de mídia/R2, questões oficiais reais, conteúdo
 pedagógico definitivo, publicação em produção, D1 remoto ou deploy.
 
-## Schema — migrations 0008, 0009, 0010 e 0011
+## Schema — migrations 0008, 0009, 0010, 0011 e 0012
 
 `migrations/0008_question_bank_editorial.sql` é puramente aditiva (só
 `CREATE TABLE/INDEX IF NOT EXISTS`) sobre o schema das Sprints 1-6. Nenhum
@@ -72,8 +85,23 @@ fecha o buraco que 0010 sozinha deixava para coleções ESVAZIADAS — ver
 "Validação do lote (v1.4 → v1.5)" abaixo. Aditiva e não destrutiva (só
 `CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS`, nenhum `ALTER TABLE` desta vez —
 totalmente idempotente por reaplicação, ao contrário de 0010); não toca
-0009 nem 0010. **Sprint 8 deve começar sua própria migration em `0012`** —
-nunca reaproveitar ou renumerar 0009/0010/0011.
+0009 nem 0010.
+
+`migrations/0012_editorial_mutation_identity.sql` (Sprint 7 v1.6) corrige o
+colapso de identidade descrito acima — ver "Validação do lote (v1.5 →
+v1.6)" abaixo. Acrescenta `questions.last_mutation_id` (nullable, via
+`ALTER TABLE` — mesma ressalva de não-idempotência por reaplicação manual
+de 0010) e SUBSTITUI (via `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER`,
+nesta migration nova — os ARQUIVOS de 0010/0011 em si nunca são editados)
+os DOIS triggers cuja checagem por VERSÃO (não por identidade) se mostrou
+insegura sob concorrência real: o núcleo↔histórico/coleção de 0010
+(`trg_editorial_mutation_checks_bidirectional`) e o de recibos de 0011
+(`trg_editorial_mutation_checks_collection_receipts`) — ambos substituídos
+por um único trigger consolidado por identidade. Não toca 0009 — seu
+trigger permanece original e intocado, comprovadamente seguro mesmo sob
+concorrência (ver nota extensa abaixo). **Sprint 8 deve começar sua própria
+migration em `0013`** — nunca reaproveitar ou renumerar
+0009/0010/0011/0012.
 
 Tabelas criadas:
 
@@ -598,6 +626,117 @@ sucedidos; retry idempotente; conflito de versão; e mutação normal com
 coleção terminando não vazia — todos com zero resíduo técnico em ambas as
 tabelas.
 
+### Validação do lote (v1.5 → v1.6) — identidade da mutação, não versão
+
+> A auditoria v1.6 apontou um colapso real sob concorrência otimista: os
+> triggers de 0010 e 0011 verificam coisas como `EXISTS(questions WHERE
+> version = NEW.expected_version)` — "o núcleo está NUMA versão X?" — sem
+> perguntar QUEM colocou o núcleo ali. Isso funciona com uma única mutação
+> em voo, mas quebra com duas: se a mutação A avança legitimamente
+> version 1→2, e uma mutação B DIFERENTE (outro `mutationId`, outro
+> ator/requisição), construída contra `expectedVersion=1` (já obsoleta
+> porque começou antes de A terminar), ainda assim insere seu PRÓPRIO
+> marcador com `expected_version=2` (o alvo que B CALCULOU) — mesmo com
+> TODOS os guards de B (UPDATE/histórico/recibo) corretamente falhos. O
+> marcador de B, ao disparar os triggers de 0010/0011, pergunta "núcleo em
+> v2?" (SIM, graças a A) contra "existe recibo para v2?" — que a própria
+> limpeza técnica da v1.5 já apagou (o recibo de A foi removido segundos
+> depois de A commitar) — sistematicamente FALSO para qualquer chamada
+> posterior. `SIM != FALSO` → `RAISE(ABORT)` num conflito de versão
+> perfeitamente comum, transformando um 409 esperado numa exceção de banco
+> não tratada / 500.
+>
+> Reproduzido e confirmado ANTES da correção (commit `820196e`) em
+> `worker/testing/questions.test.ts`, describe "Sprint 7 v1.6": tanto a
+> chamada de serviço quanto a rota HTTP lançavam
+> `invariante violada: núcleo e recibo de question_tags divergem para esta
+> mutação` em vez de devolver 409.
+
+**Mecanismo** (`migrations/0012_editorial_mutation_identity.sql`): uma
+identidade explícita por mutação substitui o número de versão como chave de
+verificação.
+1. `questions.last_mutation_id` (nova coluna) registra QUAL mutação
+   especificamente fez `version` avançar da última vez — setada pelo MESMO
+   `UPDATE` guardado que já muda `version` (`buildUpdateQuestionCoreStatement`/
+   `buildTransitionStatement`, `worker/src/repositories/questionRepository.ts`),
+   nunca um statement à parte.
+2. `editorial_mutation_checks.id` e `question_collection_mutation_receipts.id`
+   passam a SER a identidade real da mutação (`mutationId`, ou o id de
+   histórico gerado internamente para uma transição) — e
+   `'<identidade>:<colecao>'` para um recibo específico — em vez de um UUID
+   aleatório desconectado da operação.
+3. Um novo trigger (`trg_editorial_mutation_checks_by_identity`) pergunta
+   "o histórico/recibo QUE ESTA MUTAÇÃO deveria ter inserido existe?"
+   contra "o núcleo avançou POR CAUSA DESTA MUTAÇÃO especificamente
+   (`last_mutation_id = <esta identidade>`)?" — nunca "existe ALGO para
+   esta versão, seja de quem for?". No cenário B: histórico de B nunca
+   existe (guard falhou) → esquerda falsa; `last_mutation_id` continua
+   sendo o de A, nunca o de B → direita falsa; falso == falso →
+   CONSISTENTE, sem aborto. No cenário adversarial original da v1.4 (core
+   construído com versão errada enquanto o histórico usa a correta, DENTRO
+   da MESMA mutação): histórico existe (guard certo) → esquerda verdadeira;
+   `last_mutation_id` nunca é setado para esta mutação (guard do `UPDATE`
+   falhou) → direita falsa; divergência real → aborta corretamente, como
+   sempre.
+
+**Por que os DOIS triggers de 0010 E 0011 precisaram ser substituídos** (via
+`DROP TRIGGER IF EXISTS` + `CREATE TRIGGER` NESTA migration nova — os
+ARQUIVOS de 0010/0011 nunca são editados, seu conteúdo histórico permanece
+exatamente como commitado, descrevendo fielmente o que cada um adicionou
+naquele momento) **e por que 0009 pode continuar ativo com segurança**:
+* `trg_questions_require_history_after_update` (0009) só dispara quando
+  uma linha de `questions` MUDA de `version` de fato
+  (`WHEN NEW.version != OLD.version`), e audita o PRÓPRIO `UPDATE` que
+  acabou de rodar contra `question_history` (permanente, nunca apagada) —
+  nunca compara com uma expectativa vinda de outro lugar (como o marcador
+  faz). Não sofre do bug de identidade porque a pergunta já é a certa
+  ("este UPDATE tem histórico?"), nunca "existe histórico para esta
+  versão, seja de quem for?". Continua ativo sem risco, verificado por
+  teste direto (`worker/testing/migration0012.test.ts`).
+* `trg_editorial_mutation_checks_bidirectional` (0010, núcleo↔histórico por
+  versão E núcleo↔coleção por `COUNT(version_stamp=X)`) e
+  `trg_editorial_mutation_checks_collection_receipts` (0011, núcleo↔recibo
+  por versão) disparam a partir do INSERT incondicional do MARCADOR — uma
+  linha SEPARADA, escrita por uma mutação que pode ou não ser a mesma que
+  produziu o estado atual do núcleo. Comparar "o marcador espera a versão
+  X" com "o núcleo está em X" ou "existe histórico/recibo/coleção
+  carimbada para X" SEMPRE corre o risco de confundir duas mutações que,
+  por coincidência aritmética (`expectedVersion + 1`), miram o MESMO
+  número — não importa se a evidência subjacente é permanente
+  (`version_stamp`, o caso de 0010) ou ativamente apagada pela limpeza da
+  v1.5 (o caso do recibo de 0011, onde o furo é sistemático) ou apenas
+  ausente por A nunca ter tocado aquela coleção (o caso da contagem de
+  0010, onde o furo é mais estreito, mas real): o problema não é a
+  evidência em si, é a PERGUNTA errada.
+
+**Mecanismo final — trigger único consolidado**: `trg_editorial_mutation_checks_by_identity`
+substitui os DOIS (0010 e 0011) e cobre tudo que eles cobriam —
+núcleo↔histórico, núcleo↔recibo (existência do guard, qualquer contagem
+resultante) e núcleo↔coleção (contagem exata via `version_stamp`, quando
+N>0) — mas cada verificação agora exige, do lado direito de toda
+comparação, `EXISTS(questions WHERE ... AND last_mutation_id = NEW.id AND
+version = NEW.expected_version)`: "o núcleo avançou PARA a versão esperada
+POR CAUSA DESTA IDENTIDADE especificamente", nunca "o núcleo está NUMA
+versão X, seja de quem for". Uma coleção só é "confirmada" quando o recibo
+desta identidade existe E (a contagem esperada é 0 OU a contagem carimbada
+bate) — as mesmas duas garantias que 0010/0011 já davam, agora atreladas à
+identidade em vez de à versão.
+
+Provado diretamente contra SQL real (`worker/testing/migration0012.test.ts`,
+16 cenários incluindo a reprodução exata do bug por identidade cruzada E o
+fechamento do risco residual da contagem por coleção nunca tocada) e
+end-to-end (`worker/testing/questions.test.ts`, describe "Sprint 7 v1.6",
+cenários A-F): mutação A com sucesso genuíno seguida de mutação B com
+`mutationId` diferente e `expectedVersion` obsoleta tocando a MESMA coleção
+que A tocou (A) OU uma coleção DIFERENTE que A nunca tocou, terminando não
+vazia (B) ou vazia (C) → B sempre devolve 409 limpo tanto no serviço quanto
+na rota HTTP (nunca uma exceção); anomalias reais (INSERT de coleção
+incompleto — D; histórico e núcleo carimbados com identidades diferentes —
+E) continuam corretamente abortando com rollback completo; uma transição
+normal via `applyTransition` (F) funciona e termina com zero resíduo
+técnico. Núcleo e conteúdo de A, em todos os cenários de conflito,
+permanecem intocados.
+
 ## Importação CSV
 
 `docs/templates/questoes-importacao-v1.csv` (ver `docs/templates/README.md`
@@ -731,6 +870,21 @@ pela migration nem por qualquer GET.
   e `question_collection_mutation_receipts` também deixaram de acumular
   linhas indefinidamente: ambas são limpas no mesmo lote, sempre que a
   mutação não aborta.
+- (Resolvida na v1.6, incluindo a variante que ficou pendente numa primeira
+  correção) Um conflito de versão real sob concorrência otimista (duas
+  mutações distintas mirando o mesmo número de versão resultante) podia
+  lançar uma exceção de banco não tratada em vez de um 409 — corrigido por
+  uma identidade explícita por mutação (`questions.last_mutation_id` + um
+  trigger consolidado por identidade) em
+  `migrations/0012_editorial_mutation_identity.sql` — ver "Validação do
+  lote (v1.5 → v1.6)" acima. A auditoria não aceitou a variante mais
+  estreita (mutação B declarando uma coleção que A nunca tocou) como risco
+  residual: o mesmo `migrations/0012` também retira o trigger de CONTAGEM
+  por coleção de 0010 (`trg_editorial_mutation_checks_bidirectional`) e
+  incorpora sua lógica ao trigger consolidado, agora também atrelada a
+  `last_mutation_id` — fechando as duas variantes por igual. Prova direta:
+  `worker/testing/migration0012.test.ts` ("RISCO RESIDUAL FECHADO") e
+  `worker/testing/questions.test.ts`, describe "Sprint 7 v1.6", cenário B/C.
 - Cobertura de integração completa da UX de retry de `mutationId` (simular
   uma falha de rede real contra o formulário montado) fica para uma suíte
   E2E futura — hoje só a lógica pura de decisão é testada diretamente

@@ -641,17 +641,35 @@ describe("Correção A — semântica parcial do PATCH (v1.1) + idempotência po
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
     // Insere manualmente uma linha de histórico JÁ ocupando (question_id, version=2)
     // com um ID diferente do mutationId desta chamada — simula a anomalia:
-    // o UPDATE escalar vai suceder e levar a questão à version=2, mas o
+    // o UPDATE escalar iria suceder e levar a questão à version=2, mas o
     // guard `NOT EXISTS(question_id, version)` do INSERT condicionado da
-    // Correção A falha porque ETA versão já tem um histórico (de outra
-    // origem), então o INSERT do mutationId desta chamada afeta 0 linhas
-    // SILENCIOSAMENTE — exatamente o que a Correção B precisa capturar.
+    // Correção A falha porque ESSA versão já tem um histórico (de outra
+    // origem), então o INSERT do mutationId desta chamada afetaria 0 linhas
+    // SILENCIOSAMENTE.
+    //
+    // v1.6 — desde a introdução do trigger de IDENTIDADE
+    // (migrations/0012_editorial_mutation_identity.sql), este cenário
+    // específico passou a ser capturado ANTES do commit pelo próprio banco
+    // (o histórico QUE ESTA mutationId deveria ter inserido nunca existe,
+    // mas `last_mutation_id` seria setado para ela pelo UPDATE central) —
+    // uma proteção estritamente mais forte que a checagem em JS pós-commit
+    // da Correção B (`validateBatchResults`), que ainda existe como defesa
+    // em profundidade mas nunca mais precisa disparar para ESTE cenário.
+    // A prova agora é por ESTADO DO BANCO (nada foi commitado), não mais só
+    // pela mensagem de erro.
+    const before = questionRow(qId);
     db.sqlite.exec(
       `INSERT INTO question_history (id, question_id, user_id, action, from_status, to_status, version) VALUES ('${mid()}','${qId}','autor1','updated','draft','draft',2)`
     );
+    const historyBefore = historyCount(qId);
     await expect(updateQuestion(db as never, "autor1", qId, 1, mid(), { conteudo: "Nova tentativa de conteúdo." } as never)).rejects.toThrow(
-      /exatamente 1 linha/i
+      /invariante violada/i
     );
+    const after = questionRow(qId);
+    expect(after.version).toBe(before.version); // nunca chegou a version=2
+    const row = db.sqlite.prepare("SELECT conteudo FROM questions WHERE id = ?").get(qId) as { conteudo: string };
+    expect(row.conteudo).not.toBe("Nova tentativa de conteúdo.");
+    expect(historyCount(qId)).toBe(historyBefore); // nenhum histórico A MAIS desta tentativa
   });
 
   // 11. falha forçada no histórico → rollback.
@@ -1059,9 +1077,14 @@ describe("Sprint 7 v1.4 — invariante bidirecional núcleo<->histórico (trigge
     const markerBefore = mutationChecksCount();
 
     // Histórico: guard usa a versão REAL/atual (1) — bate de verdade,
-    // insere 1 linha para (question_id=qId, version=2).
+    // insere 1 linha para (question_id=qId, version=2). v1.6 — MESMA
+    // identidade (`thisMutationId`) do UPDATE central abaixo: simula um bug
+    // interno que desalinha o guard de VERSÃO do core do guard do
+    // histórico, DENTRO da mesma mutação — nunca uma mutação diferente
+    // (esse é o cenário do teste de conflito B, describe "Sprint 7 v1.6").
+    const thisMutationId = crypto.randomUUID();
     const historyStatement = buildConditionalHistoryStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: thisMutationId,
       questionId: qId,
       userId: "autor1",
       action: "updated",
@@ -1076,8 +1099,9 @@ describe("Sprint 7 v1.4 — invariante bidirecional núcleo<->histórico (trigge
     // UPDATE central: construído com expectedVersion = 999 (DELIBERADAMENTE
     // errado, simulando um bug num código futuro que desalinhe o guard do
     // core do guard do histórico) — o guard não bate, afeta 0 linhas, SEM
-    // lançar exceção alguma.
-    const coreUpdateWithWrongVersion = buildUpdateQuestionCoreStatement(db as never, qId, 999, {
+    // lançar exceção alguma. `last_mutation_id` nunca chega a ser setado
+    // para `thisMutationId` porque este UPDATE nunca afeta nenhuma linha.
+    const coreUpdateWithWrongVersion = buildUpdateQuestionCoreStatement(db as never, qId, 999, thisMutationId, {
       enunciado: before.enunciado,
       resolucaoComentada: "",
       conteudo: "",
@@ -1097,11 +1121,13 @@ describe("Sprint 7 v1.4 — invariante bidirecional núcleo<->histórico (trigge
       fingerprint: "fp-nao-deveria-persistir",
     });
 
-    // Marcador final e incondicional: declara a expectativa real da
-    // mutação (versão resultante 2) — sempre insere exatamente 1 linha,
-    // sempre dispara seu próprio trigger.
+    // Marcador final e incondicional: MESMA identidade (`thisMutationId`) —
+    // é isso que permite ao trigger de 0012 perguntar "o histórico QUE ESTA
+    // MUTAÇÃO deveria ter inserido existe?" (sim) contra "o núcleo avançou
+    // POR CAUSA DESTA MUTAÇÃO?" (não, seu UPDATE nunca afetou nenhuma
+    // linha) — divergência real, aborta corretamente.
     const mutationCheck = buildMutationCheckStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: thisMutationId,
       questionId: qId,
       expectedVersion: 2,
       alternativesExpectedCount: null,
@@ -1202,8 +1228,17 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
     const historyBefore = historyCount(qId);
     const auditBefore = auditLogCount(qId);
 
+    // v1.6 — MESMA identidade (`thisMutationId`) em histórico/núcleo/
+    // recibo/marcador — fiel ao que o serviço real sempre faz. O DELETE de
+    // tags abaixo é construído com uma versão ERRADA de propósito
+    // (simulando um bug futuro), mas a IDENTIDADE (thisMutationId) é a
+    // mesma em todo o resto — é exatamente esse cenário (mesma identidade,
+    // guard divergente só no DELETE/recibo) que prova a invariante,
+    // distinto do cenário de CONFLITO ENTRE MUTAÇÕES (describe "Sprint 7
+    // v1.6"), que usa identidades DIFERENTES.
+    const thisMutationId = crypto.randomUUID();
     const historyStatement = buildConditionalHistoryStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: thisMutationId,
       questionId: qId,
       userId: "autor1",
       action: "updated",
@@ -1214,7 +1249,7 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
       guardStatuses: ["draft", "changes_requested"],
       metadata: null,
     });
-    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, {
+    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, thisMutationId, {
       enunciado: "Enunciado inalterado.",
       resolucaoComentada: "",
       conteudo: "",
@@ -1237,16 +1272,17 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
     // avaliando como esperado; afeta 0 linhas, sem lançar.
     const brokenDeleteTags = buildDeleteTagsStatement(db as never, qId, 999);
     // Recibo construído com a MESMA versão errada — fiel ao fato de que, no
-    // serviço real, DELETE e recibo SEMPRE recebem o mesmo `guardVersion`.
+    // serviço real, DELETE e recibo SEMPRE recebem o mesmo `guardVersion` —
+    // e com a MESMA identidade (thisMutationId) no id composto.
     const receipt = buildCollectionMutationReceiptStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: `${thisMutationId}:question_tags`,
       questionId: qId,
       collection: "question_tags",
       guardVersion: 999,
       expectedVersion: 2,
     });
     const mutationCheck = buildMutationCheckStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: thisMutationId,
       questionId: qId,
       expectedVersion: 2,
       alternativesExpectedCount: null,
@@ -1282,8 +1318,9 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
     const historyBefore = historyCount(qId);
     const auditBefore = auditLogCount(qId);
 
+    const thisMutationId = crypto.randomUUID();
     const historyStatement = buildConditionalHistoryStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: thisMutationId,
       questionId: qId,
       userId: "autor1",
       action: "updated",
@@ -1294,7 +1331,7 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
       guardStatuses: ["draft", "changes_requested"],
       metadata: null,
     });
-    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, {
+    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, thisMutationId, {
       enunciado: "Enunciado inalterado.",
       resolucaoComentada: "",
       conteudo: "",
@@ -1316,7 +1353,7 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
     // DELETE com o guard CORRETO — de fato limpa as tags.
     const realDeleteTags = buildDeleteTagsStatement(db as never, qId, 1);
     const mutationCheck = buildMutationCheckStatement(db as never, {
-      id: crypto.randomUUID(),
+      id: thisMutationId,
       questionId: qId,
       expectedVersion: 2,
       alternativesExpectedCount: null,
@@ -1408,5 +1445,364 @@ describe("Sprint 7 v1.5 — recibo de mutação por coleção (trigger 0011)", (
     expect(auditLogCount(qId)).toBe(1);
     expect(mutationChecksCount()).toBe(0); // v1.5 — sem resíduo, também no caso N>0
     expect(receiptsCount()).toBe(0);
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* Sprint 7 v1.6 — reprodução do conflito real de concorrência otimista    */
+/* (marcador/recibo indexados por VERSÃO, não pela mutação específica):     */
+/* mutação B, construída contra uma expectedVersion já obsoleta porque A    */
+/* avançou primeiro, insere seu próprio marcador declarando                 */
+/* expected_version=2 (o alvo que B CALCULOU, 1+1) — mas quem realmente     */
+/* está em version=2 é A, não B. Os triggers de 0010/0011 (chave por        */
+/* question_id+version) enxergam "núcleo em v2 = true" (graças a A) contra  */
+/* "recibo de B para aquela coleção em v2 = false" (B nunca escreveu, A não */
+/* tocou a mesma coleção) → abortam um conflito de versão LEGÍTIMO como se  */
+/* fosse uma corrupção real. Este teste PRECISA falhar contra o código      */
+/* anterior à correção (commit 820196e) — reprodução mandatória antes do    */
+/* fix, não um teste vindo já verde.                                        */
+/* ---------------------------------------------------------------------- */
+describe("Sprint 7 v1.6 — reprodução: conflito de versão real vira exceção não tratada (bug pré-fix)", () => {
+  function coreSnapshot(id: string): { version: number; updated_at: string } {
+    return db.sqlite.prepare("SELECT version, updated_at FROM questions WHERE id = ?").get(id) as never;
+  }
+  function tagContents(id: string): string[] {
+    return (db.sqlite.prepare("SELECT content FROM question_tags WHERE question_id = ? ORDER BY content").all(id) as Array<{ content: string }>).map(
+      (r) => r.content
+    );
+  }
+  function auditLogCount(questionId: string): number {
+    return (
+      db.sqlite
+        .prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = 'editorial_question_updated' AND metadata LIKE ?")
+        .get(`%${questionId}%`) as { total: number }
+    ).total;
+  }
+  function mutationChecksCount(): number {
+    return (db.sqlite.prepare("SELECT COUNT(*) as total FROM editorial_mutation_checks").get() as { total: number }).total;
+  }
+  function receiptsCount(): number {
+    return (db.sqlite.prepare("SELECT COUNT(*) as total FROM question_collection_mutation_receipts").get() as { total: number }).total;
+  }
+  function mid(): string {
+    return crypto.randomUUID();
+  }
+
+  it("mutação A (mutationId A) avança v1->v2 tocando tags; mutação B (mutationId B, DIFERENTE, expectedVersion=1 já obsoleta) também toca tags → B deve devolver 409 gracioso, nunca uma exceção de banco", async () => {
+    const token = await seedUserWithSession("autorB1");
+    grantRole("autorB1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+
+    // Mutação A: sucesso genuíno, v1 -> v2, grava tags.
+    const mutationIdA = mid();
+    const resultA = await updateQuestion(db as never, "autorB1", qId, 1, mutationIdA, { tags: ["tag-de-A"] } as never);
+    expect(resultA.ok).toBe(true);
+    expect(resultA.changed).toBe(true);
+    const afterA = coreSnapshot(qId);
+    expect(afterA.version).toBe(2);
+
+    // Mutação B: mutationId DIFERENTE, expectedVersion=1 (correta na época
+    // em que B foi construída, mas já obsoleta agora que A avançou) — B
+    // também toca tags (mesma coleção que A já tocou, mas com um payload
+    // DIFERENTE e um mutationId PRÓPRIO). Isto é um conflito de versão
+    // ORDINÁRIO — nunca deveria produzir nada além de um 409 limpo.
+    const mutationIdB = mid();
+    const historyBeforeB = historyCount(qId);
+    const auditBeforeB = auditLogCount(qId);
+    const markerBeforeB = mutationChecksCount();
+    const receiptBeforeB = receiptsCount();
+
+    // Nível de serviço: deve ser {ok:false, conflict:true} — nunca lançar.
+    let serviceThrew = false;
+    let serviceThrownMessage = "";
+    let resultB: Awaited<ReturnType<typeof updateQuestion>> | null = null;
+    try {
+      resultB = await updateQuestion(db as never, "autorB1", qId, 1, mutationIdB, { tags: ["tag-de-B"] } as never);
+    } catch (error) {
+      serviceThrew = true;
+      serviceThrownMessage = error instanceof Error ? error.message : String(error);
+    }
+
+    // Nível de rota (HTTP): deve ser um Response 409 — nunca uma promise
+    // rejeitada / exceção crua propagando até o chamador da rota.
+    let routeThrew = false;
+    let routeThrownMessage = "";
+    let routeStatus: number | null = null;
+    try {
+      const response = await callRoute(`/api/editorial/questions/${qId}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ expectedVersion: 1, mutationId: crypto.randomUUID(), tags: ["tag-de-B-via-rota"] }),
+      });
+      routeStatus = response.status;
+    } catch (error) {
+      routeThrew = true;
+      routeThrownMessage = error instanceof Error ? error.message : String(error);
+    }
+
+    console.log("[v1.6 repro] serviceThrew=%s message=%s | routeThrew=%s routeStatus=%s message=%s", serviceThrew, serviceThrownMessage, routeThrew, routeStatus, routeThrownMessage);
+
+    expect(serviceThrew).toBe(false);
+    expect(resultB).not.toBeNull();
+    expect(resultB!.ok).toBe(false);
+    expect(resultB!.conflict).toBe(true);
+
+    expect(routeThrew).toBe(false);
+    expect(routeStatus).toBe(409);
+
+    // Estado do banco: intocado por B — A permanece a única fonte de verdade.
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(2);
+    expect(tagContents(qId)).toEqual(["tag-de-A"]);
+    expect(historyCount(qId)).toBe(historyBeforeB);
+    expect(auditLogCount(qId)).toBe(auditBeforeB);
+    expect(mutationChecksCount()).toBe(markerBeforeB);
+    expect(receiptsCount()).toBe(receiptBeforeB);
+  });
+
+  // B — RISCO RESIDUAL FECHADO: A avança v1->v2 SEM tocar imagens; B
+  // (identidade diferente, expectedVersion=1 obsoleta) tenta tocar imagens
+  // — a coleção que A NUNCA tocou. Antes da consolidação (trigger de
+  // contagem de 0010, por versão), isto poderia abortar por engano (ou
+  // passar por coincidência) dependendo da contagem declarada. Agora,
+  // atrelado a identidade, deve SEMPRE ser um 409 limpo.
+  it("B. mutação A avança sem tocar imagens; mutação B (identidade diferente, versão obsoleta) tenta tocar imagens (coleção que A nunca tocou) → 409 limpo, imagens exatamente como estavam antes de B", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const imagesBefore = db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE question_id = ?").get(qId) as { total: number };
+
+    const mutationIdA = mid();
+    const resultA = await updateQuestion(db as never, "autor1", qId, 1, mutationIdA, { tags: ["tag-de-A"] } as never);
+    expect(resultA.ok).toBe(true);
+    const afterA = coreSnapshot(qId);
+    expect(afterA.version).toBe(2);
+
+    const markerBeforeB = mutationChecksCount();
+    const receiptBeforeB = receiptsCount();
+    const historyBeforeB = historyCount(qId);
+
+    const resultB = await updateQuestion(db as never, "autor1", qId, 1, mid(), {
+      imagens: [{ assetRef: "assets/questoes/img-de-b.png", altText: "Imagem de B", caption: null, position: 0, titularDireitos: null, baseLicenca: null }],
+    } as never);
+    expect(resultB.ok).toBe(false);
+    expect(resultB.conflict).toBe(true);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(2); // ainda o de A
+    const imagesAfter = db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE question_id = ?").get(qId) as { total: number };
+    expect(imagesAfter.total).toBe(imagesBefore.total); // nunca tocadas por B
+    expect(historyCount(qId)).toBe(historyBeforeB);
+    expect(mutationChecksCount()).toBe(markerBeforeB);
+    expect(receiptsCount()).toBe(receiptBeforeB);
+  });
+
+  // C — mesmo cenário de B, mas B tenta ESVAZIAR (expected_count=0) uma
+  // coleção que A nunca tocou — o caso N=0 tem sua própria história
+  // (0011/v1.5), então testado separadamente.
+  it("C. mutação A avança sem tocar tags; mutação B (identidade diferente, versão obsoleta) tenta ESVAZIAR tags (coleção que A nunca tocou, terminando vazia) → 409 limpo, zero resíduo técnico", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    db.sqlite
+      .prepare("INSERT INTO question_tags (id, question_id, content, position, version_stamp) VALUES (?, ?, ?, ?, ?)")
+      .run("t-preexistente", qId, "tag-preexistente", 0, 1);
+
+    const mutationIdA = mid();
+    // A só toca DNA/patterns — nunca tags.
+    const resultA = await updateQuestion(db as never, "autor1", qId, 1, mutationIdA, { conteudo: "Conteúdo de A." } as never);
+    expect(resultA.ok).toBe(true);
+    const afterA = coreSnapshot(qId);
+    expect(afterA.version).toBe(2);
+
+    const markerBeforeB = mutationChecksCount();
+    const receiptBeforeB = receiptsCount();
+
+    const resultB = await updateQuestion(db as never, "autor1", qId, 1, mid(), { tags: [] } as never);
+    expect(resultB.ok).toBe(false);
+    expect(resultB.conflict).toBe(true);
+
+    expect(coreSnapshot(qId).version).toBe(2);
+    expect(tagContents(qId)).toEqual(["tag-preexistente"]); // intocada por B
+    expect(mutationChecksCount()).toBe(markerBeforeB);
+    expect(receiptsCount()).toBe(receiptBeforeB);
+  });
+
+  // D — anomalia Classe-1 (v1.4), re-verificada sob o mecanismo de
+  // identidade consolidado: núcleo e recibo usam a IDENTIDADE certa, mas a
+  // inserção de itens da coleção está incompleta (uma linha a menos do que
+  // o esperado) — rollback completo.
+  it("D. núcleo e recibo com a identidade correta, mas a coleção tem uma linha A MENOS do que o esperado (INSERT incompleto) → rollback completo, provado no banco", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    const thisMutationId = crypto.randomUUID();
+    const historyStatement = buildConditionalHistoryStatement(db as never, {
+      id: thisMutationId,
+      questionId: qId,
+      userId: "autor1",
+      action: "updated",
+      fromStatus: "draft",
+      toStatus: "draft",
+      guardVersion: 1,
+      versionAfter: 2,
+      guardStatuses: ["draft", "changes_requested"],
+      metadata: null,
+    });
+    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, thisMutationId, {
+      enunciado: "Enunciado inalterado.",
+      resolucaoComentada: "",
+      conteudo: "",
+      subconteudo: "",
+      habilidade: "",
+      competencia: "",
+      dificuldade: "media",
+      origem: "autoral",
+      prova: null,
+      ano: null,
+      tempoEstimadoSegundos: null,
+      tipoCalculo: "misto",
+      necessitaCalculadora: 0,
+      titularDireitos: null,
+      baseLicenca: null,
+      textoAtribuicao: null,
+      fingerprint: "fp-d-nao-deveria-persistir",
+    });
+    // Recibo com a identidade CERTA (prova que o "guard" desta mutação
+    // rodou) — mas só 1 tag é de fato inserida, quando o marcador vai
+    // declarar 2 esperadas (INSERT incompleto, ex. um bug num loop que
+    // parou cedo).
+    const receipt = buildCollectionMutationReceiptStatement(db as never, {
+      id: `${thisMutationId}:question_tags`,
+      questionId: qId,
+      collection: "question_tags",
+      guardVersion: 1,
+      expectedVersion: 2,
+    });
+    const incompleteTagInsert = db
+      .prepare("INSERT INTO question_tags (id, question_id, content, position, version_stamp) VALUES (?, ?, ?, ?, ?)")
+      .bind("t-so-uma", qId, "tag-unica", 0, 2);
+    const mutationCheck = buildMutationCheckStatement(db as never, {
+      id: thisMutationId,
+      questionId: qId,
+      expectedVersion: 2,
+      alternativesExpectedCount: null,
+      dnaExpectedCount: null,
+      patternsExpectedCount: null,
+      tagsExpectedCount: 2, // declara 2, mas só 1 foi de fato inserida
+      imagesExpectedCount: null,
+    });
+
+    await expect(
+      db.batch([historyStatement, coreUpdate, receipt, incompleteTagInsert as never, mutationCheck])
+    ).rejects.toThrow(/invariante violada/i);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version); // rollback completo
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(historyCount(qId)).toBe(historyBefore);
+    const tags = db.sqlite.prepare("SELECT COUNT(*) as total FROM question_tags WHERE question_id = ?").get(qId) as { total: number };
+    expect(tags.total).toBe(0); // até a tag única que "conseguiu" foi revertida
+    expect(mutationChecksCount()).toBe(0);
+    expect(receiptsCount()).toBe(0);
+  });
+
+  // E — o histórico é gravado com uma identidade (X), mas o núcleo é
+  // atualizado (com sucesso genuíno, guard correto) usando uma identidade
+  // DIFERENTE (Y) como `mutationId` — simula um bug de código que desalinha
+  // qual identidade é passada para cada statement dentro da MESMA
+  // transação. O marcador usa a identidade do histórico (X). Mesmo com o
+  // núcleo tendo avançado de verdade, `last_mutation_id` ficou gravado como
+  // Y, não X — divergência real, deve abortar.
+  it("E. histórico gravado com identidade X, núcleo avançado com sucesso mas carimbado com identidade Y (DIFERENTE) → rollback completo, provado no banco", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1 });
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    const identityX = crypto.randomUUID();
+    const identityY = crypto.randomUUID();
+    const historyStatement = buildConditionalHistoryStatement(db as never, {
+      id: identityX,
+      questionId: qId,
+      userId: "autor1",
+      action: "updated",
+      fromStatus: "draft",
+      toStatus: "draft",
+      guardVersion: 1,
+      versionAfter: 2,
+      guardStatuses: ["draft", "changes_requested"],
+      metadata: null,
+    });
+    // UPDATE central usa o guard CORRETO (versão 1, bate de verdade) mas é
+    // carimbado com a identidade Y — DIFERENTE da identidade X do
+    // histórico. O UPDATE tem sucesso genuíno (afeta 1 linha).
+    const coreUpdate = buildUpdateQuestionCoreStatement(db as never, qId, 1, identityY, {
+      enunciado: "Enunciado inalterado.",
+      resolucaoComentada: "",
+      conteudo: "",
+      subconteudo: "",
+      habilidade: "",
+      competencia: "",
+      dificuldade: "media",
+      origem: "autoral",
+      prova: null,
+      ano: null,
+      tempoEstimadoSegundos: null,
+      tipoCalculo: "misto",
+      necessitaCalculadora: 0,
+      titularDireitos: null,
+      baseLicenca: null,
+      textoAtribuicao: null,
+      fingerprint: "fp-e-nao-deveria-persistir",
+    });
+    // Marcador usa a identidade do HISTÓRICO (X) — a convenção real do
+    // serviço (marker.id = mutationId = mesma identidade do histórico).
+    const mutationCheck = buildMutationCheckStatement(db as never, {
+      id: identityX,
+      questionId: qId,
+      expectedVersion: 2,
+      alternativesExpectedCount: null,
+      dnaExpectedCount: null,
+      patternsExpectedCount: null,
+      tagsExpectedCount: null,
+      imagesExpectedCount: null,
+    });
+
+    await expect(db.batch([historyStatement, coreUpdate, mutationCheck])).rejects.toThrow(/invariante violada/i);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version); // núcleo revertido, mesmo tendo "conseguido"
+    expect(after.updated_at).toBe(before.updated_at);
+    expect(historyCount(qId)).toBe(historyBefore); // histórico revertido também
+    expect(mutationChecksCount()).toBe(0);
+  });
+
+  // F — workflow editorial normal (draft -> in_review) via applyTransition,
+  // não updateQuestion: confirma que o mecanismo de identidade consolidado
+  // também funciona para transições (que usam um id de histórico gerado
+  // internamente como identidade, nunca um mutationId de cliente).
+  it("F. transição normal draft->in_review via applyTransition → sucesso, núcleo/histórico com identidade coerente, zero resíduo técnico", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", version: 1, withDna: true, withAlternatives: true, withPrincipalPattern: true });
+    // Imagens exigem alt-text para submeter à revisão — a fixture padrão
+    // não cria nenhuma, então nenhuma pendência de alt-text existe.
+    const before = coreSnapshot(qId);
+    const historyBefore = historyCount(qId);
+
+    const result = await submitForReview(db as never, "autor1", "editor", qId, 1);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+
+    const after = coreSnapshot(qId);
+    expect(after.version).toBe(before.version + 1);
+    const row = db.sqlite.prepare("SELECT editorial_status, last_mutation_id FROM questions WHERE id = ?").get(qId) as {
+      editorial_status: string;
+      last_mutation_id: string | null;
+    };
+    expect(row.editorial_status).toBe("in_review");
+    expect(row.last_mutation_id).not.toBeNull();
+    // O histórico gravado tem exatamente o id que ficou carimbado em last_mutation_id.
+    const history = db.sqlite.prepare("SELECT id FROM question_history WHERE question_id = ? ORDER BY created_at DESC LIMIT 1").get(qId) as {
+      id: string;
+    };
+    expect(history.id).toBe(row.last_mutation_id);
+    expect(historyCount(qId)).toBe(historyBefore + 1);
+    expect(mutationChecksCount()).toBe(0); // zero resíduo técnico
+    expect(receiptsCount()).toBe(0); // transições nunca tocam coleções
   });
 });

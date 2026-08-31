@@ -600,7 +600,9 @@ export async function updateQuestion(
   }
 
   const versionAfter = expectedVersion + 1;
-  const coreUpdate = buildUpdateQuestionCoreStatement(db, questionId, expectedVersion, { ...mergedScalars, fingerprint });
+  // v1.6 — `mutationId` é gravado em `questions.last_mutation_id` pelo
+  // MESMO UPDATE guardado — ver nota extensa em questionRepository.ts.
+  const coreUpdate = buildUpdateQuestionCoreStatement(db, questionId, expectedVersion, mutationId, { ...mergedScalars, fingerprint });
 
   // v1.3 — REORDENADO: as coleções e o histórico (as "consequências") rodam
   // ANTES do UPDATE central de `questions` (a "causa"), guardados pela
@@ -637,8 +639,17 @@ export async function updateQuestion(
   // Guardado pela EXATA MESMA condição do DELETE irmão (reaproveitando
   // `collectionGuardCondition()` dentro do repositório) — nunca um texto
   // "igual por convenção".
+  //
+  // v1.6 — `id` do recibo passa a ser `${mutationId}:${collection}` — a
+  // IDENTIDADE desta mutação específica, nunca mais um UUID aleatório sem
+  // relação com a operação. É o que permite ao trigger de identidade de
+  // migrations/0012_editorial_mutation_identity.sql perguntar "o recibo QUE
+  // ESTA MUTAÇÃO deveria ter inserido existe?" em vez de "existe ALGUM
+  // recibo para esta versão, seja de quem for?" — a segunda pergunta
+  // confunde mutações concorrentes distintas mirando o mesmo número de
+  // versão resultante (ver nota extensa em 0012).
   function pushCollectionReceipt(collection: string): void {
-    const receiptId = newId();
+    const receiptId = `${mutationId}:${collection}`;
     receiptIds.push(receiptId);
     childStatements.push({
       statement: buildCollectionMutationReceiptStatement(db, { id: receiptId, questionId, collection, guardVersion: expectedVersion, expectedVersion: versionAfter }),
@@ -738,7 +749,13 @@ export async function updateQuestion(
   // logo antes dele, tiver silenciosamente afetado 0 linhas sem lançar
   // exceção. Isso fecha a direção que o trigger de 0009 (reage só a um
   // UPDATE que de fato mudou uma linha) não cobre.
-  const mutationCheckId = newId();
+  // v1.6 — o id do marcador passa a ser o PRÓPRIO `mutationId` (a
+  // identidade real desta mutação, já reaproveitada como
+  // `question_history.id`), nunca mais um UUID de marcador desconectado da
+  // operação. É essa identidade que o trigger de 0012 usa para perguntar
+  // "o histórico/recibo QUE ESTA MUTAÇÃO deveria ter inserido existe?" —
+  // ver nota extensa em migrations/0012_editorial_mutation_identity.sql.
+  const mutationCheckId = mutationId;
   const mutationCheck = buildMutationCheckStatement(db, {
     id: mutationCheckId,
     questionId,
@@ -1048,9 +1065,15 @@ async function applyTransition(
   }
 
   const versionAfter = params.expectedVersion + 1;
+  // v1.6 — gerado ANTES do UPDATE da transição para poder ser reaproveitado
+  // como `mutationId` do UPDATE (grava `last_mutation_id`) E como id do
+  // próprio histórico E do marcador — a identidade única desta transição
+  // específica (transições não recebem um `mutationId` do cliente).
+  const historyId = newId();
   const transitionStatement = buildTransitionStatement(db, {
     id: params.questionId,
     expectedVersion: params.expectedVersion,
+    mutationId: historyId,
     fromStatuses: params.from,
     toStatus: params.to,
     revisorId: params.revisorId,
@@ -1060,7 +1083,6 @@ async function applyTransition(
   // nota extensa em updateQuestion acima e
   // migrations/0009_editorial_batch_invariants.sql): se a transição de fato
   // mudar `version`, o trigger exige que este histórico já exista.
-  const historyId = newId();
   const historyStatement = buildConditionalHistoryStatement(db, {
     id: historyId,
     questionId: params.questionId,
@@ -1079,9 +1101,10 @@ async function applyTransition(
   // v1.4 — mesmo mecanismo de marker-row de updateQuestion: transição nunca
   // toca coleções, então todas as contagens ficam `null` (nada a conferir
   // além de núcleo<->histórico, e nenhum recibo de coleção é necessário
-  // aqui — 0011 só entra em jogo quando algum `*_expected_count` não é
-  // NULL).
-  const mutationCheckId = newId();
+  // aqui — 0011/0012 só entram em jogo quando algum `*_expected_count` não
+  // é NULL). v1.6 — o id do marcador reaproveita `historyId` (a identidade
+  // desta transição específica), nunca mais um UUID desconectado.
+  const mutationCheckId = historyId;
   const mutationCheck = buildMutationCheckStatement(db, {
     id: mutationCheckId,
     questionId: params.questionId,

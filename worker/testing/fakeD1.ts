@@ -372,7 +372,9 @@ CREATE TABLE questions (
   version INTEGER NOT NULL DEFAULT 1,
   is_local_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_local_fixture IN (0, 1)),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Sprint 7 v1.6 (migration 0012) - identidade da mutacao que fez esta questao avancar de versao pela ultima vez.
+  last_mutation_id TEXT
 );
 CREATE UNIQUE INDEX idx_questions_code ON questions (code);
 CREATE INDEX idx_questions_fingerprint ON questions (fingerprint);
@@ -521,69 +523,9 @@ CREATE TABLE editorial_mutation_checks (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TRIGGER trg_editorial_mutation_checks_bidirectional
-AFTER INSERT ON editorial_mutation_checks
-FOR EACH ROW
-BEGIN
-  SELECT CASE
-    WHEN (
-      EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
-    ) != (
-      EXISTS (SELECT 1 FROM question_history WHERE question_id = NEW.question_id AND version = NEW.expected_version)
-    )
-    THEN RAISE(ABORT, 'invariante violada: núcleo (questions.version) e question_history divergem para esta mutação')
-  END;
-
-  SELECT CASE
-    WHEN NEW.alternatives_expected_count IS NOT NULL AND NEW.alternatives_expected_count > 0
-     AND (
-       (SELECT COUNT(*) FROM question_alternatives WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.alternatives_expected_count
-     ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
-     )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e question_alternatives divergem para esta mutação')
-  END;
-
-  SELECT CASE
-    WHEN NEW.dna_expected_count IS NOT NULL AND NEW.dna_expected_count > 0
-     AND (
-       (SELECT COUNT(*) FROM question_dna WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.dna_expected_count
-     ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
-     )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e question_dna divergem para esta mutação')
-  END;
-
-  SELECT CASE
-    WHEN NEW.patterns_expected_count IS NOT NULL AND NEW.patterns_expected_count > 0
-     AND (
-       (SELECT COUNT(*) FROM question_patterns WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.patterns_expected_count
-     ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
-     )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e question_patterns divergem para esta mutação')
-  END;
-
-  SELECT CASE
-    WHEN NEW.tags_expected_count IS NOT NULL AND NEW.tags_expected_count > 0
-     AND (
-       (SELECT COUNT(*) FROM question_tags WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.tags_expected_count
-     ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
-     )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e question_tags divergem para esta mutação')
-  END;
-
-  SELECT CASE
-    WHEN NEW.images_expected_count IS NOT NULL AND NEW.images_expected_count > 0
-     AND (
-       (SELECT COUNT(*) FROM question_images WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.images_expected_count
-     ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
-     )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e question_images divergem para esta mutação')
-  END;
-END;
+-- O trigger trg_editorial_mutation_checks_bidirectional de 0010 NAO e
+-- criado aqui - equivalente a ele ter sido DROPado por 0012 no banco real
+-- (substituido pelo trigger consolidado por identidade, mais abaixo).
 
 -- Sprint 7 v1.5 (migration 0011) - recibo de mutacao por colecao, fecha o buraco de 0010 para colecoes esvaziadas.
 -- Espelho manual do DDL de migrations/0011_editorial_collection_mutation_receipts.sql -
@@ -598,73 +540,92 @@ CREATE TABLE question_collection_mutation_receipts (
 
 CREATE INDEX idx_question_collection_mutation_receipts_lookup ON question_collection_mutation_receipts (question_id, collection, expected_version);
 
-CREATE TRIGGER trg_editorial_mutation_checks_collection_receipts
+-- Sprint 7 v1.6 (migration 0012) - identidade da mutacao, substitui o trigger de recibos de 0011 por um baseado em identidade.
+-- Espelho manual do DDL de migrations/0012_editorial_mutation_identity.sql -
+-- os dois precisam ser mantidos em sincronia. O trigger de recibos de 0011
+-- (trg_editorial_mutation_checks_collection_receipts) NAO e criado aqui -
+-- equivalente a ele ter sido DROPado por 0012 no banco real.
+CREATE TRIGGER trg_editorial_mutation_checks_by_identity
 AFTER INSERT ON editorial_mutation_checks
 FOR EACH ROW
 BEGIN
   SELECT CASE
+    WHEN (
+      EXISTS (SELECT 1 FROM question_history WHERE id = NEW.id)
+    ) != (
+      EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND last_mutation_id = NEW.id AND version = NEW.expected_version)
+    )
+    THEN RAISE(ABORT, 'invariante violada: núcleo e histórico divergem para ESTA mutação especificamente (por identidade)')
+  END;
+
+  SELECT CASE
     WHEN NEW.alternatives_expected_count IS NOT NULL
      AND (
-       EXISTS (
-         SELECT 1 FROM question_collection_mutation_receipts
-         WHERE question_id = NEW.question_id AND collection = 'question_alternatives' AND expected_version = NEW.expected_version
+       EXISTS (SELECT 1 FROM question_collection_mutation_receipts WHERE id = NEW.id || ':question_alternatives')
+       AND (
+         NEW.alternatives_expected_count = 0
+         OR (SELECT COUNT(*) FROM question_alternatives WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.alternatives_expected_count
        )
      ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND last_mutation_id = NEW.id AND version = NEW.expected_version)
      )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_alternatives divergem para esta mutação')
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_alternatives (por identidade) divergem para ESTA mutação')
   END;
 
   SELECT CASE
     WHEN NEW.dna_expected_count IS NOT NULL
      AND (
-       EXISTS (
-         SELECT 1 FROM question_collection_mutation_receipts
-         WHERE question_id = NEW.question_id AND collection = 'question_dna' AND expected_version = NEW.expected_version
+       EXISTS (SELECT 1 FROM question_collection_mutation_receipts WHERE id = NEW.id || ':question_dna')
+       AND (
+         NEW.dna_expected_count = 0
+         OR (SELECT COUNT(*) FROM question_dna WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.dna_expected_count
        )
      ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND last_mutation_id = NEW.id AND version = NEW.expected_version)
      )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_dna divergem para esta mutação')
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_dna (por identidade) divergem para ESTA mutação')
   END;
 
   SELECT CASE
     WHEN NEW.patterns_expected_count IS NOT NULL
      AND (
-       EXISTS (
-         SELECT 1 FROM question_collection_mutation_receipts
-         WHERE question_id = NEW.question_id AND collection = 'question_patterns' AND expected_version = NEW.expected_version
+       EXISTS (SELECT 1 FROM question_collection_mutation_receipts WHERE id = NEW.id || ':question_patterns')
+       AND (
+         NEW.patterns_expected_count = 0
+         OR (SELECT COUNT(*) FROM question_patterns WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.patterns_expected_count
        )
      ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND last_mutation_id = NEW.id AND version = NEW.expected_version)
      )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_patterns divergem para esta mutação')
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_patterns (por identidade) divergem para ESTA mutação')
   END;
 
   SELECT CASE
     WHEN NEW.tags_expected_count IS NOT NULL
      AND (
-       EXISTS (
-         SELECT 1 FROM question_collection_mutation_receipts
-         WHERE question_id = NEW.question_id AND collection = 'question_tags' AND expected_version = NEW.expected_version
+       EXISTS (SELECT 1 FROM question_collection_mutation_receipts WHERE id = NEW.id || ':question_tags')
+       AND (
+         NEW.tags_expected_count = 0
+         OR (SELECT COUNT(*) FROM question_tags WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.tags_expected_count
        )
      ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND last_mutation_id = NEW.id AND version = NEW.expected_version)
      )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_tags divergem para esta mutação')
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_tags (por identidade) divergem para ESTA mutação')
   END;
 
   SELECT CASE
     WHEN NEW.images_expected_count IS NOT NULL
      AND (
-       EXISTS (
-         SELECT 1 FROM question_collection_mutation_receipts
-         WHERE question_id = NEW.question_id AND collection = 'question_images' AND expected_version = NEW.expected_version
+       EXISTS (SELECT 1 FROM question_collection_mutation_receipts WHERE id = NEW.id || ':question_images')
+       AND (
+         NEW.images_expected_count = 0
+         OR (SELECT COUNT(*) FROM question_images WHERE question_id = NEW.question_id AND version_stamp = NEW.expected_version) = NEW.images_expected_count
        )
      ) != (
-       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND version = NEW.expected_version)
+       EXISTS (SELECT 1 FROM questions WHERE id = NEW.question_id AND last_mutation_id = NEW.id AND version = NEW.expected_version)
      )
-    THEN RAISE(ABORT, 'invariante violada: núcleo e recibo de question_images divergem para esta mutação')
+    THEN RAISE(ABORT, 'invariante violada: núcleo e question_images (por identidade) divergem para ESTA mutação')
   END;
 END;
 `;

@@ -487,11 +487,22 @@ export function buildConditionalHistoryStatement(
 
 /** UPDATE do núcleo da questão, condicionado a versão exata E status
  *  elegível para edição (draft ou changes_requested — publicada nunca é
- *  editável, seção 6 da ordem). */
+ *  editável, seção 6 da ordem).
+ *
+ *  Sprint 7 v1.6 — `mutationId` é gravado em `last_mutation_id` como parte
+ *  do MESMO SET guardado (nunca um statement à parte): só passa a valer
+ *  quando ESTE UPDATE especificamente teve sucesso, nunca "por convenção".
+ *  É o que permite ao trigger de identidade de
+ *  migrations/0012_editorial_mutation_identity.sql perguntar "o núcleo
+ *  avançou por causa DESTA mutação, especificamente?" em vez de "o núcleo
+ *  está NUMA versão X, não importa de quem?" — a segunda pergunta confunde
+ *  mutações concorrentes distintas que miram o mesmo número de versão
+ *  resultante (ver nota extensa em 0012). */
 export function buildUpdateQuestionCoreStatement(
   db: D1Database,
   id: string,
   expectedVersion: number,
+  mutationId: string,
   fields: {
     enunciado: string;
     resolucaoComentada: string;
@@ -518,7 +529,7 @@ export function buildUpdateQuestionCoreStatement(
          enunciado = ?, resolucao_comentada = ?, conteudo = ?, subconteudo = ?, habilidade = ?, competencia = ?,
          dificuldade = ?, origem = ?, prova = ?, ano = ?, tempo_estimado_segundos = ?, tipo_calculo = ?,
          necessita_calculadora = ?, titular_direitos = ?, base_licenca = ?, texto_atribuicao = ?, fingerprint = ?,
-         version = version + 1, updated_at = datetime('now')
+         version = version + 1, updated_at = datetime('now'), last_mutation_id = ?
        WHERE id = ? AND version = ? AND editorial_status IN ('draft', 'changes_requested')`
     )
     .bind(
@@ -539,6 +550,7 @@ export function buildUpdateQuestionCoreStatement(
       fields.baseLicenca,
       fields.textoAtribuicao,
       fields.fingerprint,
+      mutationId,
       id,
       expectedVersion
     );
@@ -711,11 +723,17 @@ export function buildGuardedUpsertDnaStatement(
 
 /* --------------------------------- Transições -------------------------------- */
 
+/** Sprint 7 v1.6 — `mutationId` aqui é o id de histórico gerado
+ *  internamente por `applyTransition` (transições não recebem um
+ *  `mutationId` do cliente) — gravado em `last_mutation_id` como parte do
+ *  MESMO SET guardado, mesmo raciocínio de `buildUpdateQuestionCoreStatement`
+ *  acima. */
 export function buildTransitionStatement(
   db: D1Database,
   params: {
     id: string;
     expectedVersion: number;
+    mutationId: string;
     fromStatuses: QuestionEditorialStatus[];
     toStatus: QuestionEditorialStatus;
     revisorId?: string | null;
@@ -727,10 +745,10 @@ export function buildTransitionStatement(
   if (params.revisorId !== undefined) bindings.push(params.revisorId);
   return db
     .prepare(
-      `UPDATE questions SET editorial_status = ?, ${revisorSet} version = version + 1, updated_at = datetime('now')
+      `UPDATE questions SET editorial_status = ?, ${revisorSet} version = version + 1, updated_at = datetime('now'), last_mutation_id = ?
        WHERE ${guard}`
     )
-    .bind(params.toStatus, ...bindings, params.id, params.expectedVersion, ...params.fromStatuses);
+    .bind(params.toStatus, ...bindings, params.mutationId, params.id, params.expectedVersion, ...params.fromStatuses);
 }
 
 /* ------------------------------ Duplicidade/listas ---------------------------- */
