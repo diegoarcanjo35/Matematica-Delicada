@@ -35,7 +35,7 @@ export function DashboardPage() {
      Enquanto não houver evidência, o card mostra apenas o convite a conhecer
      os padrões — nunca um domínio, gargalo ou percentual inventado. */
   const [patternsSummary, setPatternsSummary] = useState<
-    { available: boolean; total: number; withEvidence: number } | null
+    { available: boolean; total: number; withEvidence: number; hasAnyTrainableQuestion: boolean } | null
   >(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
@@ -66,6 +66,7 @@ export function DashboardPage() {
           available: all.available,
           total: all.total ?? 0,
           withEvidence: withEvidence.total ?? 0,
+          hasAnyTrainableQuestion: all.hasAnyTrainableQuestion ?? false,
         });
       })
       .catch(() => {
@@ -195,6 +196,13 @@ export function DashboardPage() {
           ) : (
             <p className="dashboard__message">
               O catálogo de padrões está em preparação pedagógica — ainda não disponível.
+            </p>
+          )}
+          {patternsSummary?.available && patternsSummary.hasAnyTrainableQuestion && (
+            <p className="dashboard__player-cta">
+              <Link to="/padroes-enem" className="btn btn--secondary">
+                <span>Resolver uma questão</span>
+              </Link>
             </p>
           )}
         </Card>

@@ -20,7 +20,13 @@ import { expect, test, type Page } from "@playwright/test";
    ENABLE_LOCAL_PATTERN_FIXTURES, então este mesmo servidor já é o ambiente
    "gate de padrões desligado" exigido pela seção 6.2 da ordem da Sprint 6.
    Os testes de padrões abaixo reaproveitam este servidor em vez de subir um
-   terceiro `wrangler dev` (que dobraria de novo o custo da suíte). */
+   terceiro `wrangler dev` (que dobraria de novo o custo da suíte).
+
+   Sprint 8 v1.1 — este arquivo também NÃO define ENABLE_LOCAL_EDITORIAL_FIXTURES,
+   o mesmo gate que worker/src/routes/player.ts:handlePlayerRequest reaproveita
+   (isLocalEditorialFixturesAllowed, seção 14 da ordem — nenhum gate novo foi
+   criado para o Player). Os testes do Player abaixo reaproveitam este mesmo
+   servidor pela mesma razão dos padrões acima. */
 
 const BASE_URL = "http://localhost:8790";
 const HEALTH_URL = `${BASE_URL}/api/health`;
@@ -173,5 +179,30 @@ test.describe("Padrões ENEM — gate de indisponibilidade (fixtures locais desl
     await page.goto("/padroes-enem");
     await expect(page.getByRole("heading", { name: "Padrões ENEM em preparação" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Razão em Gráfico" })).toHaveCount(0);
+  });
+});
+
+test.describe("Player de Questão — gate de indisponibilidade (fixtures locais desligadas)", () => {
+  test("POST /api/player/attempts responde available:false, nunca toca em question_attempts", async ({ page }) => {
+    await createConfirmedUserWithOnboarding(page, "player-gate-attempts");
+    const response = await page.request.post("/api/player/attempts", { data: { questionId: "fixture-q-04", mode: "learning" } });
+    expect(response.ok()).toBe(true);
+    const body = await response.json();
+    expect(body).toMatchObject({ ok: true, available: false });
+    expect(body.message).toBe("O Player de Questão está em preparação.");
+    expect(body.attemptId).toBeUndefined();
+  });
+
+  test("/questoes/:id renderiza o estado indisponível na UI, nunca a tela de início real", async ({ page }) => {
+    await createConfirmedUserWithOnboarding(page, "player-gate-inicio-ui");
+    await page.goto("/questoes/fixture-q-04");
+    await page.getByRole("button", { name: "Iniciar" }).click();
+    await expect(page.getByRole("heading", { name: "Player de Questão em preparação" })).toBeVisible();
+  });
+
+  test("/tentativas/:id renderiza o estado indisponível na UI para qualquer id", async ({ page }) => {
+    await createConfirmedUserWithOnboarding(page, "player-gate-tentativa-ui");
+    await page.goto("/tentativas/qualquer-id");
+    await expect(page.getByRole("heading", { name: "Player de Questão em preparação" })).toBeVisible();
   });
 });

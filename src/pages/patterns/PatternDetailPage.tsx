@@ -225,13 +225,28 @@ export function PatternDetailPage() {
 
       <section className="patterns__section" aria-labelledby="secao-treino">
         <h2 id="secao-treino">Treinar este padrão</h2>
-        <Button type="button" disabled>
-          Treinar este padrão (em preparação)
-        </Button>
-        <p className="patterns__training-note">
-          O banco de questões e o treino real deste padrão ainda não estão disponíveis. Este
-          botão não inicia nenhuma sessão e não registra nenhum progresso.
-        </p>
+        {pattern.trainableQuestionId ? (
+          <>
+            <Link to={`/questoes/${pattern.trainableQuestionId}`} className="btn btn--primary">
+              Treinar este padrão
+            </Link>
+            <p className="patterns__training-note">
+              A questão foi escolhida por uma seleção técnica inicial (a primeira questão publicada
+              cadastrada com este padrão como principal) — nenhum algoritmo pedagógico ou adaptação
+              está em uso ainda.
+            </p>
+          </>
+        ) : (
+          <>
+            <Button type="button" disabled>
+              Treinar este padrão (em preparação)
+            </Button>
+            <p className="patterns__training-note">
+              Ainda não existe nenhuma questão publicada para este padrão. Este botão não inicia
+              nenhuma sessão e não registra nenhum progresso.
+            </p>
+          </>
+        )}
       </section>
 
       <section className="patterns__section" aria-labelledby="secao-conteudo-relacionado">

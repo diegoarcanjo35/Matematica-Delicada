@@ -520,6 +520,40 @@ describe("índices indisponíveis — NULL nunca vira zero", () => {
   });
 });
 
+describe("Sprint 8 v1.1 — 'Treinar este padrão' (trainableQuestionId, seção 13 da ordem)", () => {
+  it("sem nenhuma questão publicada ligada ao padrão, trainableQuestionId é null (nunca inventa um caminho)", async () => {
+    await seedUser("u-treinar-1");
+    const result = await getPatternDetail(db as never, "u-treinar-1", "escala");
+    expect(result!.trainableQuestionId).toBeNull();
+  });
+
+  it("com uma questão PUBLICADA cujo padrão principal é este, trainableQuestionId aponta para ela — escolha determinística, nunca um algoritmo pedagógico", async () => {
+    db.sqlite.exec(
+      `INSERT INTO questions (id, code, enunciado, dificuldade, origem, editorial_status, fingerprint)
+       VALUES ('q-trein-1', 'TREIN-01', 'Enunciado técnico', 'media', 'autoral', 'published', 'fp-trein-1')`
+    );
+    db.sqlite.exec(
+      `INSERT INTO question_patterns (id, question_id, pattern_id, role) VALUES ('qp-trein-1', 'q-trein-1', 'fixture-pat-04', 'principal')`
+    );
+    await seedUser("u-treinar-2");
+    const result = await getPatternDetail(db as never, "u-treinar-2", "mediana-e-frequencia");
+    expect(result!.trainableQuestionId).toBe("q-trein-1");
+  });
+
+  it("uma questão RASCUNHO (não publicada) ligada ao padrão nunca é oferecida", async () => {
+    db.sqlite.exec(
+      `INSERT INTO questions (id, code, enunciado, dificuldade, origem, editorial_status, fingerprint)
+       VALUES ('q-trein-draft', 'TREIN-02', 'Enunciado técnico', 'media', 'autoral', 'draft', 'fp-trein-2')`
+    );
+    db.sqlite.exec(
+      `INSERT INTO question_patterns (id, question_id, pattern_id, role) VALUES ('qp-trein-draft', 'q-trein-draft', 'fixture-pat-01', 'principal')`
+    );
+    await seedUser("u-treinar-3");
+    const result = await getPatternDetail(db as never, "u-treinar-3", "razao-em-grafico");
+    expect(result!.trainableQuestionId).toBeNull();
+  });
+});
+
 describe("GET /api/patterns/:slug/progress — isolamento por usuário", () => {
   it("cada aluno vê apenas o próprio progresso", async () => {
     const tokenA = await seedUserWithSession("u-aluna-a");

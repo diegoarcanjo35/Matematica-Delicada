@@ -1,5 +1,15 @@
 -- FIXTURE TÉCNICA LOCAL — NÃO PUBLICAR — NÃO É QUESTÃO OFICIAL
 --
+-- Sprint 8 v1.1 — correção: duas alternativas (fixture-q-04-alt-c,
+-- fixture-q-05-alt-b) traziam literalmente "(correto)"/"(correta)" no
+-- PRÓPRIO TEXTO da alternativa. Isto nunca vazava nada na tela editorial
+-- (Sprint 7), mas o Player de Questão (Sprint 8) mostra o texto de toda
+-- alternativa antes da confirmação — o marcador entre parênteses vazava o
+-- gabarito na tela, violando a garantia central da seção 3 da ordem do
+-- Player ("respostas corretas... não podem aparecer antes da
+-- confirmação"). Removido do texto; `is_correct` continua marcando a
+-- alternativa certa normalmente, só nunca mais dentro do texto visível.
+--
 -- Sprint 7 v1.0 — questões sintéticas suficientes para exercitar o Banco de
 -- Questões em ambiente local (catálogo, editor, workflow, importação e
 -- screenshots). TODO enunciado/resolução carrega literalmente o prefixo
@@ -73,6 +83,19 @@ VALUES
 -- NUNCA acontece via API (publicação real exige workflow e papel admin
 -- reais); aqui é só para o catálogo local ter ao menos um exemplo
 -- `published` para telas/screenshots que dependem desse estado.
+--
+-- Sprint 8 v1.1 — correção: um seed em banco TOTALMENTE vazio (sem nenhum
+-- histórico de execuções anteriores) disparava
+-- trg_questions_require_history_after_update (migrations/0009): o UPDATE
+-- abaixo muda `version` de 3 para 4 sem nenhuma linha de `question_history`
+-- na versão 4 já existir — a mesma ordem "histórico ANTES do UPDATE, na
+-- mesma transação" exigida de todo o resto do código
+-- (worker/src/services/questionService.ts) também vale aqui. Isto só não
+-- tinha sido pego antes porque o D1 local nunca tinha sido testado a partir
+-- de um estado zerado nesta sprint — descoberto ao truncar
+-- .wrangler/state/v3/d1 antes da rodada final de E2E da Sprint 8.
+INSERT OR IGNORE INTO question_history (id, question_id, user_id, action, from_status, to_status, version, metadata) VALUES
+  ('fixture-q-04-hist-4', 'fixture-q-04', NULL, 'published', 'approved', 'published', 4, NULL);
 UPDATE questions SET editorial_status = 'published', version = 4 WHERE id = 'fixture-q-04' AND editorial_status = 'approved';
 
 INSERT OR IGNORE INTO question_alternatives (id, question_id, letter, text, is_correct, position) VALUES
@@ -96,12 +119,12 @@ INSERT OR IGNORE INTO question_alternatives (id, question_id, letter, text, is_c
 
   ('fixture-q-04-alt-a', 'fixture-q-04', 'A', '[FIXTURE] Valor X', 0, 0),
   ('fixture-q-04-alt-b', 'fixture-q-04', 'B', '[FIXTURE] Valor Y', 0, 1),
-  ('fixture-q-04-alt-c', 'fixture-q-04', 'C', '[FIXTURE] Valor Z (correto)', 1, 2),
+  ('fixture-q-04-alt-c', 'fixture-q-04', 'C', '[FIXTURE] Valor Z', 1, 2),
   ('fixture-q-04-alt-d', 'fixture-q-04', 'D', '[FIXTURE] Valor W', 0, 3),
   ('fixture-q-04-alt-e', 'fixture-q-04', 'E', '[FIXTURE] Valor V', 0, 4),
 
   ('fixture-q-05-alt-a', 'fixture-q-05', 'A', '[FIXTURE] Vista A', 0, 0),
-  ('fixture-q-05-alt-b', 'fixture-q-05', 'B', '[FIXTURE] Vista B (correta)', 1, 1),
+  ('fixture-q-05-alt-b', 'fixture-q-05', 'B', '[FIXTURE] Vista B', 1, 1),
   ('fixture-q-05-alt-c', 'fixture-q-05', 'C', '[FIXTURE] Vista C', 0, 2),
   ('fixture-q-05-alt-d', 'fixture-q-05', 'D', '[FIXTURE] Vista D', 0, 3),
   ('fixture-q-05-alt-e', 'fixture-q-05', 'E', '[FIXTURE] Vista E', 0, 4);

@@ -628,6 +628,130 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada: núcleo e question_images (por identidade) divergem para ESTA mutação')
   END;
 END;
+
+-- Sprint 8 v1.1 (migration 0013) - Player de Questao: tentativas, reconhecimento, ajuda, revisao e denuncia.
+-- Espelho manual do DDL de migrations/0013_question_player_attempts.sql -
+-- os dois precisam ser mantidos em sincronia.
+CREATE TABLE question_attempts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  question_version INTEGER NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('learning', 'practice', 'recognition')),
+  status TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'answered', 'completed', 'abandoned')),
+  selected_alternative TEXT CHECK (selected_alternative IN ('A', 'B', 'C', 'D', 'E')),
+  is_correct INTEGER CHECK (is_correct IN (0, 1)),
+  recognition_pattern_id TEXT REFERENCES patterns (id),
+  recognition_clue TEXT,
+  recognition_strategy TEXT,
+  highest_help_layer INTEGER NOT NULL DEFAULT 0 CHECK (highest_help_layer BETWEEN 0 AND 4),
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  answered_at TEXT,
+  completed_at TEXT,
+  last_activity_at TEXT NOT NULL DEFAULT (datetime('now')),
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_question_attempts_user ON question_attempts (user_id);
+CREATE INDEX idx_question_attempts_question ON question_attempts (question_id);
+CREATE UNIQUE INDEX idx_question_attempts_one_active ON question_attempts (user_id, question_id, mode) WHERE status = 'in_progress';
+
+CREATE TABLE question_answer_events (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES question_attempts (id),
+  previous_alternative TEXT CHECK (previous_alternative IN ('A', 'B', 'C', 'D', 'E')),
+  new_alternative TEXT CHECK (new_alternative IN ('A', 'B', 'C', 'D', 'E')),
+  event_type TEXT NOT NULL CHECK (event_type IN ('selected', 'changed', 'confirmed')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_question_answer_events_attempt ON question_answer_events (attempt_id, created_at);
+
+CREATE TABLE question_recognition_events (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES question_attempts (id),
+  pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  clue TEXT NOT NULL DEFAULT '',
+  strategy TEXT NOT NULL DEFAULT '',
+  attempt_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_question_recognition_events_attempt ON question_recognition_events (attempt_id, created_at);
+
+CREATE TABLE question_help_events (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES question_attempts (id),
+  layer INTEGER NOT NULL CHECK (layer BETWEEN 1 AND 4),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_question_help_events_unique ON question_help_events (attempt_id, layer);
+
+CREATE TABLE question_review_bookmarks (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_question_review_bookmarks_unique ON question_review_bookmarks (user_id, question_id);
+
+CREATE TABLE question_problem_reports (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  attempt_id TEXT REFERENCES question_attempts (id),
+  category TEXT NOT NULL CHECK (category IN (
+    'statement_problem', 'alternative_problem', 'answer_key_problem', 'image_problem', 'accessibility_problem', 'other'
+  )),
+  comment TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewed', 'dismissed')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_question_problem_reports_user ON question_problem_reports (user_id);
+CREATE INDEX idx_question_problem_reports_question ON question_problem_reports (question_id);
+
+-- Sprint 8 v1.2 (migration 0013, editada in place) - atomicidade real das
+-- mutações do Player: cada INSERT de evento e incondicional, usando como
+-- id o mesmo mutationId gravado em question_attempts.last_mutation_id
+-- pelo UPDATE pareado no mesmo lote; o trigger AFTER INSERT aborta a
+-- transação inteira se essa identidade não bater. Espelho manual do DDL de
+-- migrations/0013_question_player_attempts.sql - os dois precisam ser
+-- mantidos em sincronia.
+CREATE TRIGGER trg_question_answer_events_require_attempt_identity
+AFTER INSERT ON question_answer_events
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM question_attempts WHERE id = NEW.attempt_id AND last_mutation_id = NEW.id
+    )
+    THEN RAISE(ABORT, 'invariante violada: question_answer_events inserido sem question_attempts.last_mutation_id correspondente (por identidade)')
+  END;
+END;
+
+CREATE TRIGGER trg_question_recognition_events_require_attempt_identity
+AFTER INSERT ON question_recognition_events
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM question_attempts WHERE id = NEW.attempt_id AND last_mutation_id = NEW.id
+    )
+    THEN RAISE(ABORT, 'invariante violada: question_recognition_events inserido sem question_attempts.last_mutation_id correspondente (por identidade)')
+  END;
+END;
+
+CREATE TRIGGER trg_question_help_events_require_attempt_identity
+AFTER INSERT ON question_help_events
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM question_attempts WHERE id = NEW.attempt_id AND last_mutation_id = NEW.id
+    )
+    THEN RAISE(ABORT, 'invariante violada: question_help_events inserido sem question_attempts.last_mutation_id correspondente (por identidade)')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {

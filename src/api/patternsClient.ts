@@ -52,6 +52,10 @@ export interface PatternDetail extends PatternSummary {
   commonMistakes: string[];
   relations: PatternRelation[];
   availableQuestionCount: number;
+  /** Sprint 8 v1.1 — id da questão publicada escolhida de forma
+   *  DETERMINÍSTICA (nunca um algoritmo pedagógico) para "Treinar este
+   *  padrão". `null` quando nenhuma questão publicada está disponível. */
+  trainableQuestionId: string | null;
 }
 
 export interface PatternListResponse {
@@ -63,6 +67,9 @@ export interface PatternListResponse {
   pageSize?: number;
   total?: number;
   totalPages?: number;
+  /** Sprint 8 v1.1 — existe pelo menos uma questão publicada (fixture
+   *  local) para o CTA "Resolver uma questão" do dashboard. */
+  hasAnyTrainableQuestion?: boolean;
 }
 
 export interface PatternDetailResponse {

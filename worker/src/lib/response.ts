@@ -18,6 +18,8 @@ export const Errors = {
   notFound: (message = "Recurso não encontrado.") => errorResponse(404, "not_found", message),
   methodNotAllowed: (message = "Método não permitido.") =>
     errorResponse(405, "method_not_allowed", message),
+  conflict: (message = "Conflito de versão. Recarregue e tente novamente.") =>
+    errorResponse(409, "conflict", message),
   payloadTooLarge: (message = "Corpo da requisição excede o limite permitido.") =>
     errorResponse(413, "payload_too_large", message),
   tooManyRequests: (message = "Muitas tentativas. Tente novamente em alguns minutos.") =>

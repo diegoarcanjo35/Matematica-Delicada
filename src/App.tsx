@@ -20,6 +20,8 @@ import { DiagnosticPage } from "./pages/diagnostic/DiagnosticPage";
 import { SchedulePage } from "./pages/schedule/SchedulePage";
 import { PatternsPage } from "./pages/patterns/PatternsPage";
 import { PatternDetailPage } from "./pages/patterns/PatternDetailPage";
+import { QuestionStartPage } from "./pages/player/QuestionStartPage";
+import { AttemptPage } from "./pages/player/AttemptPage";
 import { EditorialQuestionsPage } from "./pages/editorial/EditorialQuestionsPage";
 import { EditorialQuestionFormPage } from "./pages/editorial/EditorialQuestionFormPage";
 import { EditorialImportsPage } from "./pages/editorial/EditorialImportsPage";
@@ -123,6 +125,8 @@ export function App() {
             <Route path="/cronograma" element={<SchedulePage />} />
             <Route path="/padroes-enem" element={<PatternsPage />} />
             <Route path="/padroes-enem/:slug" element={<PatternDetailPage />} />
+            <Route path="/questoes/:questionId" element={<QuestionStartPage />} />
+            <Route path="/tentativas/:attemptId" element={<AttemptPage />} />
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route
               path="/ajuda"

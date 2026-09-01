@@ -90,6 +90,10 @@
   margin-bottom: var(--space-4);
 }
 
+.dashboard__player-cta {
+  margin-top: var(--space-2);
+}
+
 .dashboard__week-chart {
   display: flex;
   align-items: flex-end;

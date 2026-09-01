@@ -180,6 +180,20 @@ export async function findPublishedPatternBySlug(db: D1Database, slug: string): 
   return row ?? null;
 }
 
+/** Sprint 8 v1.1 — mesma regra de `findPublishedPatternBySlug`, mas por
+ *  `id` (usado pelo Player, que referencia padrões por id via
+ *  `question_patterns`/`question_attempts.recognition_pattern_id`, nunca
+ *  por slug). Um id inexistente e um id de rascunho retornam exatamente a
+ *  mesma coisa (null) — nunca revela a existência de um padrão não
+ *  publicado. */
+export async function findPublishedPatternById(db: D1Database, id: string): Promise<PatternRow | null> {
+  const row = await db
+    .prepare("SELECT * FROM patterns WHERE id = ? AND editorial_status = ?")
+    .bind(id, STUDENT_VISIBLE_EDITORIAL_STATUS)
+    .first<PatternRow>();
+  return row ?? null;
+}
+
 export async function listAttributesForPatterns(
   db: D1Database,
   patternIds: string[]

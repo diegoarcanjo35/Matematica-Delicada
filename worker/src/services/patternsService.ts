@@ -29,6 +29,7 @@ import {
   type PatternRow,
   type StudentPatternProgressRow,
 } from "../repositories/patternsRepository";
+import { findTrainableQuestionForPattern, hasAnyPublishedQuestion } from "../repositories/questionRepository";
 import type { PatternAttributeType, PatternRelationType } from "../lib/patternsValidation";
 
 /** Representação explícita de um índice indisponível. `available: false` +
@@ -85,6 +86,14 @@ export interface PatternDetailDto extends PatternSummaryDto {
    *  é um zero REAL (não há nenhuma questão associada), nunca um número
    *  pedagógico inventado. */
   availableQuestionCount: number;
+  /** Sprint 8 v1.1 (seção 13 da ordem) — id da questão PUBLICADA cujo
+   *  padrão PRINCIPAL é este, escolhida de forma DETERMINÍSTICA (menor
+   *  `code` em ordem alfabética — nenhum algoritmo pedagógico, nenhuma
+   *  "adaptação"; ver `findTrainableQuestionForPattern` em
+   *  questionRepository.ts). `null` quando nenhuma questão publicada está
+   *  disponível — o botão "Treinar este padrão" fica desabilitado/"em
+   *  preparação" nesse caso, nunca oferece um caminho quebrado. */
+  trainableQuestionId: string | null;
 }
 
 export interface PatternListResultDto {
@@ -93,6 +102,11 @@ export interface PatternListResultDto {
   pageSize: number;
   total: number;
   totalPages: number;
+  /** Sprint 8 v1.1 (seção 13 da ordem) — reaproveitado pelo dashboard para o
+   *  CTA "Resolver uma questão": existe pelo menos UMA questão publicada
+   *  (fixture local) em todo o banco, sem nenhuma métrica/sequência
+   *  inventada. */
+  hasAnyTrainableQuestion: boolean;
 }
 
 function indexValue(raw: number | null | undefined): PatternIndexValue {
@@ -154,9 +168,10 @@ export async function listPatterns(
   // cliente saber que não há mais resultados.
   const rows = await listPublishedPatterns(db, userId, filters, pageSize, offset);
   const patternIds = rows.map((row) => row.id);
-  const [attributes, progressRows] = await Promise.all([
+  const [attributes, progressRows, hasAnyTrainableQuestion] = await Promise.all([
     listAttributesForPatterns(db, patternIds),
     listStudentPatternProgress(db, userId, patternIds),
+    hasAnyPublishedQuestion(db),
   ]);
   const progressByPatternId = new Map(progressRows.map((row) => [row.pattern_id, row]));
 
@@ -166,6 +181,7 @@ export async function listPatterns(
     pageSize,
     total,
     totalPages,
+    hasAnyTrainableQuestion,
   };
 }
 
@@ -179,10 +195,11 @@ export async function getPatternDetail(
   const pattern = await findPublishedPatternBySlug(db, slug);
   if (!pattern) return null;
 
-  const [attributes, relations, progress] = await Promise.all([
+  const [attributes, relations, progress, trainableQuestionId] = await Promise.all([
     listAttributesForPatterns(db, [pattern.id]),
     listRelationsForPattern(db, pattern.id),
     findStudentPatternProgress(db, userId, pattern.id),
+    findTrainableQuestionForPattern(db, pattern.id),
   ]);
 
   return {
@@ -204,6 +221,7 @@ export async function getPatternDetail(
       name: relation.name,
     })),
     availableQuestionCount: 0,
+    trainableQuestionId,
   };
 }
 

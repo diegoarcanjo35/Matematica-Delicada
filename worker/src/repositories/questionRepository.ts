@@ -884,3 +884,32 @@ export function buildDeleteMutationCheckStatement(db: D1Database, id: string): D
 export function buildDeleteCollectionMutationReceiptStatement(db: D1Database, id: string): D1PreparedStatement {
   return db.prepare(`DELETE FROM question_collection_mutation_receipts WHERE id = ?`).bind(id);
 }
+
+/** Sprint 8 v1.1 (seção 13 da ordem) — "Treinar este padrão" na ficha do
+ *  padrão: escolhe uma questão PUBLICADA cujo padrão PRINCIPAL é o
+ *  informado, de forma DETERMINÍSTICA (menor `code`, ordem alfabética) —
+ *  nunca um algoritmo pedagógico, nunca chamado de "adaptação" em lugar
+ *  nenhum da interface (a ordem exige "seleção técnica inicial"). `null`
+ *  quando nenhuma questão publicada está disponível. */
+export async function findTrainableQuestionForPattern(db: D1Database, patternId: string): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT q.id FROM questions q
+       JOIN question_patterns qp ON qp.question_id = q.id
+       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'
+       ORDER BY q.code ASC
+       LIMIT 1`
+    )
+    .bind(patternId)
+    .first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+/** Sprint 8 v1.1 (seção 13 da ordem) — dashboard: "existe pelo menos uma
+ *  questão publicada (fixture local) disponível para o CTA 'Resolver uma
+ *  questão'?" Uma checagem booleana leve, sem nenhuma métrica/sequência —
+ *  só um fato real do banco. */
+export async function hasAnyPublishedQuestion(db: D1Database): Promise<boolean> {
+  const row = await db.prepare("SELECT 1 as found FROM questions WHERE editorial_status = 'published' LIMIT 1").first<{ found: number }>();
+  return row !== null;
+}

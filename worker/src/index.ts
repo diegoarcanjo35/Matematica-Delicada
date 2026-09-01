@@ -9,6 +9,7 @@ import { handleScheduleRequest } from "./routes/schedule";
 import { handlePatternsRequest } from "./routes/patterns";
 import { handleEditorialQuestionsRequest } from "./routes/editorialQuestions";
 import { handleEditorialImportsRequest } from "./routes/editorialImports";
+import { handlePlayerRequest } from "./routes/player";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -44,6 +45,9 @@ export default {
 
         const editorialImportsResponse = await handleEditorialImportsRequest(request, env, url);
         if (editorialImportsResponse) return editorialImportsResponse;
+
+        const playerResponse = await handlePlayerRequest(request, env, url);
+        if (playerResponse) return playerResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;
