@@ -1,0 +1,257 @@
+/* Caderno de Erros — Sprint 9 v1.0. Mesmas convenções de
+   src/pages/patterns/PatternsPage.css e src/pages/player/PlayerPage.css:
+   tokens do sistema visual, grade fluida (sem largura fixa que force
+   rolagem horizontal em 360/390 px), foco visível herdado de
+   src/index.css. Nenhum estado é comunicado só por cor — todo estado tem
+   texto (ver `error-notebook__overdue-flag`, sempre com texto ao lado). */
+
+.error-notebook {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 100%;
+}
+
+.error-notebook--centered {
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.error-notebook__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.error-notebook__intro {
+  color: var(--color-text-secondary);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.error-notebook__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.error-notebook__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.error-notebook__field-label {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__field input,
+.error-notebook__field select,
+.error-notebook__field textarea {
+  width: 100%;
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  font: inherit;
+  color: inherit;
+}
+
+.error-notebook__checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.error-notebook__results-count {
+  min-height: 1.5em;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.error-notebook__card {
+  text-align: left;
+}
+
+.error-notebook__card-header {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.error-notebook__card-code {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__card-pattern {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__card-type,
+.error-notebook__card-status,
+.error-notebook__card-dates {
+  font-size: var(--font-size-sm);
+  margin: 0 0 var(--space-2);
+}
+
+.error-notebook__card-label {
+  font-weight: 700;
+}
+
+/* O texto "— revisão vencida" acompanha SEMPRE este destaque — a cor
+   nunca é o único sinal (seção 12.4 da ordem). */
+.error-notebook__overdue-flag {
+  color: var(--color-danger, #b3261e);
+}
+
+.error-notebook__card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.error-notebook__pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+.error-notebook__pagination-status {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__save-indicator {
+  min-height: 1.5em;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.error-notebook__save-indicator--error {
+  color: var(--color-danger, #b3261e);
+  font-weight: 600;
+}
+
+/* --- Detalhes --- */
+
+.error-notebook__detail {
+  max-width: 76ch;
+}
+
+.error-notebook__back {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.error-notebook__detail-heading {
+  margin: 0 0 var(--space-2);
+}
+
+.error-notebook__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.error-notebook__section h2,
+.error-notebook__section h3 {
+  margin: 0;
+}
+
+.error-notebook__alt-list {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.error-notebook__note-privacy {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.error-notebook__context-notice {
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+}
+
+.error-notebook__review-history {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.error-notebook__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 480px) {
+  .error-notebook__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .error-notebook__field {
+    flex-basis: 100%;
+  }
+
+  .error-notebook__card-actions,
+  .error-notebook__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .error-notebook * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

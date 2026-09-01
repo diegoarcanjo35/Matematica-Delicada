@@ -10,6 +10,7 @@ import { handlePatternsRequest } from "./routes/patterns";
 import { handleEditorialQuestionsRequest } from "./routes/editorialQuestions";
 import { handleEditorialImportsRequest } from "./routes/editorialImports";
 import { handlePlayerRequest } from "./routes/player";
+import { handleErrorNotebookRequest } from "./routes/errorNotebook";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -48,6 +49,9 @@ export default {
 
         const playerResponse = await handlePlayerRequest(request, env, url);
         if (playerResponse) return playerResponse;
+
+        const errorNotebookResponse = await handleErrorNotebookRequest(request, env, url);
+        if (errorNotebookResponse) return errorNotebookResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

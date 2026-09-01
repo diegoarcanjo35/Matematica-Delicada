@@ -49,6 +49,7 @@ import {
   buildRecognitionEventInsertStatement,
   buildRecognitionUpdateStatement,
   findActiveAttempt,
+  findActiveReviewAttempt,
   findAttemptByIdForUser,
   findBookmark,
   listAnswerEvents,
@@ -58,6 +59,18 @@ import {
 } from "../repositories/playerRepository";
 import { findDna, findQuestionById, listAlternatives, listImages, listPatternsForQuestion } from "../repositories/questionRepository";
 import { findPublishedPatternById, findPublishedPatternBySlug } from "../repositories/patternsRepository";
+import {
+  buildCompleteReviewEntryStatement,
+  buildCreateEntryStatement,
+  buildIncrementEntryStatement,
+  buildMarkInReviewStatement,
+  buildReviewEventInsertStatement,
+  findEntryById,
+  findEntryByUserAndQuestion,
+  hasSuccessfulReviewForQuestion,
+} from "../repositories/errorNotebookRepository";
+import { computeNextReviewSchedule, meetsCorrectionCriteria, scheduleFirstReview, type Clock } from "../lib/spacedReview";
+import { systemClock } from "./scheduleService";
 import {
   isValidAlternativeLetter,
   validateRecognitionClue,
@@ -80,6 +93,16 @@ export interface MutationResult<T> {
    *  `changed` (troca) para a rota decidir qual `AuditEventType` gravar
    *  (seção 15 da ordem: `question_answer_selected` vs `question_answer_changed`). */
   eventType?: "selected" | "changed";
+  /** Sprint 9 v1.0 — só usado por `confirmAnswer`, quando `changed: true`:
+   *  diz à rota (worker/src/routes/player.ts) qual(is) evento(s) de
+   *  auditoria do Caderno de Erros gravar (seção 11 da ordem) — nunca
+   *  decidido aqui no serviço em si, só reportado para a rota decidir.
+   *  `entryId` é sempre incluído quando algum evento do Caderno ocorreu. */
+  notebookOutcome?: {
+    entryId: string;
+    kind: "entry_created" | "entry_updated" | "review_completed";
+    corrected?: boolean;
+  };
 }
 
 const PUBLISHED = "published";
@@ -124,6 +147,12 @@ export interface AttemptStateDto {
    *  por `user_id` (`findBookmark`, mesmo padrão de todo o resto do
    *  módulo) — o bookmark de um aluno nunca aparece para outro. */
   isBookmarked: boolean;
+  /** Sprint 9 v1.0 — não-nulo só em tentativas iniciadas pelo Caderno de
+   *  Erros ("Corrigir meu erro"). `mode` continua `practice` tecnicamente
+   *  (seção 4.5 da ordem) — é este campo que diz ao frontend para
+   *  apresentar a tela como "Revisão" e oferecer volta ao Caderno depois
+   *  de confirmar. */
+  errorEntryId: string | null;
 }
 
 export interface AttemptFeedbackDto {
@@ -255,6 +284,7 @@ export async function toAttemptStateDto(db: D1Database, attempt: QuestionAttempt
     helpContent,
     feedback,
     isBookmarked: bookmark !== null,
+    errorEntryId: attempt.error_entry_id,
   };
 }
 
@@ -266,6 +296,21 @@ function isUniqueActiveAttemptViolation(error: unknown): boolean {
   // desde a Sprint 4. Checar o nome da tabela evita capturar por engano a
   // violação de outro índice único.
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("question_attempts");
+}
+
+/** Sprint 9 v1.0 — mesma classe de corrida que `isUniqueActiveAttemptViolation`,
+ *  um nível mais fundo: DUAS confirmações erradas concorrentes em
+ *  ATENÇÕES DIFERENTES (ex.: dois modos na mesma questão) podem, cada
+ *  uma, ler "a entrada ainda não existe" ANTES de qualquer uma commitar —
+ *  a PERDEDORA do INSERT real bate no índice único
+ *  (user_id, original_question_id) de `error_notebook_entries`. Isto NÃO
+ *  é uma inconsistência: é uma corrida legítima entre duas confirmações
+ *  reais e independentes disputando a MESMA entrada consolidada — a
+ *  perdedora deve ser tratada como conflito retentável (relê e, na
+ *  próxima chamada, segue pelo caminho de incremento em vez de criação),
+ *  nunca como uma falha genuína a relançar. */
+function isUniqueErrorNotebookEntryViolation(error: unknown): boolean {
+  return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("error_notebook_entries");
 }
 
 export async function startOrResumeAttempt(
@@ -300,6 +345,50 @@ export async function startOrResumeAttempt(
   }
 
   return { ok: true, changed: true, value: { attemptId: id } };
+}
+
+/** Sprint 9 v1.0 (seção 8.1/8.2 da ordem) — "Corrigir meu erro": cria ou
+ *  retoma a tentativa de revisão ligada a uma entrada do Caderno. Resumo
+ *  é por `error_entry_id` (nunca por questão+modo — a questão semelhante
+ *  pode mudar de seleção entre chamadas, mas a REVISÃO em andamento é
+ *  sempre a mesma). Criar uma nova tentativa E marcar a entrada
+ *  `in_review` acontecem no MESMO `db.batch()` — "marcar in_review
+ *  somente com tentativa válida" (seção 8.1) significa que as duas coisas
+ *  têm que acontecer juntas, nunca uma sem a outra. O modo persistido
+ *  continua `practice` (seção 4.5 da ordem — nenhum novo valor de `mode`
+ *  foi criado); é `error_entry_id` que diferencia visualmente na UI. */
+export async function startOrResumeReviewAttempt(
+  db: D1Database,
+  userId: string,
+  errorEntryId: string,
+  entryVersion: number,
+  questionId: string,
+  questionVersion: number
+): Promise<MutationResult<{ attemptId: string }>> {
+  const activeReview = await findActiveReviewAttempt(db, userId, errorEntryId);
+  if (activeReview) return { ok: true, changed: false, value: { attemptId: activeReview.id } };
+
+  const attemptId = newId();
+  const mutationId = newId();
+  const nowIso = new Date().toISOString();
+  try {
+    await db.batch([
+      buildCreateAttemptStatement(db, { id: attemptId, userId, questionId, questionVersion, mode: "practice", errorEntryId }),
+      buildMarkInReviewStatement(db, { entryId: errorEntryId, userId, guardVersion: entryVersion, mutationId, nowIso }),
+    ]);
+  } catch (error) {
+    if (isUniqueActiveAttemptViolation(error)) {
+      // Corrida real: outra chamada venceu entre a leitura acima e este
+      // INSERT — mesmo padrão de startOrResumeAttempt. Relê e devolve a
+      // que venceu (pode ter sido criada por QUALQUER dos dois índices
+      // únicos relevantes: por entrada, ou por questão+modo).
+      const stillActive = await findActiveReviewAttempt(db, userId, errorEntryId);
+      if (stillActive) return { ok: true, changed: false, value: { attemptId: stillActive.id } };
+    }
+    throw error;
+  }
+
+  return { ok: true, changed: true, value: { attemptId } };
 }
 
 export async function getAttempt(db: D1Database, userId: string, attemptId: string): Promise<QuestionAttemptRow | null> {
@@ -422,11 +511,174 @@ export async function saveAnswer(
   return { ok: true, changed: true, value: { attemptId }, eventType };
 }
 
+/** Sprint 9 v1.0 (seção 5.1 da ordem) — estatuto(s) adicionais para o MESMO
+ *  lote da confirmação, quando a resposta é ERRADA e a tentativa NÃO é uma
+ *  revisão (`error_entry_id IS NULL`): cria a primeira entrada do Caderno
+ *  ou incrementa a existente. Pré-leituras (existe entrada? qual a versão
+ *  atual? qual o padrão principal da questão?) rodam ANTES do
+ *  `db.batch()` — mesma disciplina do resto do serviço — mas a ESCRITA em
+ *  si só é decidida aqui para entrar no MESMO lote que o UPDATE central e
+ *  o evento 'confirmed', nunca uma transação separada. */
+interface NotebookBatchAddition {
+  statements: D1PreparedStatement[];
+  outcome: NonNullable<MutationResult<unknown>["notebookOutcome"]>;
+}
+
+async function buildWrongAnswerRegistrationStatements(
+  db: D1Database,
+  userId: string,
+  attempt: QuestionAttemptRow,
+  mutationId: string,
+  now: Date
+): Promise<NotebookBatchAddition> {
+  const nowIso = now.toISOString();
+  const existing = await findEntryByUserAndQuestion(db, userId, attempt.question_id);
+  if (existing) {
+    const { nextReviewAt } = scheduleFirstReview(now);
+    return {
+      statements: [
+        buildIncrementEntryStatement(db, {
+          entryId: existing.id,
+          userId,
+          guardVersion: existing.version,
+          mutationId,
+          latestAttemptId: attempt.id,
+          nowIso,
+          nextReviewAt,
+        }),
+      ],
+      outcome: { entryId: existing.id, kind: "entry_updated" },
+    };
+  }
+  const patterns = await listPatternsForQuestion(db, attempt.question_id);
+  const principal = patterns.find((p) => p.role === "principal") ?? null;
+  const { nextReviewAt } = scheduleFirstReview(now);
+  const newEntryId = newId();
+  return {
+    statements: [
+      buildCreateEntryStatement(db, {
+        id: newEntryId,
+        userId,
+        originalQuestionId: attempt.question_id,
+        originalAttemptId: attempt.id,
+        primaryPatternId: principal?.pattern_id ?? null,
+        mutationId,
+        nowIso,
+        nextReviewAt,
+      }),
+    ],
+    outcome: { entryId: newEntryId, kind: "entry_created" },
+  };
+}
+
+/** Sprint 9 v1.0 (seção 8.3) — estatuto(s) adicionais para o MESMO lote da
+ *  confirmação, quando a tentativa É uma revisão (`error_entry_id`
+ *  presente): grava exatamente um `error_review_events` MAIS a
+ *  atualização consolidada da entrada (estágio/status/próxima revisão),
+ *  usando a regra técnica provisória centralizada em
+ *  worker/src/lib/spacedReview.ts — nunca decidida aqui. Lança se a
+ *  entrada não existir mais (não deveria acontecer — `error_entry_id`
+ *  aponta para uma linha real — mas se acontecer, melhor um erro real do
+ *  que silenciosamente pular a atualização do Caderno). */
+async function buildReviewCompletionStatements(
+  db: D1Database,
+  userId: string,
+  attempt: QuestionAttemptRow,
+  mutationId: string,
+  isCorrect: 0 | 1,
+  now: Date
+): Promise<NotebookBatchAddition> {
+  const entry = await findEntryById(db, attempt.error_entry_id!, userId);
+  if (!entry) throw new Error("Entrada do Caderno de Erros referenciada pela tentativa não foi encontrada.");
+
+  const result: "correct" | "incorrect" = isCorrect === 1 ? "correct" : "incorrect";
+  const { resultingStage, nextReviewAt } = computeNextReviewSchedule(entry.review_stage, result, now);
+  const usedDifferentQuestion = attempt.question_id !== entry.original_question_id;
+
+  let distinctIncrement: 0 | 1 = 0;
+  let distinctAfter = entry.distinct_review_questions_succeeded;
+  if (result === "correct") {
+    const alreadySucceeded = await hasSuccessfulReviewForQuestion(db, entry.id, attempt.question_id);
+    if (!alreadySucceeded) {
+      distinctIncrement = 1;
+      distinctAfter += 1;
+    }
+  }
+
+  // Critério provisório de "corrected" (seção 6.1) — precisa de pelo menos
+  // UMA revisão correta, alguma vez, numa questão DIFERENTE da original.
+  // Cobre tanto a revisão ATUAL (se for correta e usar questão diferente)
+  // quanto qualquer revisão correta PASSADA já registrada em
+  // error_review_events com `reviewed_question_id != original_question_id`
+  // — `distinct_review_questions_succeeded` sozinho não basta aqui porque
+  // ele conta questões distintas (poderia ser só a original repetida sob
+  // um id igual não é o caso, mas o contador não guarda POR SI SÓ "qual
+  // delas era a original"), então esta checagem direta no histórico é a
+  // fonte de verdade real.
+  const hasSuccessOnDifferentQuestion =
+    (result === "correct" && usedDifferentQuestion) || (await successOnDifferentQuestionExists(db, entry.id, entry.original_question_id));
+
+  const totalCorrectReviews = (await countCorrectReviewEvents(db, entry.id)) + (result === "correct" ? 1 : 0);
+
+  const isCorrected =
+    entry.status !== "archived" &&
+    meetsCorrectionCriteria({ totalCorrectReviews, distinctQuestionsSucceeded: distinctAfter, hasSuccessOnDifferentQuestion });
+
+  const nextStatus = isCorrected ? "corrected" : "scheduled";
+  const correctedAt = isCorrected ? now.toISOString() : entry.corrected_at;
+
+  const statements: D1PreparedStatement[] = [
+    buildCompleteReviewEntryStatement(db, {
+      entryId: entry.id,
+      userId,
+      guardVersion: entry.version,
+      mutationId,
+      resultingStage,
+      status: nextStatus,
+      nextReviewAt,
+      distinctIncrement,
+      correctedAt,
+      nowIso: now.toISOString(),
+    }),
+    buildReviewEventInsertStatement(db, {
+      id: mutationId,
+      entryId: entry.id,
+      userId,
+      attemptId: attempt.id,
+      reviewedQuestionId: attempt.question_id,
+      result,
+      previousStage: entry.review_stage,
+      resultingStage,
+      previousNextReviewAt: entry.next_review_at,
+      resultingNextReviewAt: nextReviewAt,
+      usedDifferentQuestion,
+    }),
+  ];
+  return { statements, outcome: { entryId: entry.id, kind: "review_completed", corrected: isCorrected } };
+}
+
+async function successOnDifferentQuestionExists(db: D1Database, entryId: string, originalQuestionId: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 as found FROM error_review_events WHERE entry_id = ? AND result = 'correct' AND reviewed_question_id != ? LIMIT 1")
+    .bind(entryId, originalQuestionId)
+    .first<{ found: number }>();
+  return row !== null;
+}
+
+async function countCorrectReviewEvents(db: D1Database, entryId: string): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) as total FROM error_review_events WHERE entry_id = ? AND result = 'correct'")
+    .bind(entryId)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
+}
+
 export async function confirmAnswer(
   db: D1Database,
   userId: string,
   attemptId: string,
-  expectedVersion: number
+  expectedVersion: number,
+  clock: Clock = systemClock
 ): Promise<MutationResult<{ attemptId: string }>> {
   const attempt = await findAttemptByIdForUser(db, attemptId, userId);
   if (!attempt) return { ok: false, notFound: true };
@@ -453,26 +705,54 @@ export async function confirmAnswer(
   const isCorrect: 0 | 1 = correct && correct.letter === attempt.selected_alternative ? 1 : 0;
 
   const mutationId = newId();
+  const now = clock.now();
+
+  // Sprint 9 v1.0 — mesma transação lógica que a confirmação do Player
+  // (seção 5.1/8.3 da ordem): estes statements extras (Caderno de Erros)
+  // entram no MESMO array, entre o UPDATE central e o evento 'confirmed'
+  // — nunca uma segunda chamada a db.batch(). Os triggers
+  // `trg_question_answer_events_require_error_entry`/
+  // `..._require_review_completion` (migrations/0014) exigem, ANTES do
+  // commit, que exatamente esta combinação já exista quando o INSERT do
+  // evento 'confirmed' rodar (último statement) — ver comentário extenso
+  // no topo do arquivo de migration.
+  let notebookAddition: NotebookBatchAddition | null = null;
+  if (attempt.error_entry_id) {
+    notebookAddition = await buildReviewCompletionStatements(db, userId, attempt, mutationId, isCorrect, now);
+  } else if (isCorrect === 0) {
+    notebookAddition = await buildWrongAnswerRegistrationStatements(db, userId, attempt, mutationId, now);
+  }
+
   try {
     await db.batch([
       buildConfirmUpdateStatement(db, { attemptId, userId, guardVersion: expectedVersion, mutationId, isCorrect }),
+      ...(notebookAddition?.statements ?? []),
       buildConfirmEventInsertStatement(db, { id: mutationId, attemptId, alternative: attempt.selected_alternative }),
     ]);
   } catch (error) {
     // Corrida: outra requisição simultânea (mesma expectedVersion) venceu —
     // exatamente UMA confirmação real acontece (o trigger de identidade
-    // garante que a perdedora nunca deixa nem núcleo nem evento
-    // parcialmente escritos); esta relê e trata como sucesso idempotente se
-    // o resultado já reflete o que ela pediria.
+    // garante que a perdedora nunca deixa nem núcleo, nem evento, nem
+    // Caderno de Erros parcialmente escritos); esta relê e trata como
+    // sucesso idempotente se o resultado já reflete o que ela pediria.
     const after = await findAttemptByIdForUser(db, attemptId, userId);
     if (after && after.status === "completed" && after.version === expectedVersion + 1) {
       return { ok: true, changed: false, value: { attemptId } };
+    }
+    if (isUniqueErrorNotebookEntryViolation(error)) {
+      // Corrida legítima na CRIAÇÃO da entrada do Caderno (duas
+      // confirmações erradas concorrentes em tentativas DIFERENTES, mesma
+      // questão original) — não é evidência de corrupção nesta tentativa
+      // específica (seu próprio guard pode ter passado normalmente); é
+      // conflito retentável: a próxima chamada relê e segue pelo caminho
+      // de INCREMENTO em vez de criação.
+      return { ok: false, conflict: true };
     }
     if (after && after.version === expectedVersion) throw error; // falha genuína, não conflito — ver saveRecognition acima.
     return { ok: false, conflict: true };
   }
 
-  return { ok: true, changed: true, value: { attemptId } };
+  return { ok: true, changed: true, value: { attemptId }, notebookOutcome: notebookAddition?.outcome };
 }
 
 /* -------------------------------------- Ajuda ------------------------------------- */

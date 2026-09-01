@@ -30,6 +30,12 @@ export interface QuestionAttemptRow {
   version: number;
   created_at: string;
   updated_at: string;
+  /** Sprint 9 v1.0 (migrations/0014, ALTER TABLE aditivo) — não-nulo só em
+   *  tentativas iniciadas pelo Caderno de Erros ("Corrigir meu erro"). O
+   *  Player continua persistindo `mode` tecnicamente como `practice` nessa
+   *  tentativa; é este campo que diz à interface para apresentar a tela
+   *  como "Revisão" (ver docs/CADERNO_ERROS_REVISAO.md). */
+  error_entry_id: string | null;
 }
 
 export interface QuestionAnswerEventRow {
@@ -104,6 +110,19 @@ export async function findActiveAttempt(
   return row ?? null;
 }
 
+/** Sprint 9 v1.0 (seção 8.1/8.2) — resumo/unicidade de revisão é por
+ *  ENTRADA (`error_entry_id`), nunca por questão+modo — o índice único
+ *  parcial `idx_question_attempts_one_active_review_per_entry`
+ *  (migrations/0014) é quem garante, no banco, que só existe UMA
+ *  tentativa `in_progress` ligada à mesma entrada por vez. */
+export async function findActiveReviewAttempt(db: D1Database, userId: string, errorEntryId: string): Promise<QuestionAttemptRow | null> {
+  const row = await db
+    .prepare("SELECT * FROM question_attempts WHERE user_id = ? AND error_entry_id = ? AND status = 'in_progress'")
+    .bind(userId, errorEntryId)
+    .first<QuestionAttemptRow>();
+  return row ?? null;
+}
+
 export async function listAnswerEvents(db: D1Database, attemptId: string): Promise<QuestionAnswerEventRow[]> {
   const result = await db
     .prepare("SELECT * FROM question_answer_events WHERE attempt_id = ? ORDER BY created_at ASC")
@@ -140,14 +159,14 @@ export async function findBookmark(db: D1Database, userId: string, questionId: s
 
 export function buildCreateAttemptStatement(
   db: D1Database,
-  params: { id: string; userId: string; questionId: string; questionVersion: number; mode: string }
+  params: { id: string; userId: string; questionId: string; questionVersion: number; mode: string; errorEntryId?: string | null }
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO question_attempts (id, user_id, question_id, question_version, mode, status)
-       VALUES (?, ?, ?, ?, ?, 'in_progress')`
+      `INSERT INTO question_attempts (id, user_id, question_id, question_version, mode, status, error_entry_id)
+       VALUES (?, ?, ?, ?, ?, 'in_progress', ?)`
     )
-    .bind(params.id, params.userId, params.questionId, params.questionVersion, params.mode);
+    .bind(params.id, params.userId, params.questionId, params.questionVersion, params.mode, params.errorEntryId ?? null);
 }
 
 /** Fragmento de guard COMPARTILHADO por toda mutação de tentativa: só afeta

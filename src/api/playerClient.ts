@@ -61,6 +61,9 @@ export interface AttemptState {
    *  (refresh/remontagem), nunca mais um estado só local que zera ao
    *  recarregar a página. */
   isBookmarked: boolean;
+  /** Sprint 9 v1.0 — não-nulo só em tentativas iniciadas pelo Caderno de
+   *  Erros ("Corrigir meu erro"). `mode` continua `practice` tecnicamente. */
+  errorEntryId: string | null;
 }
 
 export interface ApiFieldError {

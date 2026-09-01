@@ -164,6 +164,20 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
     if (result.changed) {
       await audit(env, "question_answer_confirmed", user.id, { attemptId });
       await audit(env, "question_attempt_completed", user.id, { attemptId });
+      // Sprint 9 v1.0 — auditoria do Caderno de Erros só quando a própria
+      // confirmação realmente mutou o Caderno (seção 11 da ordem: "somente
+      // em mutação real"), nunca em retry/no-op — `notebookOutcome` só vem
+      // preenchido quando o `db.batch()` da confirmação (playerService.ts)
+      // efetivamente gravou entrada/evento de revisão nesta chamada.
+      if (result.notebookOutcome) {
+        const { entryId, kind, corrected } = result.notebookOutcome;
+        if (kind === "entry_created") await audit(env, "error_notebook_entry_created", user.id, { entryId, attemptId });
+        if (kind === "entry_updated") await audit(env, "error_notebook_entry_updated", user.id, { entryId, attemptId });
+        if (kind === "review_completed") {
+          await audit(env, "error_notebook_review_completed", user.id, { entryId, attemptId });
+          if (corrected) await audit(env, "error_notebook_entry_corrected", user.id, { entryId });
+        }
+      }
     }
     const attempt = await getAttempt(env.DB, user.id, attemptId);
     const dto = attempt ? await toAttemptStateDto(env.DB, attempt) : null;

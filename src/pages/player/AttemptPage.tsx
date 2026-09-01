@@ -42,6 +42,16 @@ const MODE_LABELS: Record<string, string> = {
   recognition: "Reconhecimento",
 };
 
+/* Sprint 9 v1.0 (seção 4.5/13.1 da ordem) — o Player continua persistindo
+   `mode = "practice"` tecnicamente numa tentativa de revisão do Caderno de
+   Erros (nenhum novo valor de `mode` foi criado). `errorEntryId` não-nulo
+   é o único sinal usado aqui para apresentar a tela como "Revisão" em vez
+   do rótulo técnico "Prática" — ver docs/CADERNO_ERROS_REVISAO.md. */
+function modeLabel(attempt: AttemptState): string {
+  if (attempt.errorEntryId) return "Revisão";
+  return MODE_LABELS[attempt.mode] ?? attempt.mode;
+}
+
 const REPORT_CATEGORY_LABELS: Record<ProblemReportCategory, string> = {
   statement_problem: "Problema no enunciado",
   alternative_problem: "Problema numa alternativa",
@@ -398,9 +408,15 @@ export function AttemptPage() {
                 Denunciar problema
               </Button>
             </div>
-            <Link to="/" className="btn btn--primary">
-              <span>Voltar ao início</span>
-            </Link>
+            {attempt.errorEntryId ? (
+              <Link to={`/caderno-de-erros/${attempt.errorEntryId}`} className="btn btn--primary">
+                <span>Voltar ao Caderno de Erros</span>
+              </Link>
+            ) : (
+              <Link to="/" className="btn btn--primary">
+                <span>Voltar ao início</span>
+              </Link>
+            )}
           </div>
           <div role="status" aria-live="polite">
             {bookmarkMessage}
@@ -419,7 +435,7 @@ export function AttemptPage() {
         <Card className="player__card">
           <ProvisionalContentNotice />
           <header className="player__header">
-            <span className="player__mode-badge">{MODE_LABELS[attempt.mode] ?? attempt.mode}</span>
+            <span className="player__mode-badge">{modeLabel(attempt)}</span>
             <span className="player__elapsed">Tempo decorrido: {formatElapsed(attempt.startedAt)}</span>
           </header>
 
@@ -497,7 +513,7 @@ export function AttemptPage() {
       <Card className="player__card">
         <ProvisionalContentNotice />
         <header className="player__header">
-          <span className="player__mode-badge">{MODE_LABELS[attempt.mode] ?? attempt.mode}</span>
+          <span className="player__mode-badge">{modeLabel(attempt)}</span>
           <span>{attempt.selectedAlternative ? "Resposta selecionada" : "Aguardando resposta"}</span>
           <span className="player__elapsed">Tempo decorrido: {formatElapsed(attempt.startedAt)}</span>
         </header>

@@ -9,6 +9,7 @@ import { useAuth } from "../auth/useAuth";
 import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
 import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClient";
 import { fetchPatterns } from "../api/patternsClient";
+import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_ENEM_MAP,
@@ -37,9 +38,30 @@ export function DashboardPage() {
   const [patternsSummary, setPatternsSummary] = useState<
     { available: boolean; total: number; withEvidence: number; hasAnyTrainableQuestion: boolean } | null
   >(null);
+  /* Sprint 9 — resumo REAL do Caderno de Erros (seção 13.2 da ordem):
+     erros a revisar, revisões vencidas, CTA. Nenhuma métrica fabricada —
+     `available: false` (gate fechado) mostra o card "em preparação", igual
+     ao Cronograma/Padrões ENEM acima. */
+  const [errorNotebookSummary, setErrorNotebookSummary] = useState<
+    { active: number; overdue: number; corrected: number; total: number } | null
+  >(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
   const firstName = user?.name.trim().split(/\s+/)[0] ?? MOCK_STUDENT.firstName;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchErrorNotebookSummary()
+      .then((result) => {
+        if (!cancelled && result.available !== false && result.summary) setErrorNotebookSummary(result.summary);
+      })
+      .catch(() => {
+        // Sem Caderno de Erros disponível — o card mostra o estado "em preparação".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,6 +226,37 @@ export function DashboardPage() {
                 <span>Resolver uma questão</span>
               </Link>
             </p>
+          )}
+        </Card>
+
+        <Card className="dashboard__card">
+          <h3>Caderno de Erros</h3>
+          {errorNotebookSummary ? (
+            errorNotebookSummary.active === 0 ? (
+              <p className="dashboard__message">
+                Nenhum erro para revisar agora — assim que você confirmar uma resposta errada no
+                Player, ela aparece aqui automaticamente.
+              </p>
+            ) : (
+              <>
+                <p className="dashboard__stat">
+                  {errorNotebookSummary.active} {errorNotebookSummary.active === 1 ? "erro ativo" : "erros ativos"}
+                </p>
+                {errorNotebookSummary.overdue > 0 && (
+                  <p className="dashboard__message">
+                    {errorNotebookSummary.overdue} {errorNotebookSummary.overdue === 1 ? "revisão vencida" : "revisões vencidas"}.
+                  </p>
+                )}
+                <p className="dashboard__message">{errorNotebookSummary.corrected} corrigidos até agora.</p>
+              </>
+            )
+          ) : (
+            <p className="dashboard__message">O Caderno de Erros está em preparação técnica — ainda não disponível.</p>
+          )}
+          {errorNotebookSummary && (
+            <Link to="/caderno-de-erros" className="btn btn--primary">
+              <span>Ver Caderno de Erros</span>
+            </Link>
           )}
         </Card>
 

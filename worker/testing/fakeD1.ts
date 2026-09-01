@@ -752,6 +752,127 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada: question_help_events inserido sem question_attempts.last_mutation_id correspondente (por identidade)')
   END;
 END;
+
+-- Sprint 9 v1.0 (migration 0014) - Caderno de Erros e Revisao Espacada.
+-- Espelho manual do DDL de migrations/0014_error_notebook_spaced_review.sql -
+-- os dois precisam ser mantidos em sincronia.
+CREATE TABLE error_notebook_entries (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  original_question_id TEXT NOT NULL REFERENCES questions (id),
+  original_attempt_id TEXT NOT NULL REFERENCES question_attempts (id),
+  latest_attempt_id TEXT NOT NULL REFERENCES question_attempts (id),
+  primary_pattern_id TEXT REFERENCES patterns (id),
+  error_type TEXT NOT NULL DEFAULT 'unclassified' CHECK (error_type IN (
+    'unclassified', 'pattern_not_recognized', 'wrong_pattern', 'inadequate_strategy',
+    'interpretation', 'content_or_base', 'calculation', 'haste', 'time_shortage', 'marking_error'
+  )),
+  student_note TEXT,
+  status TEXT NOT NULL DEFAULT 'pending_understanding' CHECK (status IN (
+    'pending_understanding', 'scheduled', 'due', 'in_review', 'corrected', 'archived'
+  )),
+  error_count INTEGER NOT NULL DEFAULT 1 CHECK (error_count >= 1),
+  review_stage INTEGER NOT NULL DEFAULT 0 CHECK (review_stage >= 0),
+  distinct_review_questions_succeeded INTEGER NOT NULL DEFAULT 0 CHECK (distinct_review_questions_succeeded >= 0),
+  first_error_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_error_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_reviewed_at TEXT,
+  next_review_at TEXT NOT NULL DEFAULT (datetime('now', '+1 day')),
+  corrected_at TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX idx_error_notebook_entries_user_question ON error_notebook_entries (user_id, original_question_id);
+CREATE INDEX idx_error_notebook_entries_user ON error_notebook_entries (user_id);
+CREATE INDEX idx_error_notebook_entries_status ON error_notebook_entries (status);
+CREATE INDEX idx_error_notebook_entries_next_review ON error_notebook_entries (next_review_at);
+CREATE INDEX idx_error_notebook_entries_pattern ON error_notebook_entries (primary_pattern_id);
+
+CREATE TABLE error_review_events (
+  id TEXT PRIMARY KEY,
+  entry_id TEXT NOT NULL REFERENCES error_notebook_entries (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  attempt_id TEXT NOT NULL REFERENCES question_attempts (id),
+  reviewed_question_id TEXT NOT NULL REFERENCES questions (id),
+  result TEXT NOT NULL CHECK (result IN ('correct', 'incorrect')),
+  previous_stage INTEGER NOT NULL CHECK (previous_stage >= 0),
+  resulting_stage INTEGER NOT NULL CHECK (resulting_stage >= 0),
+  previous_next_review_at TEXT NOT NULL,
+  resulting_next_review_at TEXT NOT NULL,
+  used_different_question INTEGER NOT NULL CHECK (used_different_question IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_error_review_events_entry ON error_review_events (entry_id, created_at);
+CREATE UNIQUE INDEX idx_error_review_events_attempt_unique ON error_review_events (attempt_id);
+
+ALTER TABLE question_attempts ADD COLUMN error_entry_id TEXT REFERENCES error_notebook_entries (id);
+CREATE INDEX idx_question_attempts_error_entry ON question_attempts (error_entry_id);
+CREATE UNIQUE INDEX idx_question_attempts_one_active_review_per_entry
+  ON question_attempts (error_entry_id)
+  WHERE error_entry_id IS NOT NULL AND status = 'in_progress';
+
+-- Sprint 9 v1.1 - triggers reescritos para serem autossuficientes (nunca
+-- dependem de ordem relativa entre si nem do trigger de 0013). Espelho
+-- manual do DDL de migrations/0014 - os dois precisam ser mantidos em
+-- sincronia.
+CREATE TRIGGER trg_question_answer_events_require_error_entry
+AFTER INSERT ON question_answer_events
+FOR EACH ROW
+WHEN NEW.event_type = 'confirmed'
+BEGIN
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM question_attempts a
+      WHERE a.id = NEW.attempt_id
+        AND a.last_mutation_id = NEW.id
+        AND a.is_correct = 0
+        AND a.error_entry_id IS NULL
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM error_notebook_entries e
+      JOIN question_attempts a ON a.id = NEW.attempt_id
+      WHERE e.last_mutation_id = NEW.id
+        AND e.user_id = a.user_id
+        AND e.original_question_id = a.question_id
+    )
+    THEN RAISE(ABORT, 'invariante violada (autossuficiente): confirmacao incorreta sem entrada/atualizacao obrigatoria do Caderno de Erros (por identidade propria, mesmo usuario e mesma questao)')
+  END;
+END;
+
+CREATE TRIGGER trg_question_answer_events_require_review_completion
+AFTER INSERT ON question_answer_events
+FOR EACH ROW
+WHEN NEW.event_type = 'confirmed'
+BEGIN
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM question_attempts a
+      WHERE a.id = NEW.attempt_id
+        AND a.last_mutation_id = NEW.id
+        AND a.error_entry_id IS NOT NULL
+    )
+    AND NOT (
+      EXISTS (
+        SELECT 1 FROM error_review_events r
+        JOIN question_attempts a ON a.id = NEW.attempt_id
+        WHERE r.id = NEW.id
+          AND r.attempt_id = a.id
+          AND r.user_id = a.user_id
+          AND r.reviewed_question_id = a.question_id
+      )
+      AND EXISTS (
+        SELECT 1 FROM error_notebook_entries e
+        JOIN question_attempts a ON a.id = NEW.attempt_id
+        WHERE e.id = a.error_entry_id
+          AND e.last_mutation_id = NEW.id
+          AND e.user_id = a.user_id
+      )
+    )
+    THEN RAISE(ABORT, 'invariante violada (autossuficiente): confirmacao de revisao sem error_review_events/atualizacao de entrada correspondentes (por identidade propria, mesmo usuario e mesma questao)')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {

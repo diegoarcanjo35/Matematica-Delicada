@@ -38,7 +38,13 @@ export type AuditEventType =
   | "question_answer_confirmed"
   | "question_attempt_completed"
   | "question_saved_for_review"
-  | "question_problem_reported";
+  | "question_problem_reported"
+  | "error_notebook_entry_created"
+  | "error_notebook_entry_updated"
+  | "error_notebook_review_started"
+  | "error_notebook_review_completed"
+  | "error_notebook_entry_corrected"
+  | "error_notebook_entry_archived";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

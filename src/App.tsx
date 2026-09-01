@@ -22,6 +22,8 @@ import { PatternsPage } from "./pages/patterns/PatternsPage";
 import { PatternDetailPage } from "./pages/patterns/PatternDetailPage";
 import { QuestionStartPage } from "./pages/player/QuestionStartPage";
 import { AttemptPage } from "./pages/player/AttemptPage";
+import { ErrorNotebookListPage } from "./pages/errorNotebook/ErrorNotebookListPage";
+import { ErrorNotebookDetailPage } from "./pages/errorNotebook/ErrorNotebookDetailPage";
 import { EditorialQuestionsPage } from "./pages/editorial/EditorialQuestionsPage";
 import { EditorialQuestionFormPage } from "./pages/editorial/EditorialQuestionFormPage";
 import { EditorialImportsPage } from "./pages/editorial/EditorialImportsPage";
@@ -30,7 +32,7 @@ import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
 // Rotas do menu do aluno que já têm tela real e por isso NÃO recebem
 // placeholder: dashboard (/), cronograma (Sprint 5) e padrões ENEM (Sprint 6).
-const IMPLEMENTED_NAV_PATHS = new Set(["/", "/cronograma", "/padroes-enem"]);
+const IMPLEMENTED_NAV_PATHS = new Set(["/", "/cronograma", "/padroes-enem", "/caderno-de-erros"]);
 const PLACEHOLDER_ITEMS = STUDENT_NAV_ITEMS.filter((item) => !IMPLEMENTED_NAV_PATHS.has(item.path));
 
 export function App() {
@@ -127,6 +129,8 @@ export function App() {
             <Route path="/padroes-enem/:slug" element={<PatternDetailPage />} />
             <Route path="/questoes/:questionId" element={<QuestionStartPage />} />
             <Route path="/tentativas/:attemptId" element={<AttemptPage />} />
+            <Route path="/caderno-de-erros" element={<ErrorNotebookListPage />} />
+            <Route path="/caderno-de-erros/:entryId" element={<ErrorNotebookDetailPage />} />
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route
               path="/ajuda"

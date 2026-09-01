@@ -77,7 +77,25 @@ VALUES
    'Geometria espacial', 'Geometria plana', 'Reconhecer projeção ortogonal', 'Visualizar figuras espaciais',
    'dificil', 'autoral', NULL, NULL, 120, 'misto', 0,
    'draft', 'Fixture técnica interna', 'Uso interno de desenvolvimento — não publicável', NULL,
-   'fixture-fingerprint-q-05', 1);
+   'fixture-fingerprint-q-05', 1),
+  -- Sprint 9 v1.0 — segunda questão PUBLICADA do MESMO padrão principal de
+  -- fixture-q-04 (fixture-pat-04, "Mediana e Frequência"). Necessária para
+  -- demonstrar/testar o Caderno de Erros: sem uma segunda questão
+  -- semelhante publicada, a seleção determinística (seção 7 da ordem)
+  -- nunca teria uma alternativa real além da própria questão original, e o
+  -- critério de "outro contexto" (seção 6.1) nunca seria demonstrável de
+  -- ponta a ponta. Inserida já `published` diretamente (sem passar por
+  -- draft/in_review/approved) porque é uma fixture nova, não uma correção
+  -- de conteúdo existente — mesma convenção de simplicidade já usada para
+  -- não complicar o seed com um workflow editorial que não é o foco desta
+  -- sprint.
+  ('fixture-q-06', 'FIX-Q-06',
+   'FIXTURE TÉCNICA LOCAL — NÃO PUBLICAR — NÃO É QUESTÃO OFICIAL. Uma segunda tabela de frequência técnica de teste traz 9 valores distintos. Qual é o valor mediano dessa amostra fictícia?',
+   'FIXTURE TÉCNICA LOCAL — NÃO PUBLICAR — NÃO É QUESTÃO OFICIAL. Resolução técnica: ordenar os valores e localizar a posição central.',
+   'Estatística descritiva', 'Leitura de tabelas', 'Calcular mediana', 'Interpretar dados estatísticos',
+   'media', 'autoral', NULL, NULL, 90, 'escrito', 0,
+   'published', 'Fixture técnica interna', 'Uso interno de desenvolvimento — não publicável', NULL,
+   'fixture-fingerprint-q-06', 1);
 
 -- A questão FIX-Q-04 (aprovada) é elevada a `published` só neste seed — isto
 -- NUNCA acontece via API (publicação real exige workflow e papel admin
@@ -127,28 +145,37 @@ INSERT OR IGNORE INTO question_alternatives (id, question_id, letter, text, is_c
   ('fixture-q-05-alt-b', 'fixture-q-05', 'B', '[FIXTURE] Vista B', 1, 1),
   ('fixture-q-05-alt-c', 'fixture-q-05', 'C', '[FIXTURE] Vista C', 0, 2),
   ('fixture-q-05-alt-d', 'fixture-q-05', 'D', '[FIXTURE] Vista D', 0, 3),
-  ('fixture-q-05-alt-e', 'fixture-q-05', 'E', '[FIXTURE] Vista E', 0, 4);
+  ('fixture-q-05-alt-e', 'fixture-q-05', 'E', '[FIXTURE] Vista E', 0, 4),
+
+  ('fixture-q-06-alt-a', 'fixture-q-06', 'A', '[FIXTURE] Valor P', 0, 0),
+  ('fixture-q-06-alt-b', 'fixture-q-06', 'B', '[FIXTURE] Valor Q', 1, 1),
+  ('fixture-q-06-alt-c', 'fixture-q-06', 'C', '[FIXTURE] Valor R', 0, 2),
+  ('fixture-q-06-alt-d', 'fixture-q-06', 'D', '[FIXTURE] Valor S', 0, 3),
+  ('fixture-q-06-alt-e', 'fixture-q-06', 'E', '[FIXTURE] Valor T', 0, 4);
 
 INSERT OR IGNORE INTO question_dna (question_id, pista, estrategia, pegadinha, conteudo_apoio, resolucao, atalho, aprendizado_erro) VALUES
   ('fixture-q-01', '[FIXTURE] Dois valores no mesmo eixo.', '[FIXTURE] Ler os valores e montar a razão.', '[FIXTURE] Inverter numerador e denominador.', '[FIXTURE] Razão e proporção.', '[FIXTURE] Resolução técnica de teste.', NULL, '[FIXTURE] Confira sempre a ordem pedida na razão.'),
   ('fixture-q-02', '[FIXTURE] Escala do tipo 1:N.', '[FIXTURE] Multiplicar pela escala.', '[FIXTURE] Esquecer de converter unidade.', '[FIXTURE] Razão e proporção.', '[FIXTURE] Resolução técnica de teste.', '[FIXTURE] Atalho técnico de teste.', '[FIXTURE] Sempre converta a unidade antes de multiplicar.'),
   ('fixture-q-03', '[FIXTURE] Percentual único sobre valor único.', '[FIXTURE] Aplicar a taxa diretamente.', '[FIXTURE] Somar em vez de multiplicar.', '[FIXTURE] Porcentagem.', '[FIXTURE] Resolução técnica de teste.', NULL, '[FIXTURE] Porcentagem se aplica sobre o valor de referência.'),
   ('fixture-q-04', '[FIXTURE] Tabela de frequência.', '[FIXTURE] Ordenar e localizar o centro.', '[FIXTURE] Confundir mediana com média.', '[FIXTURE] Estatística descritiva.', '[FIXTURE] Resolução técnica de teste.', NULL, '[FIXTURE] Mediana exige ordenação prévia.'),
-  ('fixture-q-05', '[FIXTURE] Silhuetas parecidas nas alternativas.', '[FIXTURE] Fixar a direção do olhar.', '[FIXTURE] Considerar profundidade indevida.', '[FIXTURE] Geometria espacial.', '[FIXTURE] Resolução técnica de teste.', NULL, '[FIXTURE] Projeção ortogonal ignora a profundidade.');
+  ('fixture-q-05', '[FIXTURE] Silhuetas parecidas nas alternativas.', '[FIXTURE] Fixar a direção do olhar.', '[FIXTURE] Considerar profundidade indevida.', '[FIXTURE] Geometria espacial.', '[FIXTURE] Resolução técnica de teste.', NULL, '[FIXTURE] Projeção ortogonal ignora a profundidade.'),
+  ('fixture-q-06', '[FIXTURE] Segunda tabela de frequência.', '[FIXTURE] Ordenar e localizar o centro.', '[FIXTURE] Confundir mediana com média.', '[FIXTURE] Estatística descritiva.', '[FIXTURE] Resolução técnica de teste.', NULL, '[FIXTURE] Mediana exige ordenação prévia.');
 
 INSERT OR IGNORE INTO question_patterns (id, question_id, pattern_id, role) VALUES
   ('fixture-q-01-pat', 'fixture-q-01', 'fixture-pat-01', 'principal'),
   ('fixture-q-02-pat', 'fixture-q-02', 'fixture-pat-02', 'principal'),
   ('fixture-q-03-pat', 'fixture-q-03', 'fixture-pat-03', 'principal'),
   ('fixture-q-04-pat', 'fixture-q-04', 'fixture-pat-04', 'principal'),
-  ('fixture-q-05-pat', 'fixture-q-05', 'fixture-pat-05', 'principal');
+  ('fixture-q-05-pat', 'fixture-q-05', 'fixture-pat-05', 'principal'),
+  ('fixture-q-06-pat', 'fixture-q-06', 'fixture-pat-04', 'principal');
 
 INSERT OR IGNORE INTO question_tags (id, question_id, content, position) VALUES
   ('fixture-q-01-tag-1', 'fixture-q-01', 'fixture', 0),
   ('fixture-q-02-tag-1', 'fixture-q-02', 'fixture', 0),
   ('fixture-q-03-tag-1', 'fixture-q-03', 'fixture', 0),
   ('fixture-q-04-tag-1', 'fixture-q-04', 'fixture', 0),
-  ('fixture-q-05-tag-1', 'fixture-q-05', 'fixture', 0);
+  ('fixture-q-05-tag-1', 'fixture-q-05', 'fixture', 0),
+  ('fixture-q-06-tag-1', 'fixture-q-06', 'fixture', 0);
 
 INSERT OR IGNORE INTO question_history (id, question_id, user_id, action, from_status, to_status, version, metadata) VALUES
   ('fixture-q-01-hist-1', 'fixture-q-01', NULL, 'created', NULL, 'draft', 1, NULL),
@@ -160,4 +187,5 @@ INSERT OR IGNORE INTO question_history (id, question_id, user_id, action, from_s
   ('fixture-q-04-hist-1', 'fixture-q-04', NULL, 'created', NULL, 'draft', 1, NULL),
   ('fixture-q-04-hist-2', 'fixture-q-04', NULL, 'submitted_review', 'draft', 'in_review', 2, NULL),
   ('fixture-q-04-hist-3', 'fixture-q-04', NULL, 'approved', 'in_review', 'approved', 3, NULL),
-  ('fixture-q-05-hist-1', 'fixture-q-05', NULL, 'created', NULL, 'draft', 1, NULL);
+  ('fixture-q-05-hist-1', 'fixture-q-05', NULL, 'created', NULL, 'draft', 1, NULL),
+  ('fixture-q-06-hist-1', 'fixture-q-06', NULL, 'created', NULL, 'published', 1, NULL);
