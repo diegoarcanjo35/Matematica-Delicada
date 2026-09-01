@@ -69,6 +69,12 @@ export const STUDENT_NAV_ITEMS: NavItem[] = [
     description: "Sua agenda adaptativa — hoje, semana, mês e histórico.",
     icon: "📅",
   },
+  {
+    path: "/mapa-enem",
+    label: "Mapa ENEM",
+    description: "Sua evidência real por padrão — reconhecimento, prática, ajuda e revisão, sem fórmulas.",
+    icon: "🗺️",
+  },
 ];
 
 export const MOBILE_NAV_ITEMS: NavItem[] = [

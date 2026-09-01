@@ -1,0 +1,258 @@
+/* Mapa ENEM do Aluno — Sprint 10 v1.0. Mesmas convenções de
+   src/pages/errorNotebook/ErrorNotebookPage.css e
+   src/pages/patterns/PatternsPage.css: tokens do sistema visual, grade
+   fluida sem largura fixa (nunca força rolagem horizontal em 390px), foco
+   visível herdado de src/index.css. Preferência de lista/tabela acessível
+   em vez de gráfico complexo, mesmo precedente do Player/Padrões/Caderno
+   de Erros (seção 14 da ordem). Nenhum estado é comunicado só por cor —
+   todo rótulo de estado é sempre texto, nunca só uma bolinha colorida. */
+
+.mapa-enem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 100%;
+}
+
+.mapa-enem--centered {
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.mapa-enem__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mapa-enem__intro {
+  color: var(--color-text-secondary);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.mapa-enem__disclaimer {
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.mapa-enem__explanation summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.mapa-enem__explanation {
+  max-width: 68ch;
+}
+
+.mapa-enem__summary-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.mapa-enem__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.mapa-enem__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.mapa-enem__field-label {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.mapa-enem__field input,
+.mapa-enem__field select {
+  width: 100%;
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  font: inherit;
+  color: inherit;
+}
+
+.mapa-enem__checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.mapa-enem__results-count {
+  min-height: 1.5em;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.mapa-enem__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mapa-enem__group-title {
+  margin: 0;
+}
+
+.mapa-enem__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.mapa-enem__card {
+  text-align: left;
+}
+
+.mapa-enem__card-header {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.mapa-enem__card-code {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.mapa-enem__state-badge {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill, 999px);
+  border: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.mapa-enem__state-badge--revisao_pendente {
+  border-color: var(--color-danger, #b3261e);
+  color: var(--color-danger, #b3261e);
+}
+
+.mapa-enem__card-stats,
+.mapa-enem__card-dates {
+  font-size: var(--font-size-sm);
+  margin: 0 0 var(--space-2);
+}
+
+.mapa-enem__card-label {
+  font-weight: 700;
+}
+
+.mapa-enem__card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.mapa-enem__detail {
+  max-width: 76ch;
+}
+
+.mapa-enem__back {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.mapa-enem__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.mapa-enem__section h2 {
+  margin: 0;
+}
+
+.mapa-enem__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.mapa-enem__table caption {
+  text-align: left;
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
+
+.mapa-enem__table th,
+.mapa-enem__table td {
+  text-align: left;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mapa-enem__note {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.mapa-enem__timeline {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+@media (max-width: 480px) {
+  .mapa-enem__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mapa-enem__field {
+    flex-basis: 100%;
+  }
+
+  .mapa-enem__card-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mapa-enem__table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mapa-enem * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

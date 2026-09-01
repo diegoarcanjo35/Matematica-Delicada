@@ -11,6 +11,7 @@ import { handleEditorialQuestionsRequest } from "./routes/editorialQuestions";
 import { handleEditorialImportsRequest } from "./routes/editorialImports";
 import { handlePlayerRequest } from "./routes/player";
 import { handleErrorNotebookRequest } from "./routes/errorNotebook";
+import { handleStudentMetricsRequest } from "./routes/studentMetrics";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -52,6 +53,9 @@ export default {
 
         const errorNotebookResponse = await handleErrorNotebookRequest(request, env, url);
         if (errorNotebookResponse) return errorNotebookResponse;
+
+        const studentMetricsResponse = await handleStudentMetricsRequest(request, env, url);
+        if (studentMetricsResponse) return studentMetricsResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

@@ -3,16 +3,15 @@ import { Link } from "react-router-dom";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import { Modal } from "../components/Modal";
 import { ProgressBar } from "../components/ProgressBar";
 import { useAuth } from "../auth/useAuth";
 import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
 import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClient";
 import { fetchPatterns } from "../api/patternsClient";
 import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookClient";
+import { fetchStudentMetricsSummary, type StudentMetricsSummary } from "../api/studentMetricsClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
-  MOCK_ENEM_MAP,
   MOCK_PATTERN_CARDS,
   MOCK_STUDENT,
   MOCK_WEEK_EVOLUTION,
@@ -27,8 +26,14 @@ function timeOfDayGreeting(): string {
 }
 
 export function DashboardPage() {
-  const [isMapModalOpen, setIsMapModalOpen] = useState(false);
   const [scheduleSummary, setScheduleSummary] = useState<ScheduleSummary | null>(null);
+  /* Sprint 10 — resumo REAL do Mapa ENEM (seção 11 da ordem): substitui o
+     antigo card mocado (`MOCK_ENEM_MAP`) por dados vindos de
+     GET /api/student-metrics/summary. `available: false` (gate de
+     fixtures fechado) mostra o mesmo estado "em preparação" do resto do
+     namespace do aluno; `hasAnyEvidence: false` mostra um convite honesto,
+     nunca um 0%/domínio fabricado. */
+  const [metricsSummary, setMetricsSummary] = useState<StudentMetricsSummary | null>(null);
   /* Sprint 6 — resumo REAL do catálogo de padrões, sem nenhuma métrica
      fabricada: `total` é quantos padrões publicados o Worker devolveu e
      `withEvidence` é quantos deles têm evidência realmente registrada para
@@ -48,6 +53,20 @@ export function DashboardPage() {
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
   const firstName = user?.name.trim().split(/\s+/)[0] ?? MOCK_STUDENT.firstName;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchStudentMetricsSummary()
+      .then((result) => {
+        if (!cancelled && result.available !== false && result.summary) setMetricsSummary(result.summary);
+      })
+      .catch(() => {
+        // Sem Mapa ENEM disponível — o card mostra o estado "em preparação".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -109,8 +128,9 @@ export function DashboardPage() {
   return (
     <div className="dashboard">
       <p className="dashboard__mock-notice">
-        Sequência, Mapa ENEM e demais números abaixo (exceto os cards de Cronograma e
-        Padrões ENEM) são dados de demonstração — ainda não refletem seu progresso real.
+        Sequência, Maior Gargalo, Evolução da Semana e Padrões em destaque abaixo ainda são
+        dados de demonstração — ainda não refletem seu progresso real. Cronograma, Padrões
+        ENEM, Caderno de Erros e Mapa ENEM já mostram dados reais.
       </p>
 
       <header className="dashboard__greeting">
@@ -137,21 +157,40 @@ export function DashboardPage() {
       <div className="dashboard__grid">
         <Card className="dashboard__card">
           <h3>Seu Mapa ENEM</h3>
-          <p className="dashboard__stat">
-            {MOCK_ENEM_MAP.patternsDominated}/{MOCK_ENEM_MAP.patternsTotal} padrões dominados
-          </p>
-          <ProgressBar label="Progresso geral" value={MOCK_ENEM_MAP.overallPercent} />
-          <div className="dashboard__dual-stat">
-            <p>
-              Reconhecimento: <strong>{MOCK_ENEM_MAP.recognitionPercent}%</strong> — Muito bom!
-            </p>
-            <p>
-              Resolução: <strong>{MOCK_ENEM_MAP.resolutionPercent}%</strong> — Vamos evoluir!
-            </p>
-          </div>
-          <Button variant="secondary" onClick={() => setIsMapModalOpen(true)}>
-            Ver mapa completo
-          </Button>
+          {metricsSummary ? (
+            metricsSummary.hasAnyEvidence ? (
+              <>
+                <p className="dashboard__stat">
+                  {metricsSummary.totalPublishedPatterns - metricsSummary.patternsByState.sem_evidencias} de{" "}
+                  {metricsSummary.totalPublishedPatterns} padrões já têm alguma evidência registrada
+                </p>
+                {metricsSummary.pendingReviewCount > 0 && (
+                  <p className="dashboard__message">
+                    {metricsSummary.pendingReviewCount}{" "}
+                    {metricsSummary.pendingReviewCount === 1 ? "padrão com revisão pendente" : "padrões com revisão pendente"}.
+                  </p>
+                )}
+                <p className="dashboard__message">
+                  Nenhuma nota estilo TRI ou domínio definitivo é calculado — só evidência real por padrão.
+                </p>
+                <Link to="/mapa-enem" className="btn btn--primary">
+                  <span>Ver Mapa ENEM completo</span>
+                </Link>
+              </>
+            ) : (
+              <>
+                <p className="dashboard__message">
+                  Ainda sem evidências suficientes registradas em nenhum padrão. Assim que você praticar
+                  questões, elas aparecem aqui automaticamente.
+                </p>
+                <Link to="/mapa-enem" className="btn btn--primary">
+                  <span>Ver Mapa ENEM completo</span>
+                </Link>
+              </>
+            )
+          ) : (
+            <p className="dashboard__message">O Mapa ENEM está em preparação técnica — ainda não disponível.</p>
+          )}
         </Card>
 
         <Card className="dashboard__card">
@@ -318,18 +357,6 @@ export function DashboardPage() {
           ))}
         </div>
       </section>
-
-      <Modal
-        isOpen={isMapModalOpen}
-        title="Seu Mapa ENEM completo"
-        onClose={() => setIsMapModalOpen(false)}
-      >
-        <p>
-          A visão completa do Mapa ENEM, com todos os padrões e filtros, será implementada
-          em uma sprint posterior.
-        </p>
-        <Button onClick={() => setIsMapModalOpen(false)}>Entendi</Button>
-      </Modal>
     </div>
   );
 }

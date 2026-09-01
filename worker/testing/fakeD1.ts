@@ -873,6 +873,13 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada (autossuficiente): confirmacao de revisao sem error_review_events/atualizacao de entrada correspondentes (por identidade propria, mesmo usuario e mesma questao)')
   END;
 END;
+
+-- Sprint 10 v1.0 (migration 0015) - Metricas Centrais e Mapa ENEM: so
+-- indices, nenhuma tabela nova (agregacao 100% por consulta derivada).
+-- Espelho manual do DDL de migrations/0015_student_metrics_map.sql - os
+-- dois precisam ser mantidos em sincronia.
+CREATE INDEX idx_question_attempts_user_status ON question_attempts (user_id, status);
+CREATE INDEX idx_error_notebook_entries_user_status_review ON error_notebook_entries (user_id, status, next_review_at);
 `;
 
 export interface FakeD1RunResult {

@@ -1,0 +1,53 @@
+-- Sprint 10 v1.0 — Métricas Centrais e Mapa ENEM do Aluno. Puramente
+-- aditiva sobre o schema das Sprints 1-9 (0001-0014). Nenhuma migration
+-- anterior é editada.
+--
+-- DECISÃO DE PROJETO (documentada, seção 5 da ordem): esta migration NÃO
+-- cria nenhuma tabela de projeção persistida. O Mapa ENEM e o resumo do
+-- Dashboard são calculados por CONSULTAS DERIVADAS, em tempo de leitura,
+-- diretamente sobre `question_attempts`, `question_answer_events`,
+-- `question_recognition_events`, `question_help_events`,
+-- `error_notebook_entries`, `error_review_events` e `question_patterns`
+-- (todas já existentes desde as Sprints 6-9) — ver
+-- worker/src/repositories/studentMetricsRepository.ts.
+--
+-- Por quê: esta é uma sprint de agregação SOMENTE LEITURA. Uma tabela de
+-- projeção persistida exigiria toda a disciplina de atomicidade/
+-- idempotência/rebuild das Sprints 7-9 (triggers, identidade de mutação,
+-- reconstrução determinística) para um ganho de performance que, no
+-- volume de dados desta fase do projeto (fixtures locais, poucas dezenas
+-- de linhas por tabela), não se justifica. Ler direto das tabelas de
+-- evidência é, por construção, sempre exatamente consistente com a fonte
+-- de verdade — nunca pode "dessincronizar" de um jeito que uma projeção
+-- perene poderia. Se o volume real de produção um dia exigir cache, a
+-- introdução de uma tabela de projeção fica documentada aqui como
+-- decisão pendente futura, não como algo já necessário agora.
+--
+-- Como esta migration não persiste evidência nenhuma, os requisitos da
+-- seção 5 sobre projeções persistidas (escopo por user_id, atualização
+-- atômica, idempotência, ausência de duplicação por retry) são
+-- satisfeitos TRIVIALMENTE: não há nada para duplicar, nada para
+-- reconstruir, nada que possa ficar parcialmente atualizado — cada
+-- leitura já é, por si só, o resultado determinístico e completo da
+-- consulta sobre o estado real das tabelas de evidência no momento exato
+-- da leitura. A Sprint 10 não usa `rebuild` (seção 8 da ordem: só
+-- necessário "se uma projeção persistida realmente exigir reconstrução
+-- controlada" — não é o caso aqui) — por isso só 4 dos 5 endpoints
+-- possíveis foram implementados; documentado também em
+-- docs/METRICAS_MAPA_ENEM.md.
+--
+-- Esta migration só adiciona os DOIS índices que as consultas de
+-- agregação do Mapa ENEM realmente exercitam e que ainda não existiam:
+--   1) question_attempts(user_id, status) — toda consulta de métricas
+--      filtra por aluno E por tentativas `completed` (as únicas que podem
+--      contar como acerto/erro confirmado — seção 12: "tentativa
+--      incompleta nunca vira acerto/erro confirmado"); os índices já
+--      existentes desde 0013 (`idx_question_attempts_user`,
+--      `idx_question_attempts_question`) cobrem só uma coluna cada.
+--   2) error_notebook_entries(user_id, status, next_review_at) — a
+--      consulta de "próxima revisão pendente" (seção 9: "revisão
+--      pendente" nos filtros do Mapa) filtra e ordena pelas três colunas
+--      juntas; o índice único já existente
+--      (`idx_error_notebook_entries_user_question`) não serve para isso.
+CREATE INDEX IF NOT EXISTS idx_question_attempts_user_status ON question_attempts (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_error_notebook_entries_user_status_review ON error_notebook_entries (user_id, status, next_review_at);

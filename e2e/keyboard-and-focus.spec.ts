@@ -67,21 +67,29 @@ test.describe("Teclado e foco — navegação real em Chromium", () => {
     expect(outlineStyle).toBe("solid");
   });
 
-  test("8. modal tem comportamento mínimo correto de foco (abre, Escape fecha)", async ({
+  test("8. link do Mapa ENEM recebe foco e navega por teclado", async ({
     page,
   }) => {
+    // Sprint 10 — o antigo botão "Ver mapa completo" que abria um modal
+    // (dialog "Seu Mapa ENEM completo") foi substituído por um <Link>
+    // real para /mapa-enem. Este teste comprova o novo contrato: link
+    // real, nome acessível estável, foco visível e navegação por Enter —
+    // sem modal, sem Escape.
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/");
-    const openButton = page.getByRole("button", { name: "Ver mapa completo" });
-    await openButton.focus();
+    const mapLink = page.getByRole("link", { name: "Ver Mapa ENEM completo" });
+    await expect(mapLink).toHaveAttribute("href", "/mapa-enem");
+
+    await mapLink.focus();
+    await expect(mapLink).toBeFocused();
+
+    const focused = page.locator(":focus-visible");
+    await expect(focused).toHaveCount(1);
+    const outlineStyle = await focused.evaluate((el) => getComputedStyle(el).outlineStyle);
+    expect(outlineStyle).toBe("solid");
+
     await page.keyboard.press("Enter");
-
-    const dialog = page.getByRole("dialog", { name: "Seu Mapa ENEM completo" });
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toBeFocused();
-
-    await page.keyboard.press("Escape");
-    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/mapa-enem$/);
   });
 
   test("9. elementos interativos importantes são alcançáveis só com teclado", async ({
@@ -95,8 +103,29 @@ test.describe("Teclado e foco — navegação real em Chromium", () => {
     await expect(bottleneckButton).toBeFocused();
     await page.keyboard.press("Enter");
 
-    const mapButton = page.getByRole("button", { name: "Ver mapa completo" });
-    await mapButton.focus();
-    await expect(mapButton).toBeFocused();
+    // Sprint 10 — Mapa ENEM agora é um <Link> real (não mais um botão que
+    // abre modal). Recarrega para partir de um estado de foco conhecido no
+    // topo da página e comprova que o link é alcançável só com Tab
+    // (nenhum mouse), com nome acessível estável, e que a navegação
+    // funciona.
+    await page.goto("/");
+    const mapLink = page.getByRole("link", { name: "Ver Mapa ENEM completo" });
+    let reachedViaTab = false;
+    for (let i = 0; i < 40; i++) {
+      await page.keyboard.press("Tab");
+      const isFocused = await mapLink
+        .evaluate((el) => el === document.activeElement)
+        .catch(() => false);
+      if (isFocused) {
+        reachedViaTab = true;
+        break;
+      }
+    }
+    expect(reachedViaTab).toBe(true);
+    await expect(mapLink).toBeFocused();
+    await expect(mapLink).toHaveAccessibleName("Ver Mapa ENEM completo");
+
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/mapa-enem$/);
   });
 });
