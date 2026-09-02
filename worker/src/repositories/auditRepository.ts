@@ -44,7 +44,13 @@ export type AuditEventType =
   | "error_notebook_review_started"
   | "error_notebook_review_completed"
   | "error_notebook_entry_corrected"
-  | "error_notebook_entry_archived";
+  | "error_notebook_entry_archived"
+  | "daily_training_applied"
+  | "daily_training_item_started"
+  | "daily_training_item_completed"
+  | "daily_training_item_skipped"
+  | "daily_training_completed"
+  | "daily_training_abandoned";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

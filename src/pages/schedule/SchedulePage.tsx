@@ -79,6 +79,11 @@ function ActivityCard({ activity, onOpenDetail, onStart, onComplete, onDismiss, 
       <h3 className="schedule__card-title">{activity.title}</h3>
       <p className="schedule__card-objective">{activity.objective}</p>
       <p className="schedule__card-duration">Duração estimada: {activity.estimatedMinutes} min</p>
+      {activity.inDailyTraining && (
+        <p className="schedule__daily-training-notice" role="note">
+          Já está no treino de hoje
+        </p>
+      )}
       {activity.status === "blocked" && activity.lastTransitionReason && (
         <p className="schedule__card-block-reason">
           Motivo: {BLOCK_REASON_LABELS[activity.lastTransitionReason] ?? activity.lastTransitionReason}

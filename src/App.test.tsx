@@ -88,10 +88,61 @@ describe("App routing", () => {
       expect(screen.getByText("Seu Mapa ENEM")).toBeInTheDocument();
     });
 
-    it("renderiza uma página placeholder para uma rota estrutural", async () => {
+    it("renderiza a página REAL do Treino Diário (Sprint 11) — não é mais um placeholder", async () => {
+      // Mock LOCAL a este teste (nunca global/compartilhado — restaurado pelo
+      // afterEach de vi.unstubAllGlobals() do describe pai, igual a todo o
+      // resto do arquivo): a DailyTrainingPage real faz fetch de
+      // /api/daily-training/current e, sem lista ativa, de
+      // /api/daily-training/preview. Devolve "sem disponibilidade hoje" — um
+      // estado estável e determinístico da página real (não a tela de
+      // aplicar/carregar itens, que exigiria mockar todo o catálogo de
+      // questões) — para provar que a rota monta o COMPONENTE REAL, nunca a
+      // tela de erro genérica (ErrorState) que apareceria se a resposta não
+      // batesse com o formato esperado pelo cliente.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url.includes("/api/auth/session")) {
+            return new Response(JSON.stringify({ ok: true, user: MOCK_USER }), { status: 200 });
+          }
+          if (url.includes("/api/onboarding")) {
+            return new Response(JSON.stringify({ ok: true, profile: MOCK_COMPLETED_PROFILE }), { status: 200 });
+          }
+          if (url.includes("/api/daily-training/current")) {
+            return new Response(JSON.stringify({ ok: true, list: null }), { status: 200 });
+          }
+          if (url.includes("/api/daily-training/preview")) {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                preview: {
+                  date: "2026-09-02",
+                  timezone: "America/Sao_Paulo",
+                  hasAvailabilityToday: false,
+                  availableMinutesToday: 0,
+                  estimatedMinutes: 0,
+                  itemCount: 0,
+                  items: [],
+                  composition: [],
+                },
+              }),
+              { status: 200 }
+            );
+          }
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        })
+      );
+
       renderAt("/treino-diario");
       expect(await screen.findByRole("heading", { name: "Treino Diário" })).toBeInTheDocument();
-      expect(screen.getByText("Módulo em construção")).toBeInTheDocument();
+      expect(screen.getByText("Sem disponibilidade configurada para hoje")).toBeInTheDocument();
+      // Nunca aceitar o antigo placeholder nem a tela de erro genérica como
+      // um falso "sucesso" — a rota deixou de ser placeholder (seção 1 desta
+      // correção) e uma resposta mal-mockada deve falhar contra ESTE texto,
+      // não passar silenciosamente.
+      expect(screen.queryByText("Módulo em construção")).not.toBeInTheDocument();
+      expect(screen.queryByText("Não foi possível carregar o treino de hoje.")).not.toBeInTheDocument();
     });
 
     it("renderiza a navegação lateral com todos os itens do menu do aluno", async () => {

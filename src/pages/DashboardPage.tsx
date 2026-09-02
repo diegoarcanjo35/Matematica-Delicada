@@ -10,6 +10,7 @@ import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClien
 import { fetchPatterns } from "../api/patternsClient";
 import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookClient";
 import { fetchStudentMetricsSummary, type StudentMetricsSummary } from "../api/studentMetricsClient";
+import { fetchCurrent as fetchDailyTrainingCurrent, fetchPreview as fetchDailyTrainingPreview } from "../api/dailyTrainingClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_PATTERN_CARDS,
@@ -49,6 +50,13 @@ export function DashboardPage() {
      ao Cronograma/Padrões ENEM acima. */
   const [errorNotebookSummary, setErrorNotebookSummary] = useState<
     { active: number; overdue: number; corrected: number; total: number } | null
+  >(null);
+  /* Sprint 11 — card real do Treino Diário (seção 13 da ordem: "Dashboard
+     aponta para o treino real; card mostra lista ativa ou preview
+     disponível"). Nenhuma leitura cria lista — GET /current e GET
+     /preview são 100% somente leitura. */
+  const [dailyTrainingCard, setDailyTrainingCard] = useState<
+    { kind: "active"; itemCount: number; estimatedMinutes: number; doneCount: number } | { kind: "preview"; itemCount: number; estimatedMinutes: number } | { kind: "empty" } | null
   >(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
@@ -113,6 +121,33 @@ export function DashboardPage() {
       .catch(() => {
         // Sem catálogo disponível — o card mostra o estado "em preparação".
       });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const current = await fetchDailyTrainingCurrent();
+        if (cancelled || current.available === false) return;
+        if (current.list) {
+          const doneCount = current.list.items.filter((item) => item.status === "completed" || item.status === "skipped" || item.status === "blocked").length;
+          setDailyTrainingCard({ kind: "active", itemCount: current.list.itemCount, estimatedMinutes: current.list.estimatedMinutes, doneCount });
+          return;
+        }
+        const previewResult = await fetchDailyTrainingPreview();
+        if (cancelled || previewResult.available === false || !previewResult.preview) return;
+        if (previewResult.preview.itemCount === 0) {
+          setDailyTrainingCard({ kind: "empty" });
+        } else {
+          setDailyTrainingCard({ kind: "preview", itemCount: previewResult.preview.itemCount, estimatedMinutes: previewResult.preview.estimatedMinutes });
+        }
+      } catch {
+        // Sem Treino Diário disponível — o card mostra o estado "em preparação".
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -190,6 +225,39 @@ export function DashboardPage() {
             )
           ) : (
             <p className="dashboard__message">O Mapa ENEM está em preparação técnica — ainda não disponível.</p>
+          )}
+        </Card>
+
+        <Card className="dashboard__card">
+          <h3>Treino Diário</h3>
+          {dailyTrainingCard === null && (
+            <p className="dashboard__message">O Treino Diário está em preparação técnica — ainda não disponível.</p>
+          )}
+          {dailyTrainingCard?.kind === "active" && (
+            <>
+              <p className="dashboard__stat">
+                {dailyTrainingCard.doneCount} de {dailyTrainingCard.itemCount} questões — aproximadamente {dailyTrainingCard.estimatedMinutes} min
+              </p>
+              <Link to="/treino-diario" className="btn btn--primary">
+                <span>Continuar treino</span>
+              </Link>
+            </>
+          )}
+          {dailyTrainingCard?.kind === "preview" && (
+            <>
+              <p className="dashboard__stat">
+                {dailyTrainingCard.itemCount} {dailyTrainingCard.itemCount === 1 ? "questão" : "questões"} — aproximadamente{" "}
+                {dailyTrainingCard.estimatedMinutes} min
+              </p>
+              <Link to="/treino-diario" className="btn btn--primary">
+                <span>Começar treino</span>
+              </Link>
+            </>
+          )}
+          {dailyTrainingCard?.kind === "empty" && (
+            <p className="dashboard__message">
+              Sem disponibilidade ou sem questões elegíveis hoje. <Link to="/treino-diario">Ver detalhes</Link>
+            </p>
           )}
         </Card>
 

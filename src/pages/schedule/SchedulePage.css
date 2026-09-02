@@ -147,6 +147,14 @@
   margin: 0 0 var(--space-3);
 }
 
+/* Sprint 11 v1.0 — touch-point do Treino Diário (seção 13 daquela ordem). */
+.schedule__daily-training-notice {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--color-primary, #6b4ea3);
+  margin: 0 0 var(--space-2);
+}
+
 .schedule__calendar {
   display: flex;
   flex-direction: column;

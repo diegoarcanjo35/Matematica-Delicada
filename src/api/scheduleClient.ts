@@ -32,6 +32,9 @@ export interface ScheduleActivity {
   version: number;
   startedAt: string | null;
   completedAt: string | null;
+  /** Sprint 11 v1.0 — só preenchido de verdade na visão "today"; ver
+   *  worker/src/services/scheduleService.ts. */
+  inDailyTraining: boolean;
 }
 
 export type ScheduleView = "today" | "week" | "month" | "pending" | "reviews" | "assigned" | "history";

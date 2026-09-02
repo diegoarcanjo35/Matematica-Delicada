@@ -1,4 +1,5 @@
 import { findProfile } from "../repositories/onboardingRepository";
+import { listScheduleAssignmentIdsInActiveTraining } from "../repositories/dailyTrainingRepository";
 import {
   buildConditionalTransitionEventStatement,
   buildInsertAssignmentStatement,
@@ -115,9 +116,16 @@ export interface AssignmentView {
   // Só motivos técnicos fechados (start/complete/dismiss/reschedule/block) —
   // nunca texto livre, nunca conteúdo sensível (seção 3 da correção v1.1).
   lastTransitionReason: string | null;
+  /** Sprint 11 v1.0 (seção 13 daquela ordem) — "Cronograma consegue
+   *  indicar que o compromisso do dia entrou no treino". Só preenchido
+   *  (nunca `undefined`) na visão `today`; nas demais visões fica sempre
+   *  `false` — nunca calculado para outra data, que não faz sentido para
+   *  este conceito (o treino diário só existe "para hoje"). Somente
+   *  leitura: nenhum GET aqui cria lista de treino nenhuma. */
+  inDailyTraining: boolean;
 }
 
-function toView(assignment: ScheduleAssignmentRow, activity: ScheduleActivityRow, todayCivil: string): AssignmentView {
+function toView(assignment: ScheduleAssignmentRow, activity: ScheduleActivityRow, todayCivil: string, inDailyTrainingIds: Set<string> = new Set()): AssignmentView {
   return {
     id: assignment.id,
     activityId: activity.id,
@@ -139,16 +147,22 @@ function toView(assignment: ScheduleAssignmentRow, activity: ScheduleActivityRow
     version: assignment.version,
     startedAt: assignment.started_at,
     completedAt: assignment.completed_at,
+    inDailyTraining: inDailyTrainingIds.has(assignment.id),
   };
 }
 
-async function toViews(db: D1Database, assignments: ScheduleAssignmentRow[], todayCivil: string): Promise<AssignmentView[]> {
+async function toViews(
+  db: D1Database,
+  assignments: ScheduleAssignmentRow[],
+  todayCivil: string,
+  inDailyTrainingIds: Set<string> = new Set()
+): Promise<AssignmentView[]> {
   const activities = await listActivitiesByIds(db, [...new Set(assignments.map((a) => a.activity_id))]);
   const activityById = new Map(activities.map((activity) => [activity.id, activity]));
   return assignments
     .map((assignment) => {
       const activity = activityById.get(assignment.activity_id);
-      return activity ? toView(assignment, activity, todayCivil) : null;
+      return activity ? toView(assignment, activity, todayCivil, inDailyTrainingIds) : null;
     })
     .filter((view): view is AssignmentView => view !== null);
 }
@@ -228,8 +242,11 @@ export async function getActivitiesView(
   }
 
   if (view === "today") {
-    const assignments = await listAssignmentsInDateRange(db, userId, today, today);
-    return toViews(db, assignments, today);
+    const [assignments, inDailyTrainingIds] = await Promise.all([
+      listAssignmentsInDateRange(db, userId, today, today),
+      listScheduleAssignmentIdsInActiveTraining(db, userId, today),
+    ]);
+    return toViews(db, assignments, today, inDailyTrainingIds);
   }
 
   if (view === "week") {

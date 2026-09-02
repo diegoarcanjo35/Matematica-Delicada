@@ -290,7 +290,7 @@ export async function toAttemptStateDto(db: D1Database, attempt: QuestionAttempt
 
 /* -------------------------------- Início/retomada ------------------------------- */
 
-function isUniqueActiveAttemptViolation(error: unknown): boolean {
+export function isUniqueActiveAttemptViolation(error: unknown): boolean {
   // SQLite/D1 reportam violação de UNIQUE constraint na mensagem do erro —
   // mesmo padrão já usado por diagnosticService.ts:isUniqueActiveAttemptViolation
   // desde a Sprint 4. Checar o nome da tabela evita capturar por engano a
@@ -313,12 +313,33 @@ function isUniqueErrorNotebookEntryViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("error_notebook_entries");
 }
 
-export async function startOrResumeAttempt(
+/** Sprint 11 v1.1 (PO — correção de atomicidade do Treino Diário, seções
+ *  1-3): plano de statements para criar/retomar a tentativa, SEM
+ *  executá-los ainda. `startOrResumeAttempt` abaixo continua executando
+ *  este plano no SEU PRÓPRIO `db.batch()` (comportamento do Player
+ *  inalterado quando chamado diretamente pelas rotas dele); o Treino
+ *  Diário (worker/src/services/dailyTrainingService.ts:startItem) usa
+ *  ESTA função para compor os MESMOS statements, no MESMO `db.batch()`
+ *  que associa a tentativa ao item — nunca duas transações separadas,
+ *  nunca uma tentativa criada e só depois (numa chamada distinta)
+ *  associada. `statements` vem vazio quando `alreadyActive` é `true` (uma
+ *  tentativa retomável já existe — nada novo precisa ser criado). */
+export interface AttemptStartPlan {
+  attemptId: string;
+  alreadyActive: boolean;
+  statements: D1PreparedStatement[];
+}
+
+export type AttemptStartPlanResult =
+  | { ok: true; plan: AttemptStartPlan }
+  | { ok: false; notFound?: boolean; fieldErrors?: Record<string, string> };
+
+export async function planStartOrResumeAttempt(
   db: D1Database,
   userId: string,
   questionId: string,
   mode: string
-): Promise<MutationResult<{ attemptId: string }>> {
+): Promise<AttemptStartPlanResult> {
   if (!["learning", "practice", "recognition"].includes(mode)) {
     return { ok: false, fieldErrors: { mode: "Modo inválido." } };
   }
@@ -327,11 +348,32 @@ export async function startOrResumeAttempt(
   if (!question || question.editorial_status !== PUBLISHED) return { ok: false, notFound: true };
 
   const active = await findActiveAttempt(db, userId, questionId, mode);
-  if (active) return { ok: true, changed: false, value: { attemptId: active.id } };
+  if (active) return { ok: true, plan: { attemptId: active.id, alreadyActive: true, statements: [] } };
 
   const id = newId();
+  return {
+    ok: true,
+    plan: {
+      attemptId: id,
+      alreadyActive: false,
+      statements: [buildCreateAttemptStatement(db, { id, userId, questionId, questionVersion: question.version, mode })],
+    },
+  };
+}
+
+export async function startOrResumeAttempt(
+  db: D1Database,
+  userId: string,
+  questionId: string,
+  mode: string
+): Promise<MutationResult<{ attemptId: string }>> {
+  const planned = await planStartOrResumeAttempt(db, userId, questionId, mode);
+  if (!planned.ok) return planned;
+  const { plan } = planned;
+  if (plan.alreadyActive) return { ok: true, changed: false, value: { attemptId: plan.attemptId } };
+
   try {
-    await db.batch([buildCreateAttemptStatement(db, { id, userId, questionId, questionVersion: question.version, mode })]);
+    await db.batch(plan.statements);
   } catch (error) {
     if (isUniqueActiveAttemptViolation(error)) {
       // Corrida real: outra requisição venceu entre a leitura acima e este
@@ -344,7 +386,7 @@ export async function startOrResumeAttempt(
     throw error;
   }
 
-  return { ok: true, changed: true, value: { attemptId: id } };
+  return { ok: true, changed: true, value: { attemptId: plan.attemptId } };
 }
 
 /** Sprint 9 v1.0 (seção 8.1/8.2 da ordem) — "Corrigir meu erro": cria ou
@@ -357,6 +399,36 @@ export async function startOrResumeAttempt(
  *  têm que acontecer juntas, nunca uma sem a outra. O modo persistido
  *  continua `practice` (seção 4.5 da ordem — nenhum novo valor de `mode`
  *  foi criado); é `error_entry_id` que diferencia visualmente na UI. */
+/** Sprint 11 v1.1 (PO — mesma correção de atomicidade, caminho de revisão):
+ *  plano de statements (criar tentativa + marcar `in_review`) SEM
+ *  executá-los — mesmo papel de `planStartOrResumeAttempt` acima. */
+export async function planStartOrResumeReviewAttempt(
+  db: D1Database,
+  userId: string,
+  errorEntryId: string,
+  entryVersion: number,
+  questionId: string,
+  questionVersion: number
+): Promise<AttemptStartPlanResult> {
+  const activeReview = await findActiveReviewAttempt(db, userId, errorEntryId);
+  if (activeReview) return { ok: true, plan: { attemptId: activeReview.id, alreadyActive: true, statements: [] } };
+
+  const attemptId = newId();
+  const mutationId = newId();
+  const nowIso = new Date().toISOString();
+  return {
+    ok: true,
+    plan: {
+      attemptId,
+      alreadyActive: false,
+      statements: [
+        buildCreateAttemptStatement(db, { id: attemptId, userId, questionId, questionVersion, mode: "practice", errorEntryId }),
+        buildMarkInReviewStatement(db, { entryId: errorEntryId, userId, guardVersion: entryVersion, mutationId, nowIso }),
+      ],
+    },
+  };
+}
+
 export async function startOrResumeReviewAttempt(
   db: D1Database,
   userId: string,
@@ -365,17 +437,13 @@ export async function startOrResumeReviewAttempt(
   questionId: string,
   questionVersion: number
 ): Promise<MutationResult<{ attemptId: string }>> {
-  const activeReview = await findActiveReviewAttempt(db, userId, errorEntryId);
-  if (activeReview) return { ok: true, changed: false, value: { attemptId: activeReview.id } };
+  const planned = await planStartOrResumeReviewAttempt(db, userId, errorEntryId, entryVersion, questionId, questionVersion);
+  if (!planned.ok) return planned;
+  const { plan } = planned;
+  if (plan.alreadyActive) return { ok: true, changed: false, value: { attemptId: plan.attemptId } };
 
-  const attemptId = newId();
-  const mutationId = newId();
-  const nowIso = new Date().toISOString();
   try {
-    await db.batch([
-      buildCreateAttemptStatement(db, { id: attemptId, userId, questionId, questionVersion, mode: "practice", errorEntryId }),
-      buildMarkInReviewStatement(db, { entryId: errorEntryId, userId, guardVersion: entryVersion, mutationId, nowIso }),
-    ]);
+    await db.batch(plan.statements);
   } catch (error) {
     if (isUniqueActiveAttemptViolation(error)) {
       // Corrida real: outra chamada venceu entre a leitura acima e este
@@ -388,7 +456,7 @@ export async function startOrResumeReviewAttempt(
     throw error;
   }
 
-  return { ok: true, changed: true, value: { attemptId } };
+  return { ok: true, changed: true, value: { attemptId: plan.attemptId } };
 }
 
 export async function getAttempt(db: D1Database, userId: string, attemptId: string): Promise<QuestionAttemptRow | null> {

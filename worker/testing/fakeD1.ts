@@ -880,6 +880,113 @@ END;
 -- dois precisam ser mantidos em sincronia.
 CREATE INDEX idx_question_attempts_user_status ON question_attempts (user_id, status);
 CREATE INDEX idx_error_notebook_entries_user_status_review ON error_notebook_entries (user_id, status, next_review_at);
+
+-- Sprint 11 v1.0 (migration 0016) - Treino Diario Real e Listas Adaptativas.
+-- Espelho manual do DDL de migrations/0016_daily_training_lists.sql - os
+-- dois precisam ser mantidos em sincronia.
+CREATE TABLE daily_training_lists (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  training_date TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'abandoned')),
+  estimated_minutes INTEGER NOT NULL CHECK (estimated_minutes >= 0),
+  item_count INTEGER NOT NULL CHECK (item_count > 0),
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+CREATE INDEX idx_daily_training_lists_user_date ON daily_training_lists (user_id, training_date);
+CREATE INDEX idx_daily_training_lists_user_status ON daily_training_lists (user_id, status);
+CREATE UNIQUE INDEX idx_daily_training_lists_one_active_per_day
+  ON daily_training_lists (user_id, training_date)
+  WHERE status = 'active';
+
+CREATE TABLE daily_training_items (
+  id TEXT PRIMARY KEY,
+  list_id TEXT NOT NULL REFERENCES daily_training_lists (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  primary_pattern_id TEXT REFERENCES patterns (id),
+  origin TEXT NOT NULL CHECK (origin IN (
+    'overdue_review', 'scheduled_review', 'development', 'consistency', 'schedule_commitment'
+  )),
+  reason TEXT NOT NULL CHECK (reason IN (
+    'overdue_review', 'schedule_commitment', 'pattern_in_development',
+    'pattern_initial_evidence', 'pattern_maintenance', 'pattern_exploration'
+  )),
+  player_mode TEXT NOT NULL CHECK (player_mode IN ('learning', 'practice', 'recognition')),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  estimated_minutes INTEGER NOT NULL CHECK (estimated_minutes > 0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'skipped', 'blocked')),
+  question_attempt_id TEXT REFERENCES question_attempts (id),
+  error_entry_id TEXT REFERENCES error_notebook_entries (id),
+  source_schedule_assignment_id TEXT REFERENCES schedule_activity_assignments (id),
+  skip_reason TEXT CHECK (skip_reason IN ('not_now', 'too_hard', 'already_know', 'out_of_time')),
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_daily_training_items_list ON daily_training_items (list_id);
+CREATE INDEX idx_daily_training_items_user ON daily_training_items (user_id);
+CREATE INDEX idx_daily_training_items_attempt ON daily_training_items (question_attempt_id);
+CREATE UNIQUE INDEX idx_daily_training_items_list_question ON daily_training_items (list_id, question_id);
+CREATE UNIQUE INDEX idx_daily_training_items_list_position ON daily_training_items (list_id, position);
+CREATE UNIQUE INDEX idx_daily_training_items_attempt_unique
+  ON daily_training_items (question_attempt_id)
+  WHERE question_attempt_id IS NOT NULL;
+
+CREATE TABLE daily_training_events (
+  id TEXT PRIMARY KEY,
+  list_id TEXT NOT NULL REFERENCES daily_training_lists (id),
+  item_id TEXT REFERENCES daily_training_items (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'list_created', 'item_started', 'item_completed', 'item_skipped', 'item_blocked',
+    'list_completed', 'list_abandoned'
+  )),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_daily_training_events_list ON daily_training_events (list_id, created_at);
+CREATE INDEX idx_daily_training_events_item ON daily_training_events (item_id);
+
+CREATE TRIGGER trg_daily_training_events_require_identity
+AFTER INSERT ON daily_training_events
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NEW.event_type IN ('list_created', 'list_completed', 'list_abandoned')
+     AND NOT EXISTS (
+       SELECT 1 FROM daily_training_lists
+       WHERE id = NEW.list_id AND user_id = NEW.user_id AND last_mutation_id = NEW.id
+     )
+    THEN RAISE(ABORT, 'invariante violada: evento de lista sem daily_training_lists.last_mutation_id correspondente (por identidade)')
+  END;
+
+  SELECT CASE
+    WHEN NEW.event_type = 'list_created'
+     AND (
+       (SELECT item_count FROM daily_training_lists WHERE id = NEW.list_id)
+       IS NOT (SELECT COUNT(*) FROM daily_training_items WHERE list_id = NEW.list_id)
+     )
+    THEN RAISE(ABORT, 'invariante violada: list_created com item_count divergente da contagem real de itens')
+  END;
+
+  SELECT CASE
+    WHEN NEW.event_type IN ('item_started', 'item_completed', 'item_skipped', 'item_blocked')
+     AND (
+       NEW.item_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM daily_training_items
+         WHERE id = NEW.item_id AND list_id = NEW.list_id AND user_id = NEW.user_id AND last_mutation_id = NEW.id
+       )
+     )
+    THEN RAISE(ABORT, 'invariante violada: evento de item sem daily_training_items.last_mutation_id correspondente (por identidade, mesma lista, mesmo usuário)')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {
@@ -902,6 +1009,11 @@ class FakeD1PreparedStatement {
   async first<T>(): Promise<T | null> {
     const stmt = this.fakeDb.sqlite.prepare(this.sql);
     const row = stmt.get(...(this.params as never[]));
+    // PO v1.2 — se houver uma "porta" (pauseReadsMatching) ativa para este
+    // SQL, o valor já foi lido de verdade (reflete o estado real do banco
+    // NESTE instante) antes de bloquear — só o RETORNO ao chamador é
+    // atrasado, nunca a leitura em si.
+    await this.fakeDb.maybeWaitAfterRead(this.sql);
     return (row as T | undefined) ?? null;
   }
 
@@ -923,9 +1035,18 @@ class FakeD1PreparedStatement {
   }
 }
 
+interface ReadGate {
+  pattern: RegExp;
+  hitsNeeded: number;
+  hitsSoFar: number;
+  arrivedResolve: () => void;
+  releaseGate: Promise<void>;
+}
+
 export class FakeD1Database {
   readonly sqlite: DatabaseSync;
   private failOnce: RegExp | null = null;
+  private readGate: ReadGate | null = null;
   // Serializa batches concorrentes na ordem de chegada — replica o
   // comportamento de single-writer do SQLite/D1 e evita que duas transações
   // "fake" se interleavem por causa dos microtasks do async/await do JS.
@@ -947,6 +1068,51 @@ export class FakeD1Database {
       this.failOnce = null;
       throw new Error("forced_failure_for_test");
     }
+  }
+
+  /* PO v1.2 (correção do TOCTOU de mutationId, worker/src/services/
+     dailyTrainingService.ts:startItem) — o entrelaçamento "natural" de
+     microtasks entre duas chamadas concorrentes via Promise.all/allSettled
+     NÃO é determinístico (depende do número exato de `await`s em cada
+     caminho, que pode divergir entre dois itens/listas diferentes): não
+     basta para PROVAR uma corrida real de forma repetível. Esta "porta"
+     (mesmo espírito de failNextMatching, mas para pausar em vez de
+     falhar) permite a um teste bloquear as próximas `hitsNeeded` leituras
+     (`.first()`) cujo SQL bata com `pattern` — cada uma já executou a
+     leitura REAL contra o SQLite (reflete o estado verdadeiro do banco
+     naquele instante) antes de bloquear; só o retorno ao chamador é
+     atrasado. Quando a última leitura esperada chega, `arrived` resolve —
+     o teste então pode fazer asserções (opcional) e chamar `release()`
+     para liberar TODAS as leituras pausadas de uma vez, deixando-as
+     prosseguir para a escrita concorrente de verdade (serializada pelo
+     `writeLock` de `batch()` acima, exatamente como duas conexões reais
+     do D1 disputariam a mesma constraint). Nunca usado em código de
+     produção — só neste fake de teste. */
+  pauseReadsMatching(pattern: RegExp, hitsNeeded: number): { arrived: Promise<void>; release: () => void } {
+    let arrivedResolve!: () => void;
+    const arrived = new Promise<void>((resolve) => {
+      arrivedResolve = resolve;
+    });
+    let releaseResolve!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseResolve = resolve;
+    });
+    this.readGate = { pattern, hitsNeeded, hitsSoFar: 0, arrivedResolve, releaseGate };
+    return {
+      arrived,
+      release: () => {
+        this.readGate = null;
+        releaseResolve();
+      },
+    };
+  }
+
+  async maybeWaitAfterRead(sql: string): Promise<void> {
+    const gate = this.readGate;
+    if (!gate || !gate.pattern.test(sql)) return;
+    gate.hitsSoFar++;
+    if (gate.hitsSoFar >= gate.hitsNeeded) gate.arrivedResolve();
+    await gate.releaseGate;
   }
 
   prepare(sql: string): FakeD1PreparedStatement {
