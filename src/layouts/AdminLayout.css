@@ -1,0 +1,7 @@
+/* Layout administrativo — reaproveita .student-layout/.sidebar/.mobile-nav
+   (mesmo raciocínio de src/layouts/TeacherLayout.css). Conteúdo um pouco
+   mais largo para caber a tabela de usuários/vínculos sem quebrar layout
+   em telas médias. */
+.admin-layout .student-layout__content {
+  max-width: 1200px;
+}

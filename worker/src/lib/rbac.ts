@@ -38,3 +38,25 @@ export async function resolveTeacherRole(db: D1Database, userId: string): Promis
   const roleNames = await listRoleNamesForUser(db, userId);
   return roleNames.includes("teacher") ? "teacher" : null;
 }
+
+/* Sprint 15 v1.0, seção 5/6 da ordem — RBAC da área administrativa. `admin`
+   JÁ EXISTIA no CHECK de roles.name desde a migration 0008 (Sprint 7),
+   sempre reservado para o topo do RBAC editorial (resolveEditorialRole
+   acima já trata `admin` como superconjunto de `editor`), mas nunca antes
+   consultado como um papel próprio e independente de área administrativa —
+   exatamente a mesma situação de `teacher` até a Sprint 14. MESMO padrão:
+   nenhuma tabela paralela, nenhum campo novo, só mais uma função
+   `resolveXRole` que consulta user_roles/roles pelo `userId` da sessão já
+   validada — NUNCA por qualquer campo enviado pelo cliente (ordem seção 5:
+   "nunca aceitar role/adminId enviados pelo cliente como fonte de
+   verdade"). Deliberadamente NÃO herda de editor/teacher nem é herdado por
+   eles — um editor sem `admin` explícito não deve conseguir gerenciar
+   usuários/papéis/vínculos, e um `admin` administrativo não precisa também
+   ser `teacher` para gerenciar vínculos alheios (a área admin gerencia o
+   vínculo dos OUTROS, nunca precisa "ser" professor). */
+export type AdminRole = "admin" | null;
+
+export async function resolveAdminRole(db: D1Database, userId: string): Promise<AdminRole> {
+  const roleNames = await listRoleNamesForUser(db, userId);
+  return roleNames.includes("admin") ? "admin" : null;
+}

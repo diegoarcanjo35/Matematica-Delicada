@@ -16,6 +16,8 @@ import { handleDailyTrainingRequest } from "./routes/dailyTraining";
 import { handleSimulationsRequest } from "./routes/simulations";
 import { handleWeeklyReviewRequest } from "./routes/weeklyReview";
 import { handleTeacherRequest } from "./routes/teacher";
+import { handleAdminRequest } from "./routes/admin";
+import { handleAdminBootstrapRequest } from "./routes/adminBootstrap";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -72,6 +74,12 @@ export default {
 
         const teacherResponse = await handleTeacherRequest(request, env, url);
         if (teacherResponse) return teacherResponse;
+
+        const adminResponse = await handleAdminRequest(request, env, url);
+        if (adminResponse) return adminResponse;
+
+        const adminBootstrapResponse = await handleAdminBootstrapRequest(request, env, url);
+        if (adminBootstrapResponse) return adminBootstrapResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

@@ -18,6 +18,24 @@ export interface Env {
   ENABLE_LOCAL_PATTERN_FIXTURES?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   ENABLE_LOCAL_EDITORIAL_FIXTURES?: string;
+  /** Sprint 15 v1.1 (adendo — Bootstrap Administrativo Seguro, seções H/N).
+   *  Segredo comparado em tempo constante contra o cabeçalho
+   *  X-Admin-Bootstrap-Secret em POST /api/admin-bootstrap/run (ver
+   *  worker/src/routes/adminBootstrap.ts). Deliberadamente NUNCA presente em
+   *  wrangler.jsonc NEM em wrangler.local.jsonc nesta sprint — ausente
+   *  (undefined/vazio) faz a rota inteira responder 404 sem revelar que
+   *  existe (mesmo padrão de falha fechada do resto de env.ts), então em
+   *  todo ambiente hoje (local, preview, produção) o mecanismo está
+   *  inteiramente inerte. Ao contrário das flags ENABLE_LOCAL_... / DEV_...
+   *  acima, esta variável NÃO entra em FORBIDDEN_DEV_VAR_NAMES
+   *  (scripts/check-deployable-d1-config.mjs): ela é, por desenho, a MESMA
+   *  variável que uma ordem futura e separada do PO (adendo seção T)
+   *  autorizaria configurar em produção via `wrangler secret put` — nunca
+   *  commitada em nenhum arquivo de configuração, nem local nem
+   *  implantável. Só é passada explicitamente em testes automatizados
+   *  (worker/testing/adminBootstrap.test.ts), nunca lida de um arquivo
+   *  versionado. */
+  ADMIN_BOOTSTRAP_SECRET?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -148,4 +166,19 @@ export function isLocalEditorialFixturesAllowed(env: Env, url: URL): boolean {
     isTrue(env.ENABLE_LOCAL_EDITORIAL_FIXTURES) &&
     isRecognizedLocalHostname(url)
   );
+}
+
+/* Sprint 15 v1.1 (adendo, seções H/N) — a ÚNICA condição de existência da
+   rota de bootstrap administrativo: um valor não-vazio configurado para
+   ADMIN_BOOTSTRAP_SECRET. Deliberadamente NÃO combinada com
+   hasLocalDevEnvironmentValue/isRecognizedLocalHostname como as flags
+   ENABLE_LOCAL_... / DEV_... acima — aquelas existem para conteúdo/atalhos que
+   NUNCA podem alcançar produção; este mecanismo, ao contrário, é desenhado
+   para ser utilizável em produção no futuro, mas só depois de uma ordem
+   separada do PO configurar um segredo real via `wrangler secret put`
+   (adendo seção T) — até lá, como nenhum arquivo de configuração deste
+   repositório declara a variável, esta função retorna false em todo
+   ambiente (local, preview, produção) e a rota responde 404. */
+export function isAdminBootstrapConfigured(env: Env): boolean {
+  return typeof env.ADMIN_BOOTSTRAP_SECRET === "string" && env.ADMIN_BOOTSTRAP_SECRET.length >= 20;
 }

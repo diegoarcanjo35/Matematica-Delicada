@@ -35,10 +35,16 @@ import { EditorialQuestionFormPage } from "./pages/editorial/EditorialQuestionFo
 import { EditorialImportsPage } from "./pages/editorial/EditorialImportsPage";
 import { RequireEditorialRole } from "./auth/RequireEditorialRole";
 import { RequireTeacherRole } from "./auth/RequireTeacherRole";
+import { RequireAdminRole } from "./auth/RequireAdminRole";
 import { TeacherLayout } from "./layouts/TeacherLayout";
 import { TeacherOverviewPage } from "./pages/teacher/TeacherOverviewPage";
 import { TeacherStudentsPage } from "./pages/teacher/TeacherStudentsPage";
 import { TeacherStudentDetailPage } from "./pages/teacher/TeacherStudentDetailPage";
+import { AdminLayout } from "./layouts/AdminLayout";
+import { AdminOverviewPage } from "./pages/admin/AdminOverviewPage";
+import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
+import { AdminUserDetailPage } from "./pages/admin/AdminUserDetailPage";
+import { AdminBondsPage } from "./pages/admin/AdminBondsPage";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
 // Rotas do menu do aluno que já têm tela real e por isso NÃO recebem
@@ -138,6 +144,30 @@ export function App() {
           <Route path="/professor" element={<TeacherOverviewPage />} />
           <Route path="/professor/alunos" element={<TeacherStudentsPage />} />
           <Route path="/professor/alunos/:studentId" element={<TeacherStudentDetailPage />} />
+        </Route>
+
+        {/* Área administrativa — Sprint 15 v1.0, seção 8/19 da ordem. Mesma
+            separação das áreas editorial/professor acima: exige sessão
+            válida (ProtectedRoute) E papel `admin` (RequireAdminRole, que
+            consulta o banco via /api/admin/dashboard). Deliberadamente FORA
+            do StudentLayout/OnboardingStatusProvider/menu do aluno — só
+            alcançável por navegação direta à URL, e mesmo assim bloqueada
+            sem o papel. Nenhuma tela de bootstrap aqui (adendo v1.1, seção
+            M: "não criar tela pública de bootstrap") — o mecanismo de
+            bootstrap é inteiramente backend, sem UI. */}
+        <Route
+          element={
+            <ProtectedRoute>
+              <RequireAdminRole>
+                <AdminLayout />
+              </RequireAdminRole>
+            </ProtectedRoute>
+          }
+        >
+          <Route path="/admin" element={<AdminOverviewPage />} />
+          <Route path="/admin/usuarios" element={<AdminUsersPage />} />
+          <Route path="/admin/usuarios/:userId" element={<AdminUserDetailPage />} />
+          <Route path="/admin/vinculos" element={<AdminBondsPage />} />
         </Route>
 
         {/* Área do aluno — exige sessão válida no servidor. OnboardingStatusProvider

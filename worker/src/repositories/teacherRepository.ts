@@ -1,12 +1,26 @@
-/* Repositório do Painel do Professor — Sprint 14 v1.0.
+/* Repositório do Painel do Professor — Sprint 14 v1.0. Ver também a nota da
+   Sprint 15 logo abaixo do bloco de leitura.
 
-   100% SOMENTE LEITURA nas consultas de listagem/autorização; as duas únicas
-   funções de escrita (buildCreate.../buildDeactivate...Statement) existem só
-   para o SEED técnico local (scripts/fixtures/teacher-fixtures.local.sql +
-   worker/testing/teacherFixtures.ts) e para teste direto de migration — a
-   ordem seção 9 é explícita: "Nenhuma API pública de criação de vínculo será
-   implementada nesta sprint", então nenhuma rota HTTP desta sprint chama as
-   funções de escrita abaixo.
+   100% SOMENTE LEITURA nas consultas de listagem/autorização; a Sprint 14
+   restringia as funções de escrita (buildCreateBondStatement) ao SEED
+   técnico local (scripts/fixtures/teacher-fixtures.local.sql +
+   worker/testing/teacherFixtures.ts) e a teste direto de migration — a
+   ordem daquela sprint, seção 9, era explícita: "Nenhuma API pública de
+   criação de vínculo será implementada nesta sprint", então nenhuma rota
+   HTTP daquela sprint chamava as funções de escrita abaixo.
+
+   Sprint 15 v1.0 (ordem seção 13) MUDA isso deliberadamente: agora existe a
+   primeira gestão administrativa real de vínculos (worker/src/routes/
+   admin.ts -> worker/src/services/adminService.ts), que PASSA a chamar
+   `buildCreateBondStatement` (reaproveitada tal como estava) e as duas
+   novas funções `buildReactivateBondStatement`/`buildDeactivateBondStatement`
+   abaixo — sempre autorizada por RBAC admin (worker/src/lib/rbac.ts:
+   resolveAdminRole), nunca pelo professor dono do vínculo. As funções de
+   LEITURA acima continuam exclusivas do Painel do Professor (nunca
+   chamadas pela área admin, que tem sua própria projeção sanitizada em
+   worker/src/repositories/adminRepository.ts) — só a tabela
+   teacher_student_access e seu par único (teacher_id, student_id) são
+   reaproveitados, nunca um segundo mecanismo de vínculo.
 
    Convenção do resto do projeto: consultas parametrizadas, nomes de
    tabela/coluna sempre literais fixos, `teacher_id`/`student_id` sempre no
@@ -279,4 +293,33 @@ export function buildCreateBondStatement(
        VALUES (?, ?, ?, ?, ?, ?)`
     )
     .bind(params.id, params.teacherId, params.studentId, params.status, params.nowIso, params.nowIso);
+}
+
+/** Sprint 15 v1.0, seção 13 da ordem — reativa um vínculo já existente por
+ *  UPDATE (nunca um segundo INSERT para o mesmo par, que violaria
+ *  idx_teacher_student_access_pair de qualquer forma). O guard `AND status =
+ *  'inactive'` no WHERE torna a chamada idempotente por CONTEÚDO: reaplicar
+ *  sobre um vínculo já ativo simplesmente afeta 0 linhas (nunca um erro) —
+ *  o serviço decide o que isso significa (ver adminService.ts:
+ *  classifyBondMutation), nunca esta camada. */
+export function buildReactivateBondStatement(
+  db: D1Database,
+  params: { bondId: string; nowIso: string }
+): D1PreparedStatement {
+  return db
+    .prepare(`UPDATE teacher_student_access SET status = 'active', updated_at = ? WHERE id = ? AND status = 'inactive'`)
+    .bind(params.nowIso, params.bondId);
+}
+
+/** Sprint 15 v1.0, seção 13 da ordem — inativa um vínculo ativo por UPDATE
+ *  (histórico preservado, nunca DELETE — mesmo princípio de
+ *  migrations/0019_teacher_student_access.sql). Mesmo guard idempotente por
+ *  conteúdo do reverso acima. */
+export function buildDeactivateBondStatement(
+  db: D1Database,
+  params: { bondId: string; nowIso: string }
+): D1PreparedStatement {
+  return db
+    .prepare(`UPDATE teacher_student_access SET status = 'inactive', updated_at = ? WHERE id = ? AND status = 'active'`)
+    .bind(params.nowIso, params.bondId);
 }

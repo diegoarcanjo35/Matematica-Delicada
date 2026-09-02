@@ -110,3 +110,13 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
   return diff === 0;
 }
+
+/** Sprint 15 v1.1 (adendo, seção H) — comparação em tempo constante para o
+ *  segredo do bootstrap administrativo, mesmo raciocínio de `verifyPassword`
+ *  acima (nunca `===` direto num segredo). Comprimentos diferentes já
+ *  retornam falso sem vazar QUANTO diferem (timingSafeEqual acima só entra
+ *  em loop byte-a-byte quando os comprimentos já batem). */
+export function timingSafeEqualStrings(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  return timingSafeEqual(encoder.encode(a), encoder.encode(b));
+}

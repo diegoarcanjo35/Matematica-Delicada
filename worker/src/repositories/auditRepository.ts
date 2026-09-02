@@ -60,7 +60,20 @@ export type AuditEventType =
   | "weekly_goal_created"
   | "weekly_goal_updated"
   | "weekly_goal_completed"
-  | "weekly_goal_abandoned";
+  | "weekly_goal_abandoned"
+  // Sprint 15 v1.0/v1.1 — Administração Essencial + Bootstrap Administrativo
+  // Seguro (ordem seção 16; adendo seção L). `admin_role_assigned`/
+  // `admin_role_removed` cobrem toda mutação de papel feita pela área
+  // admin (inclusive as duas concessões iniciais do bootstrap — seção L:
+  // "a atribuição inicial de admin também deve ficar auditável"; o evento
+  // de bootstrap em si é sempre um `admin_role_assigned` PLUS um
+  // `admin_bootstrap_completed` separado, nunca um substituindo o outro).
+  | "admin_role_assigned"
+  | "admin_role_removed"
+  | "admin_teacher_student_link_created"
+  | "admin_teacher_student_link_reactivated"
+  | "admin_teacher_student_link_deactivated"
+  | "admin_bootstrap_completed";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(
@@ -74,4 +87,22 @@ export async function recordAuditEvent(
     .prepare("INSERT INTO audit_log (id, user_id, event_type, metadata) VALUES (?, ?, ?, ?)")
     .bind(id, userId, eventType, metadata ? JSON.stringify(metadata) : null)
     .run();
+}
+
+/** Sprint 15 v1.0/v1.1 — versão em `db.batch()` de `recordAuditEvent`, para
+ *  compor mutações atômicas (mutação real + auditoria no MESMO lote,
+ *  mesmo padrão de weeklyReviewService.ts/dailyTrainingService.ts). `id`
+ *  deve ser determinístico a partir do `mutationId` da requisição (nunca
+ *  aleatório) — é essa identidade, e não o conteúdo do evento, que garante
+ *  "retry idempotente não duplica auditoria" (audit_log.id é PRIMARY KEY:
+ *  uma segunda tentativa com o MESMO id nunca chega a inserir uma segunda
+ *  linha, porque o serviço detecta a mutação já aplicada ANTES de tentar o
+ *  batch de novo — ver adminService.ts/adminBootstrapService.ts). */
+export function buildAuditEventStatement(
+  db: D1Database,
+  params: { id: string; eventType: AuditEventType; userId: string | null; metadata?: Record<string, string | number | boolean> }
+): D1PreparedStatement {
+  return db
+    .prepare("INSERT INTO audit_log (id, user_id, event_type, metadata) VALUES (?, ?, ?, ?)")
+    .bind(params.id, params.userId, params.eventType, params.metadata ? JSON.stringify(params.metadata) : null);
 }

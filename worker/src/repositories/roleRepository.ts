@@ -61,3 +61,25 @@ export async function grantRole(
     .bind(params.id, params.userId, params.roleId, params.grantedBy)
     .run();
 }
+
+/** Sprint 15 v1.0, seção 12 da ordem — versão em `db.batch()` de `grantRole`,
+ *  para compor a mutação atômica de papel (concessão + evento de auditoria
+ *  no mesmo lote, mesmo padrão de db.batch() do resto do projeto). */
+export function buildGrantRoleStatement(
+  db: D1Database,
+  params: { id: string; userId: string; roleId: string; grantedBy: string | null }
+): D1PreparedStatement {
+  return db
+    .prepare(`INSERT OR IGNORE INTO user_roles (id, user_id, role_id, granted_by) VALUES (?, ?, ?, ?)`)
+    .bind(params.id, params.userId, params.roleId, params.grantedBy);
+}
+
+/** Remove um papel de um usuário — DELETE guardado pela combinação exata
+ *  (user_id, role_id): afeta no máximo 1 linha (mesmo UNIQUE(user_id,
+ *  role_id) que garante `grantRole` idempotente), 0 se já não existia. */
+export function buildRemoveRoleStatement(
+  db: D1Database,
+  params: { userId: string; roleId: string }
+): D1PreparedStatement {
+  return db.prepare(`DELETE FROM user_roles WHERE user_id = ? AND role_id = ?`).bind(params.userId, params.roleId);
+}

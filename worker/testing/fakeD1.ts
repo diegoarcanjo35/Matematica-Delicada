@@ -1189,6 +1189,32 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada: weekly_goal_patterns não reflete por identidade a mutação desta atualização (coleção órfã de mutação anterior ou contagem divergente da esperada)')
   END;
 END;
+
+-- Sprint 15 v1.0/v1.1 (migration 0020) - Administracao Essencial + Bootstrap
+-- Administrativo Seguro. Espelho manual do DDL de
+-- migrations/0020_admin_user_management.sql - os dois precisam ser mantidos
+-- em sincronia. Ver o cabeçalho da migration real para o raciocínio
+-- completo do desenho one-shot (linha única, INSERT nunca UPDATE, PK como
+-- guarda de concorrência real).
+CREATE TABLE admin_bootstrap_state (
+  id TEXT PRIMARY KEY CHECK (id = 'singleton'),
+  completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_by TEXT NOT NULL,
+  promoted_user_id_1 TEXT NOT NULL REFERENCES users (id),
+  promoted_user_id_2 TEXT NOT NULL REFERENCES users (id),
+  mutation_id TEXT NOT NULL,
+  schema_version TEXT NOT NULL DEFAULT '1.0',
+  CHECK (promoted_user_id_1 != promoted_user_id_2)
+);
+
+CREATE TRIGGER trg_user_roles_protect_last_admin
+BEFORE DELETE ON user_roles
+FOR EACH ROW
+WHEN OLD.role_id = (SELECT id FROM roles WHERE name = 'admin')
+ AND (SELECT COUNT(DISTINCT user_id) FROM user_roles WHERE role_id = OLD.role_id) <= 1
+BEGIN
+  SELECT RAISE(ABORT, 'invariante violada: não é possível remover o último administrador');
+END;
 `;
 
 export interface FakeD1RunResult {
