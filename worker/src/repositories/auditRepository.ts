@@ -56,7 +56,11 @@ export type AuditEventType =
   | "simulation_item_completed"
   | "simulation_item_skipped"
   | "simulation_block_completed"
-  | "simulation_block_abandoned";
+  | "simulation_block_abandoned"
+  | "weekly_goal_created"
+  | "weekly_goal_updated"
+  | "weekly_goal_completed"
+  | "weekly_goal_abandoned";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

@@ -14,6 +14,7 @@ import { handleErrorNotebookRequest } from "./routes/errorNotebook";
 import { handleStudentMetricsRequest } from "./routes/studentMetrics";
 import { handleDailyTrainingRequest } from "./routes/dailyTraining";
 import { handleSimulationsRequest } from "./routes/simulations";
+import { handleWeeklyReviewRequest } from "./routes/weeklyReview";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -64,6 +65,9 @@ export default {
 
         const simulationsResponse = await handleSimulationsRequest(request, env, url);
         if (simulationsResponse) return simulationsResponse;
+
+        const weeklyReviewResponse = await handleWeeklyReviewRequest(request, env, url);
+        if (weeklyReviewResponse) return weeklyReviewResponse;
 
         const devResponse = await handleDevRequest(request, env, url);
         if (devResponse) return devResponse;

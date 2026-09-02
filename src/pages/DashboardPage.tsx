@@ -12,6 +12,7 @@ import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookC
 import { fetchStudentMetricsSummary, type StudentMetricsSummary } from "../api/studentMetricsClient";
 import { fetchCurrent as fetchDailyTrainingCurrent, fetchPreview as fetchDailyTrainingPreview } from "../api/dailyTrainingClient";
 import { fetchCurrent as fetchSimulationsCurrent, fetchHistory as fetchSimulationsHistory } from "../api/simulationsClient";
+import { fetchCurrentReport as fetchWeeklyReviewCurrent } from "../api/weeklyReviewClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_PATTERN_CARDS,
@@ -69,6 +70,12 @@ export function DashboardPage() {
     | { kind: "last_completed"; completedCount: number; correctCount: number; incorrectCount: number }
     | { kind: "none" }
     | null
+  >(null);
+  /* Sprint 13 — card real "Sua semana" (seção 11 da ordem: "card real
+   *  mostrando resumo factual e link para /relatorio-semanal"). Nenhuma
+   *  métrica fabricada: `null` enquanto carrega, resumo REAL depois. */
+  const [weeklyReviewSummary, setWeeklyReviewSummary] = useState<
+    { hasAnyEvidence: boolean; confirmedQuestionsCount: number; daysWithEvidenceCount: number; approxMinutes: number | null; hasActiveGoal: boolean } | null
   >(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
@@ -194,6 +201,27 @@ export function DashboardPage() {
         // Sem Simulados disponível — o card mostra o estado "em preparação".
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchWeeklyReviewCurrent()
+      .then((result) => {
+        if (cancelled) return;
+        setWeeklyReviewSummary({
+          hasAnyEvidence: result.report.hasAnyEvidence,
+          confirmedQuestionsCount: result.report.confirmedQuestionsCount,
+          daysWithEvidenceCount: result.report.daysWithEvidenceCount,
+          approxMinutes: result.report.approxMinutes,
+          hasActiveGoal: result.report.goal?.status === "active",
+        });
+      })
+      .catch(() => {
+        // Sem Relatório Semanal disponível — o card mostra o estado "em preparação".
+      });
     return () => {
       cancelled = true;
     };
@@ -340,6 +368,29 @@ export function DashboardPage() {
                 <span>Configurar simulado</span>
               </Link>
             </>
+          )}
+        </Card>
+
+        <Card className="dashboard__card">
+          <h3>Sua semana</h3>
+          {weeklyReviewSummary === null && (
+            <p className="dashboard__message">O Relatório Semanal está em preparação técnica — ainda não disponível.</p>
+          )}
+          {weeklyReviewSummary?.hasAnyEvidence ? (
+            <>
+              <p className="dashboard__stat">
+                {weeklyReviewSummary.confirmedQuestionsCount} questões confirmadas — {weeklyReviewSummary.daysWithEvidenceCount} dias com atividade
+                {weeklyReviewSummary.approxMinutes !== null ? `, aproximadamente ${weeklyReviewSummary.approxMinutes} min` : ""}
+              </p>
+              <p className="dashboard__message">Dados factuais — nunca nota, TRI ou ranking.</p>
+            </>
+          ) : (
+            weeklyReviewSummary && <p className="dashboard__message">Ainda sem evidências suficientes nesta semana.</p>
+          )}
+          {weeklyReviewSummary && (
+            <Link to="/relatorio-semanal" className="btn btn--primary">
+              <span>{weeklyReviewSummary.hasActiveGoal ? "Ver relatório e meta" : "Ver relatório semanal"}</span>
+            </Link>
           )}
         </Card>
 

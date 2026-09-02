@@ -1,0 +1,201 @@
+/* Relatório Semanal e Metas Realistas — Sprint 13 v1.0. Mesmas convenções
+   de src/pages/simulations/Simulados.css: tokens do sistema visual, grade
+   fluida (sem largura fixa que force rolagem horizontal em 360/390 px),
+   foco visível herdado de src/index.css. Nenhum estado é comunicado só por
+   cor — todo estado tem texto ao lado. */
+
+.weekly-review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 100%;
+}
+
+.weekly-review__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.weekly-review__disclaimer {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.weekly-review__week-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.weekly-review__week-selector label {
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__week-selector select {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  font: inherit;
+  color: inherit;
+  max-width: 100%;
+}
+
+.weekly-review__report-card,
+.weekly-review__comparison-card,
+.weekly-review__goal-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.weekly-review__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.weekly-review__fact {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__message {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__patterns ul {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__comparison-list {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.weekly-review__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.weekly-review__field legend {
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+  padding: 0;
+  margin-bottom: var(--space-1);
+}
+
+.weekly-review__field label:not(.weekly-review__checkbox) {
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__field input[type="number"] {
+  width: 100%;
+  max-width: 12ch;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  font: inherit;
+  color: inherit;
+}
+
+.weekly-review__checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.weekly-review__goal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.weekly-review__progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.weekly-review__error-indicator {
+  min-height: 1.5em;
+  font-size: var(--font-size-sm);
+  color: var(--color-danger, #b3261e);
+  font-weight: 600;
+  margin: 0;
+}
+
+.weekly-review__conflict {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-danger, #b3261e);
+  margin: 0;
+}
+
+.weekly-review__conflict button {
+  background: none;
+  border: none;
+  color: inherit;
+  text-decoration: underline;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.weekly-review__footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+@media (max-width: 480px) {
+  .weekly-review__goal-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .weekly-review__week-selector select {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .weekly-review * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

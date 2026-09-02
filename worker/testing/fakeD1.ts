@@ -1091,6 +1091,89 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada: evento de item sem simulation_block_items.last_mutation_id correspondente (por identidade, mesmo bloco, mesmo usuário)')
   END;
 END;
+
+-- Sprint 13 v1.0 (migration 0018) - Relatorio Semanal e Metas Realistas.
+-- Espelho manual do DDL de migrations/0018_weekly_reviews_goals.sql - os
+-- dois precisam ser mantidos em sincronia.
+CREATE TABLE weekly_study_goals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  week_start TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  available_days TEXT NOT NULL DEFAULT '[]',
+  target_minutes INTEGER NOT NULL CHECK (target_minutes > 0),
+  target_questions INTEGER NOT NULL CHECK (target_questions > 0),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'abandoned')),
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  abandoned_at TEXT
+);
+CREATE INDEX idx_weekly_study_goals_user ON weekly_study_goals (user_id);
+CREATE INDEX idx_weekly_study_goals_user_week ON weekly_study_goals (user_id, week_start);
+CREATE UNIQUE INDEX idx_weekly_study_goals_one_active_per_week
+  ON weekly_study_goals (user_id, week_start)
+  WHERE status = 'active';
+
+CREATE TABLE weekly_goal_patterns (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES weekly_study_goals (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  pattern_id TEXT NOT NULL REFERENCES patterns (id),
+  priority_position INTEGER NOT NULL CHECK (priority_position BETWEEN 1 AND 3),
+  mutation_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_weekly_goal_patterns_goal ON weekly_goal_patterns (goal_id);
+CREATE INDEX idx_weekly_goal_patterns_user ON weekly_goal_patterns (user_id);
+CREATE UNIQUE INDEX idx_weekly_goal_patterns_goal_pattern ON weekly_goal_patterns (goal_id, pattern_id);
+CREATE UNIQUE INDEX idx_weekly_goal_patterns_goal_position ON weekly_goal_patterns (goal_id, priority_position);
+
+CREATE TABLE weekly_goal_events (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES weekly_study_goals (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'goal_created', 'goal_updated', 'goal_completed', 'goal_abandoned'
+  )),
+  from_status TEXT CHECK (from_status IN ('active', 'completed', 'abandoned')),
+  to_status TEXT CHECK (to_status IN ('active', 'completed', 'abandoned')),
+  goal_version INTEGER NOT NULL,
+  patterns_expected_count INTEGER CHECK (patterns_expected_count IS NULL OR patterns_expected_count BETWEEN 0 AND 3),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_weekly_goal_events_goal ON weekly_goal_events (goal_id, created_at);
+CREATE INDEX idx_weekly_goal_events_user ON weekly_goal_events (user_id);
+
+-- PO v1.1 (correção A) — segundo bloco adicionado ao trigger: fecha a
+-- lacuna adversarial provada em weeklyReviewAtomicity.test.ts ("Correção A
+-- v1.1") de um DELETE/UPDATE guardado em weekly_goal_patterns afetando 0
+-- linhas silenciosamente (sem lançar). Espelho manual do trigger real de
+-- migrations/0018_weekly_reviews_goals.sql — os dois precisam ser mantidos
+-- em sincronia.
+CREATE TRIGGER trg_weekly_goal_events_require_identity
+AFTER INSERT ON weekly_goal_events
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM weekly_study_goals
+      WHERE id = NEW.goal_id AND user_id = NEW.user_id AND last_mutation_id = NEW.id AND version = NEW.goal_version
+    )
+    THEN RAISE(ABORT, 'invariante violada: evento de meta sem weekly_study_goals.last_mutation_id/version correspondente (por identidade)')
+  END;
+
+  SELECT CASE
+    WHEN NEW.patterns_expected_count IS NOT NULL
+     AND (
+       EXISTS (SELECT 1 FROM weekly_goal_patterns WHERE goal_id = NEW.goal_id AND mutation_id != NEW.id)
+       OR (SELECT COUNT(*) FROM weekly_goal_patterns WHERE goal_id = NEW.goal_id AND mutation_id = NEW.id) != NEW.patterns_expected_count
+     )
+    THEN RAISE(ABORT, 'invariante violada: weekly_goal_patterns não reflete por identidade a mutação desta atualização (coleção órfã de mutação anterior ou contagem divergente da esperada)')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {

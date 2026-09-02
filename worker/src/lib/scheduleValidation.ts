@@ -125,6 +125,88 @@ export function compareCivilDates(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/** Segunda-feira (semana civil, seção 5 da ordem da Sprint 13) da semana que
+ *  contém `civilDate` — nunca depende de relógio real, é aritmética pura
+ *  sobre uma data civil já resolvida. `WEEKDAY_CODES` é [dom, seg, ter, qua,
+ *  qui, sex, sab] (índice 0..6, mesmo `getUTCDay()`); a segunda-feira é o
+ *  índice 1, então `(index + 6) % 7` é sempre "quantos dias atrás foi a
+ *  última segunda-feira" (domingo, índice 0, fica a 6 dias — é o ÚLTIMO dia
+ *  da semana civil que começou na segunda anterior). */
+export function mondayOfCivilWeek(civilDate: string): string {
+  const index = WEEKDAY_CODES.indexOf(weekdayCodeForCivilDate(civilDate));
+  const daysSinceMonday = (index + 6) % 7;
+  return addCivilDays(civilDate, -daysSinceMonday);
+}
+
+/** Offset (em minutos) tal que `local = utc + offset` — usado só como passo
+ *  intermediário de `civilMidnightInstant` abaixo. Nunca exposto como uma
+ *  regra de negócio própria. */
+function offsetMinutesAt(instant: Date, timezone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+    .formatToParts(instant)
+    .reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {} as Record<string, string>);
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour === "24" ? "0" : parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  return (asUtc - instant.getTime()) / 60000;
+}
+
+/** Instante UTC real correspondente à MEIA-NOITE local de `civilDate` no
+ *  fuso `timezone` (seção 5 da ordem: "tratar mudanças de fuso e horário de
+ *  verão de forma determinística"). Duas passadas (mesma técnica padrão de
+ *  bibliotecas como date-fns-tz): a primeira estima o offset tratando a data
+ *  civil como se already fosse UTC; a segunda recalcula o offset NO instante
+ *  já corrigido, para o caso raro de a meia-noite local cair exatamente
+ *  numa transição de horário de verão. Nunca lança para datas/fusos
+ *  inválidos previamente validados por `isValidCivilDate`/`isValidTimezone`
+ *  — chamado só depois dessa validação, em todo o código de produção. */
+export function civilMidnightInstant(civilDate: string, timezone: string): Date {
+  const [year, month, day] = civilDate.split("-").map(Number);
+  const naiveUtc = Date.UTC(year, month - 1, day, 0, 0, 0);
+  const offset1 = offsetMinutesAt(new Date(naiveUtc), timezone);
+  const corrected1 = naiveUtc - offset1 * 60000;
+  const offset2 = offsetMinutesAt(new Date(corrected1), timezone);
+  const corrected2 = offset2 === offset1 ? corrected1 : naiveUtc - offset2 * 60000;
+  return new Date(corrected2);
+}
+
+/** Formata um instante no MESMO formato textual usado por
+ *  `datetime('now')` do SQLite/D1 (`YYYY-MM-DD HH:MM:SS`, sem `T`, sem `Z`,
+ *  sem milissegundos) — nunca `toISOString()` puro, cujo separador `T`
+ *  compara lexicograficamente DEPOIS do espaço usado pelas colunas
+ *  `TEXT`/`datetime('now')` do banco (`'T' > ' '` em ASCII), o que quebraria
+ *  comparações `>=`/`<` de fronteira exata entre os dois formatos. */
+export function toSqliteInstant(instant: Date): string {
+  return instant.toISOString().slice(0, 19).replace("T", " ");
+}
+
+/** Inverso de `toSqliteInstant` — interpreta um valor já gravado no banco
+ *  (`YYYY-MM-DD HH:MM:SS`, sempre UTC por convenção de `datetime('now')`)
+ *  como um instante real. Nunca `new Date(value)` direto: o formato sem `T`/
+ *  `Z` é ambíguo entre motores JS (alguns tratam como hora LOCAL da
+ *  máquina) — anexar `Z` explicitamente após trocar o separador remove essa
+ *  ambiguidade. */
+export function parseSqliteInstant(value: string): Date {
+  return new Date(`${value.replace(" ", "T")}Z`);
+}
+
 export interface FieldValidationResult<T> {
   ok: boolean;
   value?: T;
