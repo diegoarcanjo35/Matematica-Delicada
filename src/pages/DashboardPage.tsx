@@ -11,6 +11,7 @@ import { fetchPatterns } from "../api/patternsClient";
 import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookClient";
 import { fetchStudentMetricsSummary, type StudentMetricsSummary } from "../api/studentMetricsClient";
 import { fetchCurrent as fetchDailyTrainingCurrent, fetchPreview as fetchDailyTrainingPreview } from "../api/dailyTrainingClient";
+import { fetchCurrent as fetchSimulationsCurrent, fetchHistory as fetchSimulationsHistory } from "../api/simulationsClient";
 import {
   MOCK_BIGGEST_BOTTLENECK,
   MOCK_PATTERN_CARDS,
@@ -57,6 +58,17 @@ export function DashboardPage() {
      /preview são 100% somente leitura. */
   const [dailyTrainingCard, setDailyTrainingCard] = useState<
     { kind: "active"; itemCount: number; estimatedMinutes: number; doneCount: number } | { kind: "preview"; itemCount: number; estimatedMinutes: number } | { kind: "empty" } | null
+  >(null);
+  /* Sprint 12 — card real dos Simulados em Blocos (seção 16 da ordem:
+     "Dashboard pode mostrar bloco ativo ou último bloco concluído"; "nenhum
+     card pode inventar nota, evolução ou desempenho"; "nenhuma leitura do
+     Dashboard pode criar bloco"). GET /current e GET /history são 100%
+     somente leitura. */
+  const [simulationsCard, setSimulationsCard] = useState<
+    | { kind: "active"; doneCount: number; itemCount: number; estimatedMinutes: number; blockId: string }
+    | { kind: "last_completed"; completedCount: number; correctCount: number; incorrectCount: number }
+    | { kind: "none" }
+    | null
   >(null);
   const { user } = useAuth();
   const { profile } = useOnboardingStatus();
@@ -146,6 +158,40 @@ export function DashboardPage() {
         }
       } catch {
         // Sem Treino Diário disponível — o card mostra o estado "em preparação".
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const current = await fetchSimulationsCurrent();
+        if (cancelled || current.available === false) return;
+        if (current.block && current.block.status === "active") {
+          const doneCount = current.block.items.filter((item) => item.status === "completed" || item.status === "skipped" || item.status === "blocked").length;
+          setSimulationsCard({
+            kind: "active",
+            doneCount,
+            itemCount: current.block.actualItemCount,
+            estimatedMinutes: current.block.estimatedMinutes,
+            blockId: current.block.id,
+          });
+          return;
+        }
+        const history = await fetchSimulationsHistory();
+        if (cancelled) return;
+        const last = history.entries[0];
+        if (last && last.status === "completed") {
+          setSimulationsCard({ kind: "last_completed", completedCount: last.completedCount, correctCount: last.correctCount, incorrectCount: last.incorrectCount });
+        } else {
+          setSimulationsCard({ kind: "none" });
+        }
+      } catch {
+        // Sem Simulados disponível — o card mostra o estado "em preparação".
       }
     })();
     return () => {
@@ -258,6 +304,42 @@ export function DashboardPage() {
             <p className="dashboard__message">
               Sem disponibilidade ou sem questões elegíveis hoje. <Link to="/treino-diario">Ver detalhes</Link>
             </p>
+          )}
+        </Card>
+
+        <Card className="dashboard__card">
+          <h3>Simulados em blocos</h3>
+          {simulationsCard === null && (
+            <p className="dashboard__message">Os Simulados em Blocos estão em preparação técnica — ainda não disponível.</p>
+          )}
+          {simulationsCard?.kind === "active" && (
+            <>
+              <p className="dashboard__stat">
+                {simulationsCard.doneCount} de {simulationsCard.itemCount} questões — aproximadamente {simulationsCard.estimatedMinutes} min
+              </p>
+              <Link to={`/simulados/${simulationsCard.blockId}`} className="btn btn--primary">
+                <span>Continuar bloco</span>
+              </Link>
+            </>
+          )}
+          {simulationsCard?.kind === "last_completed" && (
+            <>
+              <p className="dashboard__stat">
+                Último bloco: {simulationsCard.completedCount} questões — {simulationsCard.correctCount} acertos, {simulationsCard.incorrectCount} erros
+              </p>
+              <p className="dashboard__message">Prática em formato de simulado — nunca uma nota oficial do ENEM.</p>
+              <Link to="/simulados" className="btn btn--primary">
+                <span>Ver simulados</span>
+              </Link>
+            </>
+          )}
+          {simulationsCard?.kind === "none" && (
+            <>
+              <p className="dashboard__message">Nenhum bloco de simulado ainda. Escolha um bloco misto ou focado em um padrão.</p>
+              <Link to="/simulados" className="btn btn--primary">
+                <span>Configurar simulado</span>
+              </Link>
+            </>
           )}
         </Card>
 

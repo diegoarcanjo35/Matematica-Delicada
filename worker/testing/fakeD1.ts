@@ -987,6 +987,110 @@ BEGIN
     THEN RAISE(ABORT, 'invariante violada: evento de item sem daily_training_items.last_mutation_id correspondente (por identidade, mesma lista, mesmo usuário)')
   END;
 END;
+
+-- Sprint 12 v1.0 (migration 0017) - Simulados em Blocos e Analise Factual de
+-- Desempenho. Espelho manual do DDL de migrations/0017_simulation_blocks.sql
+-- - os dois precisam ser mantidos em sincronia.
+CREATE TABLE simulation_blocks (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users (id),
+  block_type TEXT NOT NULL CHECK (block_type IN ('mixed', 'pattern_focused')),
+  primary_pattern_id TEXT REFERENCES patterns (id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'abandoned')),
+  planned_item_count INTEGER NOT NULL CHECK (planned_item_count IN (5, 10, 15)),
+  actual_item_count INTEGER NOT NULL CHECK (actual_item_count > 0 AND actual_item_count <= planned_item_count),
+  estimated_minutes INTEGER NOT NULL CHECK (estimated_minutes >= 0),
+  timezone TEXT NOT NULL,
+  block_date TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  abandoned_at TEXT,
+  CHECK (
+    (block_type = 'pattern_focused' AND primary_pattern_id IS NOT NULL)
+    OR (block_type = 'mixed' AND primary_pattern_id IS NULL)
+  )
+);
+CREATE INDEX idx_simulation_blocks_user ON simulation_blocks (user_id);
+CREATE INDEX idx_simulation_blocks_user_status ON simulation_blocks (user_id, status);
+CREATE UNIQUE INDEX idx_simulation_blocks_one_active_per_user
+  ON simulation_blocks (user_id)
+  WHERE status = 'active';
+
+CREATE TABLE simulation_block_items (
+  id TEXT PRIMARY KEY,
+  block_id TEXT NOT NULL REFERENCES simulation_blocks (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  question_id TEXT NOT NULL REFERENCES questions (id),
+  primary_pattern_id TEXT REFERENCES patterns (id),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'skipped', 'blocked')),
+  question_attempt_id TEXT REFERENCES question_attempts (id),
+  estimated_minutes INTEGER NOT NULL CHECK (estimated_minutes > 0),
+  version INTEGER NOT NULL DEFAULT 1,
+  last_mutation_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_simulation_block_items_block ON simulation_block_items (block_id);
+CREATE INDEX idx_simulation_block_items_user ON simulation_block_items (user_id);
+CREATE INDEX idx_simulation_block_items_attempt ON simulation_block_items (question_attempt_id);
+CREATE UNIQUE INDEX idx_simulation_block_items_block_question ON simulation_block_items (block_id, question_id);
+CREATE UNIQUE INDEX idx_simulation_block_items_block_position ON simulation_block_items (block_id, position);
+CREATE UNIQUE INDEX idx_simulation_block_items_attempt_unique
+  ON simulation_block_items (question_attempt_id)
+  WHERE question_attempt_id IS NOT NULL;
+
+CREATE TABLE simulation_block_events (
+  id TEXT PRIMARY KEY,
+  block_id TEXT NOT NULL REFERENCES simulation_blocks (id),
+  item_id TEXT REFERENCES simulation_block_items (id),
+  user_id TEXT NOT NULL REFERENCES users (id),
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'block_applied', 'item_started', 'item_completed', 'item_skipped', 'item_blocked',
+    'block_completed', 'block_abandoned'
+  )),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_simulation_block_events_block ON simulation_block_events (block_id, created_at);
+CREATE INDEX idx_simulation_block_events_item ON simulation_block_events (item_id);
+
+CREATE TRIGGER trg_simulation_block_events_require_identity
+AFTER INSERT ON simulation_block_events
+FOR EACH ROW
+BEGIN
+  SELECT CASE
+    WHEN NEW.event_type IN ('block_applied', 'block_completed', 'block_abandoned')
+     AND NOT EXISTS (
+       SELECT 1 FROM simulation_blocks
+       WHERE id = NEW.block_id AND user_id = NEW.user_id AND last_mutation_id = NEW.id
+     )
+    THEN RAISE(ABORT, 'invariante violada: evento de bloco sem simulation_blocks.last_mutation_id correspondente (por identidade)')
+  END;
+
+  SELECT CASE
+    WHEN NEW.event_type = 'block_applied'
+     AND (
+       (SELECT actual_item_count FROM simulation_blocks WHERE id = NEW.block_id)
+       IS NOT (SELECT COUNT(*) FROM simulation_block_items WHERE block_id = NEW.block_id)
+     )
+    THEN RAISE(ABORT, 'invariante violada: block_applied com actual_item_count divergente da contagem real de itens')
+  END;
+
+  SELECT CASE
+    WHEN NEW.event_type IN ('item_started', 'item_completed', 'item_skipped', 'item_blocked')
+     AND (
+       NEW.item_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM simulation_block_items
+         WHERE id = NEW.item_id AND block_id = NEW.block_id AND user_id = NEW.user_id AND last_mutation_id = NEW.id
+       )
+     )
+    THEN RAISE(ABORT, 'invariante violada: evento de item sem simulation_block_items.last_mutation_id correspondente (por identidade, mesmo bloco, mesmo usuário)')
+  END;
+END;
 `;
 
 export interface FakeD1RunResult {

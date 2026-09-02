@@ -36,7 +36,7 @@ export const STUDENT_NAV_ITEMS: NavItem[] = [
   {
     path: "/simulados",
     label: "Simulados",
-    description: "Os quatro simulados programados do seu ciclo de preparação.",
+    description: "Pratique em formato de simulado, em blocos de 5, 10 ou 15 questões — misto ou focado em um padrão.",
     icon: "📝",
   },
   {

@@ -50,7 +50,13 @@ export type AuditEventType =
   | "daily_training_item_completed"
   | "daily_training_item_skipped"
   | "daily_training_completed"
-  | "daily_training_abandoned";
+  | "daily_training_abandoned"
+  | "simulation_block_applied"
+  | "simulation_item_started"
+  | "simulation_item_completed"
+  | "simulation_item_skipped"
+  | "simulation_block_completed"
+  | "simulation_block_abandoned";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(
