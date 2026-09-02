@@ -1147,6 +1147,21 @@ CREATE TABLE weekly_goal_events (
 CREATE INDEX idx_weekly_goal_events_goal ON weekly_goal_events (goal_id, created_at);
 CREATE INDEX idx_weekly_goal_events_user ON weekly_goal_events (user_id);
 
+-- Sprint 14 v1.0 — vínculo autorizado professor-aluno (migrations/0019).
+-- Espelho manual do SQL real — os dois precisam ser mantidos em sincronia.
+CREATE TABLE teacher_student_access (
+  id TEXT PRIMARY KEY,
+  teacher_id TEXT NOT NULL REFERENCES users (id),
+  student_id TEXT NOT NULL REFERENCES users (id),
+  status TEXT NOT NULL CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (teacher_id != student_id)
+);
+CREATE UNIQUE INDEX idx_teacher_student_access_pair ON teacher_student_access (teacher_id, student_id);
+CREATE INDEX idx_teacher_student_access_teacher ON teacher_student_access (teacher_id, status);
+CREATE INDEX idx_teacher_student_access_student ON teacher_student_access (student_id, status);
+
 -- PO v1.1 (correção A) — segundo bloco adicionado ao trigger: fecha a
 -- lacuna adversarial provada em weeklyReviewAtomicity.test.ts ("Correção A
 -- v1.1") de um DELETE/UPDATE guardado em weekly_goal_patterns afetando 0

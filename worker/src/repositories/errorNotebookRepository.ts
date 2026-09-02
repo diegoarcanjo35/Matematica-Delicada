@@ -186,6 +186,27 @@ export async function summaryForUser(db: D1Database, userId: string, nowIso: str
   return { active: row?.active ?? 0, overdue: row?.overdue ?? 0, corrected: row?.corrected ?? 0, total: row?.total ?? 0 };
 }
 
+/** Sprint 14 v1.0 — contagem por tipo de erro (ordem seção 13: "tipos de
+ *  erro quando já estruturados"). Só metadados agregados (tipo + contagem),
+ *  nunca a anotação livre do aluno (`student_note`) — nem esta função nem
+ *  nenhuma outra deste repositório retornam esse campo para fora de
+ *  `error_notebook_entries` inteira. Arquivadas ficam de fora, mesmo
+ *  critério de `listEntries`/`summaryForUser` para "registros ativos". */
+export async function countByErrorType(db: D1Database, userId: string): Promise<Record<string, number>> {
+  const result = await db
+    .prepare(
+      `SELECT error_type as errorType, COUNT(*) as total
+       FROM error_notebook_entries
+       WHERE user_id = ? AND status != 'archived'
+       GROUP BY error_type`
+    )
+    .bind(userId)
+    .all<{ errorType: string; total: number }>();
+  const counts: Record<string, number> = {};
+  for (const row of result.results ?? []) counts[row.errorType] = row.total;
+  return counts;
+}
+
 export async function listReviewEventsForEntry(db: D1Database, entryId: string): Promise<ErrorReviewEventRow[]> {
   const result = await db
     .prepare("SELECT * FROM error_review_events WHERE entry_id = ? ORDER BY created_at ASC")

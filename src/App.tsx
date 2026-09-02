@@ -34,6 +34,11 @@ import { EditorialQuestionsPage } from "./pages/editorial/EditorialQuestionsPage
 import { EditorialQuestionFormPage } from "./pages/editorial/EditorialQuestionFormPage";
 import { EditorialImportsPage } from "./pages/editorial/EditorialImportsPage";
 import { RequireEditorialRole } from "./auth/RequireEditorialRole";
+import { RequireTeacherRole } from "./auth/RequireTeacherRole";
+import { TeacherLayout } from "./layouts/TeacherLayout";
+import { TeacherOverviewPage } from "./pages/teacher/TeacherOverviewPage";
+import { TeacherStudentsPage } from "./pages/teacher/TeacherStudentsPage";
+import { TeacherStudentDetailPage } from "./pages/teacher/TeacherStudentDetailPage";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
 // Rotas do menu do aluno que já têm tela real e por isso NÃO recebem
@@ -112,6 +117,27 @@ export function App() {
           <Route path="/editorial/questoes/nova" element={<EditorialQuestionFormPage />} />
           <Route path="/editorial/questoes/:id" element={<EditorialQuestionFormPage />} />
           <Route path="/editorial/importacoes" element={<EditorialImportsPage />} />
+        </Route>
+
+        {/* Área do professor — Sprint 14 v1.0, seção 10 da ordem. Mesma
+            separação da área editorial acima: exige sessão válida
+            (ProtectedRoute) E papel `teacher` (RequireTeacherRole, que
+            consulta o banco via /api/teacher/dashboard). Deliberadamente
+            FORA do StudentLayout/OnboardingStatusProvider/menu do aluno —
+            só alcançável por navegação direta à URL, e mesmo assim
+            bloqueada sem o papel. */}
+        <Route
+          element={
+            <ProtectedRoute>
+              <RequireTeacherRole>
+                <TeacherLayout />
+              </RequireTeacherRole>
+            </ProtectedRoute>
+          }
+        >
+          <Route path="/professor" element={<TeacherOverviewPage />} />
+          <Route path="/professor/alunos" element={<TeacherStudentsPage />} />
+          <Route path="/professor/alunos/:studentId" element={<TeacherStudentDetailPage />} />
         </Route>
 
         {/* Área do aluno — exige sessão válida no servidor. OnboardingStatusProvider

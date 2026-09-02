@@ -1,0 +1,220 @@
+/* Painel do Professor — Sprint 14 v1.0. Estilos compartilhados pelas três
+   telas (Visão Geral, Lista de Alunos, Acompanhamento Individual). Segue os
+   tokens já existentes (src/design/tokens.css) — nenhuma cor/espaçamento
+   novo é inventado aqui. */
+
+.teacher-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.teacher-page__stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-4);
+}
+
+.teacher-page__stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.teacher-page__stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.teacher-page__stat-label {
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+}
+
+.teacher-page__section-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 0 0 var(--space-3);
+}
+
+.teacher-page__attention-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.teacher-page__attention-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.teacher-page__attention-name {
+  font-weight: 600;
+}
+
+.teacher-page__attention-reasons {
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--color-text-secondary);
+}
+
+/* ------------------------------- Lista de alunos ------------------------------- */
+
+.teacher-page__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+}
+
+.teacher-page__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 160px;
+}
+
+.teacher-page__field-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.teacher-page__student-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.teacher-page__student-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.teacher-page__student-name {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.teacher-page__student-grade {
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+}
+
+.teacher-page__student-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+}
+
+.teacher-page__pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+/* ------------------------------- Detalhe do aluno ------------------------------- */
+
+.teacher-page__detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.teacher-page__fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+}
+
+.teacher-page__fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.teacher-page__fact-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.teacher-page__fact-label {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.teacher-page__pattern-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.teacher-page__pattern-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.teacher-page__pattern-item:last-child {
+  border-bottom: none;
+}
+
+.teacher-page__state-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--color-surface-muted, #eef0f4);
+  color: var(--color-text-secondary);
+}
+
+.teacher-page__state-badge--revisao_pendente {
+  background: var(--color-warning-surface, #fff3cd);
+  color: var(--color-warning-text, #7a5b00);
+}
+
+.teacher-page__state-badge--consistente_no_recorte {
+  background: var(--color-success-surface, #e3f6e9);
+  color: var(--color-success-text, #146c43);
+}
+
+.teacher-page__error-type-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.teacher-page__error-type-chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--color-surface-muted, #eef0f4);
+  font-size: 0.8rem;
+}
+
+.teacher {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.teacher--centered {
+  text-align: center;
+}
+
+.teacher__card {
+  max-width: 480px;
+}

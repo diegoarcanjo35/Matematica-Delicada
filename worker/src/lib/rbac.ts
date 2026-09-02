@@ -22,3 +22,19 @@ export function roleSatisfies(role: EditorialRole, minimum: "editor" | "admin"):
   if (minimum === "editor") return role === "editor" || role === "admin";
   return role === "admin";
 }
+
+/* Sprint 14 v1.0, seção 8 da ordem — papel Professor/Mentor. REUTILIZA o
+   mesmo mecanismo de RBAC do resto do projeto (roles/user_roles,
+   migration 0008): 'teacher' já fazia parte do CHECK de roles.name desde a
+   Sprint 7, só nunca tinha sido consultado até agora. Nenhum segundo campo
+   de role, nenhuma tabela paralela, nenhuma string mágica fora daqui —
+   exatamente o mesmo padrão de resolveEditorialRole acima. `admin`/`editor`
+   NUNCA herdam acesso de professor por conveniência (ordem seção 8: "não
+   ampliar permissões de editor/admin") — só quem tem a linha
+   user_roles->roles.name='teacher' passa. */
+export type TeacherRole = "teacher" | null;
+
+export async function resolveTeacherRole(db: D1Database, userId: string): Promise<TeacherRole> {
+  const roleNames = await listRoleNamesForUser(db, userId);
+  return roleNames.includes("teacher") ? "teacher" : null;
+}
