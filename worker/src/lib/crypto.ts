@@ -35,10 +35,25 @@ export async function sha256Hex(input: string): Promise<string> {
 /* Hash de senha — PBKDF2-HMAC-SHA256, primitiva consolidada disponível via
    Web Crypto no runtime Workers (SubtleCrypto). Parâmetros documentados em
    docs/AUTENTICACAO.md.
-   600.000 iterações — recomendação atual da OWASP Password Storage Cheat Sheet
-   para PBKDF2-HMAC-SHA256 (ver referência no docs/AUTENTICACAO.md). Benchmark
-   local: mediana de 143ms/hash (worker/scripts/benchmark-pbkdf2.mjs) — viável. */
-const PBKDF2_ITERATIONS = 600_000;
+
+   RESTRIÇÃO REAL DA PLATAFORMA — não uma escolha de segurança "ideal": o
+   runtime real do Cloudflare Workers em produção rejeita PBKDF2 acima de
+   100.000 iterações, lançando `NotSupportedError: Pbkdf2 failed: iteration
+   counts above 100000 are not supported` — comprovado por uma tentativa real
+   de cadastro em produção capturada ao vivo via `wrangler tail`. O valor
+   anterior (600.000, recomendação da OWASP Password Storage Cheat Sheet)
+   nunca funcionou em produção: só passava no ambiente local de teste
+   (vitest-pool-workers/miniflare), que não reproduz esse teto do runtime de
+   borda real — um gap de paridade entre dev e produção, não detectado até um
+   cadastro genuíno ser tentado contra o Worker publicado. PBKDF2_ITERATIONS é
+   o fator usado para NOVOS hashes; PBKDF2_MAX_SUPPORTED_ITERATIONS é o teto
+   físico da plataforma, usado por verifyPassword para rejeitar de forma
+   controlada (nunca lançar exceção) qualquer hash armazenado que reivindique
+   mais iterações do que o runtime consegue executar — os dois coincidem hoje
+   (100.000), mas são conceitos distintos: um aumento futuro do fator de
+   hashing só é seguro se o teto real da plataforma também permitir. */
+const PBKDF2_ITERATIONS = 100_000;
+const PBKDF2_MAX_SUPPORTED_ITERATIONS = 100_000;
 const PBKDF2_HASH = "SHA-256";
 const PBKDF2_KEY_LENGTH_BITS = 256;
 const PBKDF2_SALT_BYTES = 16;
@@ -72,26 +87,44 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (parts.length !== 4 || parts[0] !== PASSWORD_HASH_VERSION) return false;
   const [, iterationsRaw, saltB64, hashB64] = parts;
   const iterations = Number(iterationsRaw);
-  if (!Number.isInteger(iterations) || iterations <= 0) return false;
+  // Sempre usa as iterações do PRÓPRIO hash armazenado (nunca a constante
+  // atual) — permite aumentar PBKDF2_ITERATIONS no futuro sem invalidar
+  // hashes antigos gravados com um fator menor. O teto superior é o limite
+  // real do runtime Workers (PBKDF2_MAX_SUPPORTED_ITERATIONS): um hash que
+  // reivindique mais iterações do que a plataforma consegue executar nunca
+  // chega a chamar `deriveBits` — é tratado como credencial inválida, nunca
+  // como um 500 (o mesmo NotSupportedError que quebrava o cadastro).
+  if (!Number.isInteger(iterations) || iterations <= 0 || iterations > PBKDF2_MAX_SUPPORTED_ITERATIONS) {
+    return false;
+  }
 
-  const salt = fromBase64Url(saltB64);
-  const expected = fromBase64Url(hashB64);
+  try {
+    const salt = fromBase64Url(saltB64);
+    const expected = fromBase64Url(hashB64);
+    if (salt.length === 0 || expected.length === 0) return false;
 
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"]
-  );
-  const derivedBits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations, hash: PBKDF2_HASH },
-    keyMaterial,
-    expected.length * 8
-  );
-  const actual = new Uint8Array(derivedBits);
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(password),
+      "PBKDF2",
+      false,
+      ["deriveBits"]
+    );
+    const derivedBits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt, iterations, hash: PBKDF2_HASH },
+      keyMaterial,
+      expected.length * 8
+    );
+    const actual = new Uint8Array(derivedBits);
 
-  return timingSafeEqual(actual, expected);
+    return timingSafeEqual(actual, expected);
+  } catch {
+    // Base64 inválido (fromBase64Url/atob) ou qualquer outra falha ao
+    // processar um hash armazenado malformado — trata como credencial
+    // inválida, nunca deixa a exceção subir para o catch global
+    // (worker/src/index.ts) e virar "Erro interno" genérico.
+    return false;
+  }
 }
 
 /** Verdadeiro se o hash armazenado usa parâmetros mais fracos que o atual —

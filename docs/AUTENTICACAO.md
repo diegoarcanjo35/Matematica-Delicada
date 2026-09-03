@@ -1,4 +1,14 @@
-# Autenticação, Sessões e Segurança — Sprint 2 v1.3
+# Autenticação, Sessões e Segurança — Sprint 2 v1.4
+
+Atualizado na v1.4 com um hotfix de restrição real de plataforma: o cadastro
+em produção falhava sempre com "Erro interno" porque o runtime real do
+Cloudflare Workers rejeita PBKDF2 acima de 100.000 iterações — a v1.1 havia
+subido o fator para 600.000 seguindo a OWASP, mas isso nunca chegou a
+funcionar em produção; só passava no ambiente local de teste anterior, que
+não reproduzia esse teto do runtime real. `PBKDF2_ITERATIONS` voltou a
+100.000, e `verifyPassword` agora rejeita de forma controlada (nunca lançando
+exceção) qualquer hash com `iterations` inválido ou acima do limite suportado
+pela plataforma. Ver seção "Segurança de senha" abaixo.
 
 Atualizado na v1.1 com as seis correções da primeira auditoria: configuração D1
 sem ID remoto falso, PBKDF2 a 600.000 iterações com upgrade automático,
@@ -189,16 +199,34 @@ Local dev define as duas flags **só** em `wrangler.local.jsonc`
 `wrangler.jsonc` implantável nunca as define, e `scripts/check-deployable-d1-config.mjs`
 falha o deploy se alguma delas aparecer lá (ver seção "Configuração D1" acima).
 
-## Segurança de senha (correção B)
+## Segurança de senha (correção B, hotfix de restrição de plataforma pós-Sprint 15)
 
 - PBKDF2-HMAC-SHA256 (Web Crypto/`SubtleCrypto`, nativo do runtime Workers).
-- **600.000 iterações** (era 100.000 na v1.0) — recomendação atual da
+- **100.000 iterações** — não é uma escolha de segurança "ideal", é uma
+  **restrição real da plataforma**: o runtime do Cloudflare Workers em
+  produção rejeita PBKDF2 acima de 100.000 iterações, lançando
+  `NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not
+  supported`. Isso foi comprovado por uma tentativa REAL de cadastro contra o
+  Worker publicado (capturada ao vivo via `wrangler tail`), depois que a v1.1
+  havia subido o fator para 600.000 seguindo a recomendação da
   [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
-  para PBKDF2-HMAC-SHA256. Referência de runtime:
-  [Cloudflare Workers Web Crypto](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/).
+  — 600.000 NUNCA funcionou em produção; passava apenas no ambiente local de
+  teste anterior (vitest-pool-workers/miniflare), que não reproduz esse teto
+  do runtime de borda real. Referência de runtime:
+  [Cloudflare Workers Web Crypto](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)
+  (a documentação não declara o teto explicitamente — foi descoberto por
+  observação direta do erro em produção).
 - Salt aleatório de 16 bytes por senha, chave derivada de 256 bits.
 - Formato persistido: `pbkdf2-sha256-v1$<iterações>$<salt base64url>$<hash base64url>`
-  — a versão e as iterações ficam junto do hash.
+  — a versão e as iterações ficam junto do hash. `verifyPassword` sempre usa
+  as iterações do PRÓPRIO hash armazenado (nunca a constante atual), e agora
+  também rejeita, de forma controlada (nunca lançando exceção), qualquer hash
+  cujo `iterations` seja `<= 0`, não-inteiro, ou maior que o teto suportado
+  pela plataforma (`PBKDF2_MAX_SUPPORTED_ITERATIONS`) — um hash malformado ou
+  com iterações acima do limite é tratado como credencial inválida, nunca
+  como um 500 genérico. Isso mantém o formato pronto para um aumento futuro
+  do fator de hashing SE E SOMENTE SE o teto real da plataforma também
+  permitir — nunca invalida hashes antigos gravados com um fator menor.
 - Verificação em tempo constante (`timingSafeEqual`).
 - Mínimo de 10 caracteres, máximo técnico de 256 — sem regra arbitrária de símbolo/maiúscula.
 - Senha, hash e token nunca aparecem em log.
@@ -206,27 +234,35 @@ falha o deploy se alguma delas aparecer lá (ver seção "Configuração D1" aci
 ### Benchmark (`worker/scripts/benchmark-pbkdf2.mjs`, Web Crypto nativo, mesma primitiva do Worker)
 
 ```
-npm run bench:pbkdf2 -- 600000 10
+npm run bench:pbkdf2 -- 100000 10
 ```
 
 | Iterações | Amostras | Mediana | Média | Min | Max |
 |---|---|---|---|---|---|
-| 100.000 (antigo) | 10 | 22.9ms | 23.6ms | 22.0ms | 28.2ms |
-| **600.000 (atual)** | 10 | **143.1ms** | 149.0ms | 139.5ms | 176.6ms |
+| **100.000 (atual — teto real do runtime Workers)** | 10 | 22.9ms | 23.6ms | 22.0ms | 28.2ms |
+| 600.000 (histórico — nunca funcionou em produção) | 10 | 143.1ms | 149.0ms | 139.5ms | 176.6ms |
 
-~143ms por hash é perfeitamente viável para um endpoint de login/cadastro —
-não há necessidade de bloquear ou reduzir o fator.
+~23ms por hash é perfeitamente viável para um endpoint de login/cadastro.
+Não há margem para subir esse fator sem que a Cloudflare eleve o teto do
+runtime — qualquer tentativa de aumentar `PBKDF2_ITERATIONS` sem antes
+reverificar o limite real em produção reproduziria exatamente esta falha.
 
 ### Upgrade oportunista (`worker/src/services/authService.ts:login`)
 
 Depois de comprovar a senha correta (nunca antes, nunca num login inválido),
 `needsRehash(user.password_hash)` verifica se o hash armazenado usa menos que
-600.000 iterações; se sim, gera um novo hash com os parâmetros atuais e grava
+100.000 iterações; se sim, gera um novo hash com os parâmetros atuais e grava
 via `upgradePasswordHash` — **sem** incrementar `session_version` nem revogar
 sessões (o segredo comprovado não mudou, só o custo computacional do hash).
 Testado em `worker/src/lib/crypto.test.ts`: senha correta/incorreta, salts
-diferentes para a mesma senha, formato e fator 600.000, compatibilidade com
-hash antigo de 100.000, e a lógica de `needsRehash`.
+diferentes para a mesma senha, formato e fator 100.000, compatibilidade com
+hash mais antigo de fator menor, iteration count inválido (zero/negativo/
+não-inteiro) e acima do limite suportado (>100.000) sempre tratados sem
+lançar exceção, e um cadastro + login completos e reais (via `FakeD1Database`)
+usando o crypto de produção de ponta a ponta. Compatibilidade com o runtime
+real também foi comprovada via `wrangler dev` local (mesmo binário `workerd`
+da produção): um cadastro e um login reais contra `http://127.0.0.1:8793`
+completaram com sucesso (201/200), sem `NotSupportedError`.
 
 ## Sessão e cookie
 
