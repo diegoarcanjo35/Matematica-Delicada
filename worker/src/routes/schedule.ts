@@ -39,7 +39,7 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
 }
 
 function unavailableResponse() {
-  return json({ ok: true, available: false, message: "O cronograma está em preparação." }, { status: 200 });
+  return json({ ok: true, available: false, message: "Ainda não há atividades cadastradas para o cronograma." }, { status: 200 });
 }
 
 const ASSIGNMENT_ID_RE = /^\/api\/schedule\/activities\/([^/]+)$/;

@@ -162,7 +162,7 @@ describe("gate desligado — a API responde acolhedora sem tocar nas tabelas pat
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).toMatchObject({ ok: true, available: false });
-    expect(body.message).toBe("O catálogo de padrões está em preparação pedagógica.");
+    expect(body.message).toBe("Ainda não há padrões publicados neste catálogo.");
     expect(body.patterns).toBeUndefined();
   });
 

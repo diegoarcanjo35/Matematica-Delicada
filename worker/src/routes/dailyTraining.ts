@@ -54,7 +54,7 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
 }
 
 function unavailableResponse(): Response {
-  return json({ ok: true, available: false, message: "O Treino Diário está em preparação." }, { status: 200 });
+  return json({ ok: true, available: false, message: "Ainda não há questões disponíveis para este treino." }, { status: 200 });
 }
 
 function conflictResponse(): Response {

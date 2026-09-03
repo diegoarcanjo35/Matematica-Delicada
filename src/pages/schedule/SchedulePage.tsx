@@ -260,10 +260,10 @@ export function SchedulePage() {
     return (
       <div className="schedule schedule--centered">
         <Card className="schedule__card">
-          <h1>Cronograma em preparação</h1>
+          <h1>Ainda não há atividades cadastradas</h1>
           <p>
-            O cronograma adaptativo ainda está em preparação técnica. Assim que a metodologia e o
-            conteúdo forem aprovados, ele ficará disponível por aqui.
+            O cronograma adaptativo já está pronto tecnicamente, mas nenhuma atividade está disponível
+            neste ambiente agora. Isso não é um erro do seu lado — tente novamente mais tarde.
           </p>
         </Card>
       </div>

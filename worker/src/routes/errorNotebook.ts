@@ -41,7 +41,10 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
 }
 
 function unavailableResponse(): Response {
-  return json({ ok: true, available: false, message: "O Caderno de Erros está em preparação." }, { status: 200 });
+  return json(
+    { ok: true, available: false, message: "Seu Caderno de Erros está vazio. Ele será preenchido automaticamente quando houver erros para revisar." },
+    { status: 200 }
+  );
 }
 
 function conflictResponse(): Response {

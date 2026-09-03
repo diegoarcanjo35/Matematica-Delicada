@@ -59,7 +59,7 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
  *  com `available: false`, nunca 404/500 e nunca qualquer vestígio de
  *  conteúdo de questão. */
 function unavailableResponse(): Response {
-  return json({ ok: true, available: false, message: "O Player de Questão está em preparação." }, { status: 200 });
+  return json({ ok: true, available: false, message: "Ainda não há questões disponíveis para praticar." }, { status: 200 });
 }
 
 function conflictResponse(): Response {

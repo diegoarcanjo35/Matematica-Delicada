@@ -370,8 +370,8 @@ export function DailyTrainingPage() {
     return (
       <div className="treino-diario treino-diario--centered">
         <Card>
-          <h1>Treino Diário em preparação</h1>
-          <p>Esta funcionalidade ainda está em preparação técnica local — ainda não disponível.</p>
+          <h1>Ainda não há questões disponíveis</h1>
+          <p>O Treino Diário já está pronto tecnicamente, mas nenhuma questão está disponível para praticar neste ambiente agora.</p>
         </Card>
       </div>
     );

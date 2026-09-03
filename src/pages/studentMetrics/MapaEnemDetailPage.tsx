@@ -130,8 +130,8 @@ export function MapaEnemDetailPage() {
     return (
       <div className="mapa-enem mapa-enem--centered">
         <Card className="mapa-enem__card">
-          <h1>Mapa ENEM em preparação</h1>
-          <p>Esta funcionalidade ainda está em preparação técnica local — ainda não disponível.</p>
+          <h1>Seu mapa ainda não tem evidências</h1>
+          <p>Seu mapa começa a ganhar forma conforme você resolve questões. Faça seu primeiro treino para gerar as primeiras evidências.</p>
           <Link to="/mapa-enem">Voltar ao Mapa ENEM</Link>
         </Card>
       </div>

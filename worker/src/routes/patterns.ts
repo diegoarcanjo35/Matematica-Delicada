@@ -42,7 +42,7 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
  *  `available: false`, nunca 404/500 e nunca qualquer vestígio de conteúdo. */
 function unavailableResponse(): Response {
   return json(
-    { ok: true, available: false, message: "O catálogo de padrões está em preparação pedagógica." },
+    { ok: true, available: false, message: "Ainda não há padrões publicados neste catálogo." },
     { status: 200 }
   );
 }

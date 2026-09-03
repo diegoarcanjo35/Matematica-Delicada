@@ -42,7 +42,14 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
 }
 
 function unavailableResponse(): Response {
-  return json({ ok: true, available: false, message: "O Mapa ENEM está em preparação." }, { status: 200 });
+  return json(
+    {
+      ok: true,
+      available: false,
+      message: "Seu mapa começa a ganhar forma conforme você resolve questões. Faça seu primeiro treino para gerar as primeiras evidências.",
+    },
+    { status: 200 }
+  );
 }
 
 const PATTERN_DETAIL_RE = /^\/api\/student-metrics\/patterns\/([^/]+)$/;

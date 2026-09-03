@@ -198,8 +198,8 @@ export function SimuladosPage() {
     return (
       <div className="simulados simulados--centered">
         <Card>
-          <h1>Simulados em preparação</h1>
-          <p>Esta funcionalidade ainda está em preparação técnica local — ainda não disponível.</p>
+          <h1>Ainda não há questões disponíveis</h1>
+          <p>Os Simulados em Blocos já estão prontos tecnicamente, mas nenhuma questão está disponível para montar um simulado neste ambiente agora.</p>
         </Card>
       </div>
     );

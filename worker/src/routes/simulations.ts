@@ -51,7 +51,7 @@ async function requireUser(request: Request, env: Env): Promise<{ id: string } |
 }
 
 function unavailableResponse(): Response {
-  return json({ ok: true, available: false, message: "Os Simulados em Blocos estão em preparação." }, { status: 200 });
+  return json({ ok: true, available: false, message: "Ainda não há questões disponíveis para montar um simulado." }, { status: 200 });
 }
 
 function conflictResponse(): Response {

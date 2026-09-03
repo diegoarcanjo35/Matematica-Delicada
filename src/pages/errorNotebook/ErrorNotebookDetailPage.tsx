@@ -167,9 +167,9 @@ export function ErrorNotebookDetailPage() {
       <div className="error-notebook error-notebook--centered">
         <Card className="error-notebook__card">
           <h1 ref={headingRef} tabIndex={-1}>
-            Caderno de Erros em preparação
+            Seu Caderno de Erros está vazio
           </h1>
-          <p>Esta funcionalidade ainda está em preparação técnica local — ainda não disponível.</p>
+          <p>Ele será preenchido automaticamente quando houver erros para revisar.</p>
         </Card>
       </div>
     );

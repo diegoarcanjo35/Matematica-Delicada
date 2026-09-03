@@ -36,7 +36,7 @@ function unavailableResponse() {
     {
       ok: true,
       available: false,
-      message: "O diagnóstico está em preparação pedagógica.",
+      message: "Ainda não há questões cadastradas para o diagnóstico.",
     },
     { status: 200 }
   );

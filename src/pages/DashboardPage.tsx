@@ -298,14 +298,14 @@ export function DashboardPage() {
               </>
             )
           ) : (
-            <p className="dashboard__message">O Mapa ENEM está em preparação técnica — ainda não disponível.</p>
+            <p className="dashboard__message">Seu mapa ganha forma conforme você resolve questões — faça seu primeiro treino.</p>
           )}
         </Card>
 
         <Card className="dashboard__card">
           <h3>Treino Diário</h3>
           {dailyTrainingCard === null && (
-            <p className="dashboard__message">O Treino Diário está em preparação técnica — ainda não disponível.</p>
+            <p className="dashboard__message">Ainda não há questões disponíveis para o treino de hoje.</p>
           )}
           {dailyTrainingCard?.kind === "active" && (
             <>
@@ -338,7 +338,7 @@ export function DashboardPage() {
         <Card className="dashboard__card">
           <h3>Simulados em blocos</h3>
           {simulationsCard === null && (
-            <p className="dashboard__message">Os Simulados em Blocos estão em preparação técnica — ainda não disponível.</p>
+            <p className="dashboard__message">Ainda não há questões disponíveis para montar um simulado.</p>
           )}
           {simulationsCard?.kind === "active" && (
             <>
@@ -374,7 +374,7 @@ export function DashboardPage() {
         <Card className="dashboard__card">
           <h3>Sua semana</h3>
           {weeklyReviewSummary === null && (
-            <p className="dashboard__message">O Relatório Semanal está em preparação técnica — ainda não disponível.</p>
+            <p className="dashboard__message">Seu relatório semanal aparece assim que você tiver a primeira atividade registrada.</p>
           )}
           {weeklyReviewSummary?.hasAnyEvidence ? (
             <>
@@ -422,7 +422,7 @@ export function DashboardPage() {
             </>
           ) : (
             <p className="dashboard__message">
-              O cronograma adaptativo está em preparação técnica — ainda não disponível.
+              Ainda não há atividades cadastradas para o cronograma.
             </p>
           )}
         </Card>
@@ -457,7 +457,7 @@ export function DashboardPage() {
             )
           ) : (
             <p className="dashboard__message">
-              O catálogo de padrões está em preparação pedagógica — ainda não disponível.
+              Ainda não há padrões publicados neste catálogo.
             </p>
           )}
           {patternsSummary?.available && patternsSummary.hasAnyTrainableQuestion && (
@@ -491,7 +491,7 @@ export function DashboardPage() {
               </>
             )
           ) : (
-            <p className="dashboard__message">O Caderno de Erros está em preparação técnica — ainda não disponível.</p>
+            <p className="dashboard__message">Seu Caderno de Erros está vazio. Ele será preenchido automaticamente quando houver erros para revisar.</p>
           )}
           {errorNotebookSummary && (
             <Link to="/caderno-de-erros" className="btn btn--primary">

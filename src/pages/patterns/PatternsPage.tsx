@@ -194,10 +194,10 @@ export function PatternsPage() {
     return (
       <div className="patterns patterns--centered">
         <Card className="patterns__card">
-          <h1>Padrões ENEM em preparação</h1>
+          <h1>Ainda não há padrões publicados</h1>
           <p>
-            O catálogo de padrões recorrentes ainda está em preparação pedagógica. Assim que a
-            taxonomia e o conteúdo forem aprovados, ele ficará disponível por aqui.
+            O catálogo de padrões recorrentes já está pronto tecnicamente, mas nenhum padrão está
+            publicado neste ambiente agora. Isso não é um erro do seu lado — tente novamente mais tarde.
           </p>
         </Card>
       </div>

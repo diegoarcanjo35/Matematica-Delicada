@@ -75,9 +75,9 @@ export function QuestionStartPage() {
       <div className="player player--centered">
         <Card className="player__card">
           <h1 ref={headingRef} tabIndex={-1}>
-            Player de Questão em preparação
+            Ainda não há questões disponíveis
           </h1>
-          <p>Esta funcionalidade ainda está em preparação técnica local — ainda não disponível.</p>
+          <p>O Player de Questão já está pronto tecnicamente, mas nenhuma questão está disponível para praticar neste ambiente agora.</p>
         </Card>
       </div>
     );

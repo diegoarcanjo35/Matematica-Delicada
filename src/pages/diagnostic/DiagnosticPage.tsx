@@ -238,10 +238,10 @@ export function DiagnosticPage() {
     return (
       <div className="diagnostic diagnostic--centered">
         <Card className="diagnostic__card">
-          <h1>Diagnóstico em preparação</h1>
+          <h1>Ainda não há questões cadastradas</h1>
           <p>
-            O diagnóstico inicial ainda está em preparação pedagógica. Assim que a metodologia e o banco
-            de questões forem aprovados, ele ficará disponível por aqui.
+            O diagnóstico inicial já está pronto tecnicamente, mas nenhuma questão está disponível neste
+            ambiente agora. Isso não é um erro do seu lado — tente novamente mais tarde.
           </p>
           <Button onClick={() => navigate("/")}>Voltar ao início</Button>
         </Card>
