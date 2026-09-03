@@ -46,7 +46,7 @@ import {
   type SimulationBlockItemRow,
   type SimulationBlockRow,
 } from "../repositories/simulationsRepository";
-import { findQuestionById } from "../repositories/questionRepository";
+import { findQuestionForStudent } from "../repositories/questionRepository";
 import { findPublishedPatternById, findPublishedPatternBySlug } from "../repositories/patternsRepository";
 import { findActiveAttempt, findAttemptByIdForUser } from "../repositories/playerRepository";
 import { getPatternEvidence } from "../repositories/studentMetricsRepository";
@@ -148,7 +148,8 @@ export type PreviewResult =
 
 async function resolveBlockRequest(
   db: D1Database,
-  input: PreviewInput
+  input: PreviewInput,
+  fixturesAllowed: boolean
 ): Promise<{ ok: true; blockType: SimulationBlockType; pattern: { id: string; name: string } | null; size: SimulationBlockSize } | { ok: false; fieldErrors: Record<string, string>; notFound?: boolean }> {
   if (input.blockType !== "mixed" && input.blockType !== "pattern_focused") {
     return { ok: false, fieldErrors: { blockType: "Escolha um tipo de bloco válido: misto ou focado em um padrão." } };
@@ -171,7 +172,13 @@ async function resolveBlockRequest(
   if (typeof input.patternSlug !== "string" || input.patternSlug.trim().length === 0) {
     return { ok: false, fieldErrors: { patternSlug: "Escolha um padrão para o bloco focado." } };
   }
-  const pattern = await findPublishedPatternBySlug(db, input.patternSlug);
+  // Sprint 16 v1.4 — `includeFixtures: fixturesAllowed` (corrigido; v1.3
+  // usava `false` sempre, o que impedia um bloco focado num padrão de
+  // fixture mesmo em dev local com a flag — mesmo achado registrado no
+  // relatório da v1.3 para o Banco de Questões, agora também corrigido
+  // aqui, já que a criação do bloco pattern_focused depende diretamente
+  // disto para funcionar localmente).
+  const pattern = await findPublishedPatternBySlug(db, input.patternSlug, fixturesAllowed);
   if (!pattern) return { ok: false, notFound: true, fieldErrors: {} };
   return { ok: true, blockType: "pattern_focused", pattern: { id: pattern.id, name: pattern.name }, size: input.size };
 }
@@ -197,8 +204,8 @@ async function buildContext(db: D1Database, userId: string, clock: Clock): Promi
   return { timezone, todayCivil, recentlyCompleted };
 }
 
-async function candidatesForPattern(db: D1Database, patternId: string): Promise<RawSimulationCandidate[]> {
-  const rows = await listTrainableQuestionsForPattern(db, patternId);
+async function candidatesForPattern(db: D1Database, patternId: string, fixturesAllowed: boolean): Promise<RawSimulationCandidate[]> {
+  const rows = await listTrainableQuestionsForPattern(db, patternId, fixturesAllowed);
   return rows.map((r) => ({ questionId: r.id, questionCode: r.code, patternId, estimatedMinutes: estimateItemMinutes(r.tempo_estimado_segundos) }));
 }
 
@@ -209,7 +216,7 @@ async function candidatesForPattern(db: D1Database, patternId: string): Promise<
  *  lista por causa dessa evidência. Reaproveita getPatternEvidence
  *  (Sprint 10, worker/src/repositories/studentMetricsRepository.ts) — nunca
  *  uma segunda leitura de evidência inventada aqui. */
-async function orderedMixedPatternGroups(db: D1Database, userId: string): Promise<RawSimulationCandidate[][]> {
+async function orderedMixedPatternGroups(db: D1Database, userId: string, fixturesAllowed: boolean): Promise<RawSimulationCandidate[][]> {
   const patterns = await listPublishedPatternIds(db);
   const withEvidence: Array<{ patternId: string; code: string; lastPracticeAt: string | null }> = [];
   for (const pattern of patterns) {
@@ -225,7 +232,7 @@ async function orderedMixedPatternGroups(db: D1Database, userId: string): Promis
 
   const groups: RawSimulationCandidate[][] = [];
   for (const entry of withEvidence) {
-    const candidates = await candidatesForPattern(db, entry.patternId);
+    const candidates = await candidatesForPattern(db, entry.patternId, fixturesAllowed);
     if (candidates.length > 0) groups.push(candidates);
   }
   return groups;
@@ -237,24 +244,26 @@ async function computeSelection(
   blockType: SimulationBlockType,
   pattern: { id: string; name: string } | null,
   size: SimulationBlockSize,
-  context: BuiltCandidates
+  context: BuiltCandidates,
+  fixturesAllowed: boolean
 ) {
   if (blockType === "pattern_focused") {
-    const candidates = await candidatesForPattern(db, pattern!.id);
+    const candidates = await candidatesForPattern(db, pattern!.id, fixturesAllowed);
     return selectPatternFocusedBlock({ candidates, size, recentlyCompletedQuestionIds: context.recentlyCompleted });
   }
-  const groups = await orderedMixedPatternGroups(db, userId);
+  const groups = await orderedMixedPatternGroups(db, userId, fixturesAllowed);
   return selectMixedBlock({ patternGroups: groups, size, recentlyCompletedQuestionIds: context.recentlyCompleted });
 }
 
 async function toPreviewCompositionAndItems(
   db: D1Database,
-  items: Array<{ questionId: string; patternId: string; estimatedMinutes: number; position: number }>
+  items: Array<{ questionId: string; patternId: string; estimatedMinutes: number; position: number }>,
+  fixturesAllowed: boolean
 ): Promise<{ composition: PreviewCompositionEntry[]; items: BlockItemDto[] }> {
   const compositionMap = new Map<string, { patternId: string; patternName: string; count: number }>();
   const dtos: BlockItemDto[] = [];
   for (const item of items) {
-    const question = await findQuestionById(db, item.questionId);
+    const question = await findQuestionForStudent(db, item.questionId, fixturesAllowed);
     const pattern = await findPublishedPatternById(db, item.patternId);
     const patternName = pattern?.name ?? null;
     dtos.push({
@@ -284,13 +293,19 @@ async function toPreviewCompositionAndItems(
  *  bloco, item, tentativa, evento, auditoria, bookmark ou entrada no
  *  Caderno de Erros"). Determinístico para o mesmo usuário/tipo/padrão/
  *  tamanho/estado do banco/relógio injetado. */
-export async function preview(db: D1Database, userId: string, input: PreviewInput, clock: Clock = systemClock): Promise<PreviewResult> {
-  const resolved = await resolveBlockRequest(db, input);
+export async function preview(
+  db: D1Database,
+  userId: string,
+  input: PreviewInput,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<PreviewResult> {
+  const resolved = await resolveBlockRequest(db, input, fixturesAllowed);
   if (!resolved.ok) return resolved;
 
   const context = await buildContext(db, userId, clock);
-  const selection = await computeSelection(db, userId, resolved.blockType, resolved.pattern, resolved.size, context);
-  const { composition, items } = await toPreviewCompositionAndItems(db, selection.items);
+  const selection = await computeSelection(db, userId, resolved.blockType, resolved.pattern, resolved.size, context, fixturesAllowed);
+  const { composition, items } = await toPreviewCompositionAndItems(db, selection.items, fixturesAllowed);
 
   return {
     ok: true,
@@ -315,10 +330,10 @@ function isUniqueActiveBlockViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("simulation_blocks");
 }
 
-async function toBlockDto(db: D1Database, block: SimulationBlockRow): Promise<BlockDto> {
+async function toBlockDto(db: D1Database, block: SimulationBlockRow, fixturesAllowed: boolean): Promise<BlockDto> {
   const rows = await listItemsForBlock(db, block.id);
   const items: BlockItemDto[] = [];
-  for (const row of rows) items.push(await itemRowToDto(db, row));
+  for (const row of rows) items.push(await itemRowToDto(db, row, fixturesAllowed));
   const primaryPattern = block.primary_pattern_id ? await findPublishedPatternById(db, block.primary_pattern_id) : null;
   return {
     id: block.id,
@@ -339,8 +354,8 @@ async function toBlockDto(db: D1Database, block: SimulationBlockRow): Promise<Bl
   };
 }
 
-async function itemRowToDto(db: D1Database, row: SimulationBlockItemRow): Promise<BlockItemDto> {
-  const question = await findQuestionById(db, row.question_id);
+async function itemRowToDto(db: D1Database, row: SimulationBlockItemRow, fixturesAllowed: boolean): Promise<BlockItemDto> {
+  const question = await findQuestionForStudent(db, row.question_id, fixturesAllowed);
   const pattern = row.primary_pattern_id ? await findPublishedPatternById(db, row.primary_pattern_id) : null;
   let isCorrect: boolean | null = null;
   if (row.question_attempt_id && row.status === "completed") {
@@ -409,8 +424,14 @@ function classifyActiveBlockCollision(
  *  prévia armazenada — não existe tabela de prévia nesta sprint, mesma
  *  decisão do Treino Diário) e persiste bloco+itens ATOMICAMENTE, num único
  *  db.batch() com o núcleo primeiro e o evento incondicional por último. */
-export async function applyBlock(db: D1Database, userId: string, input: ApplyInput, clock: Clock = systemClock): Promise<MutationResult<{ blockId: string }>> {
-  const resolved = await resolveBlockRequest(db, input);
+export async function applyBlock(
+  db: D1Database,
+  userId: string,
+  input: ApplyInput,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<MutationResult<{ blockId: string }>> {
+  const resolved = await resolveBlockRequest(db, input, fixturesAllowed);
   if (!resolved.ok) return { ok: false, notFound: resolved.notFound, fieldErrors: resolved.fieldErrors };
 
   const existingActive = await findActiveBlockForUser(db, userId);
@@ -429,7 +450,7 @@ export async function applyBlock(db: D1Database, userId: string, input: ApplyInp
   }
 
   const context = await buildContext(db, userId, clock);
-  const selection = await computeSelection(db, userId, resolved.blockType, resolved.pattern, resolved.size, context);
+  const selection = await computeSelection(db, userId, resolved.blockType, resolved.pattern, resolved.size, context, fixturesAllowed);
   if (selection.items.length === 0) {
     // Seção 9 da ordem: "nunca persistir bloco vazio".
     return { ok: false, empty: true };
@@ -492,16 +513,16 @@ export async function applyBlock(db: D1Database, userId: string, input: ApplyInp
 /** GET /api/simulations/current — o bloco ATIVO do aluno, quando existir;
  *  `null` senão (o frontend cai para a tela de configuração/preview). 100%
  *  somente leitura. */
-export async function getCurrent(db: D1Database, userId: string): Promise<BlockDto | null> {
+export async function getCurrent(db: D1Database, userId: string, fixturesAllowed: boolean): Promise<BlockDto | null> {
   const block = await findActiveBlockForUser(db, userId);
   if (!block) return null;
-  return toBlockDto(db, block);
+  return toBlockDto(db, block, fixturesAllowed);
 }
 
-export async function getBlockDetail(db: D1Database, userId: string, blockId: string): Promise<BlockDto | null> {
+export async function getBlockDetail(db: D1Database, userId: string, blockId: string, fixturesAllowed: boolean): Promise<BlockDto | null> {
   const block = await findBlockForUser(db, blockId, userId);
   if (!block) return null;
-  return toBlockDto(db, block);
+  return toBlockDto(db, block, fixturesAllowed);
 }
 
 /* ------------------------------------- Início do item ------------------------------------- */
@@ -517,7 +538,14 @@ export interface StartItemResult extends MutationResult<{ attemptId: string; que
  *  o evento `item_started` — nunca duas transações separadas (mesma
  *  correção de atomicidade extraída na Sprint 11 v1.1/v1.2, reaproveitada
  *  aqui, nunca reimplementada). */
-export async function startItem(db: D1Database, userId: string, blockId: string, itemId: string, mutationId: string): Promise<StartItemResult> {
+export async function startItem(
+  db: D1Database,
+  userId: string,
+  blockId: string,
+  itemId: string,
+  mutationId: string,
+  fixturesAllowed: boolean
+): Promise<StartItemResult> {
   const block = await findBlockForUser(db, blockId, userId);
   if (!block) return { ok: false, notFound: true };
   if (block.status !== "active") return { ok: false, fieldErrors: { status: "Este bloco não está mais ativo." } };
@@ -549,7 +577,7 @@ export async function startItem(db: D1Database, userId: string, blockId: string,
     return { ok: false, conflict: true };
   }
 
-  const question = await findQuestionById(db, item.question_id);
+  const question = await findQuestionForStudent(db, item.question_id, fixturesAllowed);
   if (!question || question.editorial_status !== PUBLISHED) {
     const blockMutationId = newId();
     try {
@@ -565,7 +593,7 @@ export async function startItem(db: D1Database, userId: string, blockId: string,
     return { ok: false, blocked: true, fieldErrors: { question: "Esta questão não está mais disponível." } };
   }
 
-  const planned = await planStartOrResumeAttempt(db, userId, item.question_id, "practice");
+  const planned = await planStartOrResumeAttempt(db, userId, item.question_id, "practice", fixturesAllowed);
   if (!planned.ok) {
     if (planned.notFound) return { ok: false, blocked: true, fieldErrors: { question: "Esta questão não está mais disponível." } };
     return { ok: false, fieldErrors: planned.fieldErrors };

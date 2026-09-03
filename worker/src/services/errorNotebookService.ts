@@ -25,7 +25,7 @@ import {
   type ErrorReviewEventRow,
   type ListFilters,
 } from "../repositories/errorNotebookRepository";
-import { findQuestionById } from "../repositories/questionRepository";
+import { findQuestionForStudent } from "../repositories/questionRepository";
 import { findPublishedPatternById } from "../repositories/patternsRepository";
 import { startOrResumeReviewAttempt } from "./playerService";
 import { ERROR_TYPES, type ErrorType } from "../lib/errorNotebookValidation";
@@ -129,13 +129,14 @@ export async function listEntries(
   db: D1Database,
   userId: string,
   filters: ListFilters,
+  fixturesAllowed: boolean,
   clock: Clock = systemClock
 ): Promise<{ entries: EntryListItemDto[]; total: number }> {
   const nowIso = clock.now().toISOString();
   const [rows, total] = await Promise.all([repoListEntries(db, userId, filters, nowIso), countEntries(db, userId, filters, nowIso)]);
   const entries: EntryListItemDto[] = [];
   for (const row of rows) {
-    const question = await findQuestionById(db, row.original_question_id);
+    const question = await findQuestionForStudent(db, row.original_question_id, fixturesAllowed);
     entries.push(await toListItemDto(db, row, { code: question?.code ?? "?" }, nowIso));
   }
   return { entries, total };
@@ -145,10 +146,16 @@ export async function getSummary(db: D1Database, userId: string, clock: Clock = 
   return summaryForUser(db, userId, clock.now().toISOString());
 }
 
-export async function getEntryDetail(db: D1Database, userId: string, entryId: string, clock: Clock = systemClock): Promise<EntryDetailDto | null> {
+export async function getEntryDetail(
+  db: D1Database,
+  userId: string,
+  entryId: string,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<EntryDetailDto | null> {
   const entry = await findEntryById(db, entryId, userId);
   if (!entry) return null;
-  const question = await findQuestionById(db, entry.original_question_id);
+  const question = await findQuestionForStudent(db, entry.original_question_id, fixturesAllowed);
   const nowIso = clock.now().toISOString();
   const base = await toListItemDto(db, entry, { code: question?.code ?? "?" }, nowIso);
 
@@ -156,7 +163,7 @@ export async function getEntryDetail(db: D1Database, userId: string, entryId: st
   const reviewHistory: EntryDetailDto["reviewHistory"] = [];
   let hasSuccessOnDifferentQuestion = false;
   for (const event of events) {
-    const reviewedQuestion = await findQuestionById(db, event.reviewed_question_id);
+    const reviewedQuestion = await findQuestionForStudent(db, event.reviewed_question_id, fixturesAllowed);
     if (event.result === "correct" && event.reviewed_question_id !== entry.original_question_id) hasSuccessOnDifferentQuestion = true;
     reviewHistory.push({
       id: event.id,
@@ -301,7 +308,7 @@ export interface StartReviewResult {
  *  iniciar revisão (arquivar é uma decisão do aluno de "não quero mais
  *  ver isto agora" — reabrir exige desarquivar primeiro, fora do escopo
  *  desta sprint). */
-export async function startReview(db: D1Database, userId: string, entryId: string): Promise<StartReviewResult> {
+export async function startReview(db: D1Database, userId: string, entryId: string, fixturesAllowed: boolean): Promise<StartReviewResult> {
   const entry = await findEntryById(db, entryId, userId);
   if (!entry) return { ok: false, notFound: true };
   if (entry.status === "archived") {
@@ -315,12 +322,16 @@ export async function startReview(db: D1Database, userId: string, entryId: strin
   // DISTINTA bem-sucedida).
   const priorEvents = await listReviewEventsForEntry(db, entryId);
   const alreadySucceededQuestionIds = priorEvents.filter((e) => e.result === "correct").map((e) => e.reviewed_question_id);
-  const selection = await selectSimilarQuestion(db, {
-    originalQuestionId: entry.original_question_id,
-    primaryPatternId: entry.primary_pattern_id,
-    excludeQuestionIds: alreadySucceededQuestionIds,
-  });
-  const question = await findQuestionById(db, selection.questionId);
+  const selection = await selectSimilarQuestion(
+    db,
+    {
+      originalQuestionId: entry.original_question_id,
+      primaryPatternId: entry.primary_pattern_id,
+      excludeQuestionIds: alreadySucceededQuestionIds,
+    },
+    fixturesAllowed
+  );
+  const question = await findQuestionForStudent(db, selection.questionId, fixturesAllowed);
   if (!question) return { ok: false, fieldErrors: { question: "Não foi possível selecionar uma questão para a revisão." } };
 
   const result = await startOrResumeReviewAttempt(db, userId, entryId, entry.version, question.id, question.version);

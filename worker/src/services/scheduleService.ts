@@ -18,6 +18,7 @@ import {
   listAssignmentsInDateRange,
   listLocalFixtureActivities,
   listPendingAssignments,
+  listRealActivities,
   sumActiveMinutesForDay,
   type ScheduleActivityRow,
   type ScheduleAssignmentRow,
@@ -180,30 +181,43 @@ export interface ScheduleSummary {
   pendingCount: number;
 }
 
-/** Lista as atividades de fixture locais que este usuário ainda NÃO tem em
- *  nenhuma atribuição (nem pendente, nem já datada, nem em histórico) — o
- *  conjunto de candidatas que `previewPlan()` pode oferecer pela primeira
- *  vez. Correção v1.1, seção 2: nenhuma leitura cria nada; só esta função
- *  (chamada apenas por previewPlan/applyPlan, nunca por um GET) enxerga
- *  fixtures ainda não atribuídas. */
-async function listUnassignedFixtureActivities(db: D1Database, userId: string): Promise<ScheduleActivityRow[]> {
-  const [fixtureActivities, existing] = await Promise.all([
-    listLocalFixtureActivities(db),
+/** Lista as atividades ainda NÃO atribuídas a este usuário (nem pendente,
+ *  nem já datada, nem em histórico) — o conjunto de candidatas que
+ *  `previewPlan()` pode oferecer pela primeira vez. Correção v1.1, seção
+ *  2: nenhuma leitura cria nada; só esta função (chamada apenas por
+ *  previewPlan/applyPlan, nunca por um GET) enxerga atividades ainda não
+ *  atribuídas.
+ *
+ *  Sprint 16 v1.3, seção 1/3 da ordem — `fixturesAllowed` decide o POOL de
+ *  origem, nunca o gate de disponibilidade em si (esse já foi checado na
+ *  rota, via `isScheduleAvailable`, antes de chegar aqui): dev local com a
+ *  flag explícita usa `listLocalFixtureActivities` (comportamento
+ *  IDÊNTICO ao de sempre — nenhuma regressão para quem testa localmente
+ *  com fixtures); qualquer outro caso (produção real com conteúdo real,
+ *  já garantido pelo gate da rota) usa `listRealActivities`
+ *  (`is_local_fixture = 0`) — nunca mistura uma fixture local numa
+ *  atribuição real. */
+async function listUnassignedActivities(db: D1Database, userId: string, fixturesAllowed: boolean): Promise<ScheduleActivityRow[]> {
+  const [candidatePool, existing] = await Promise.all([
+    fixturesAllowed ? listLocalFixtureActivities(db) : listRealActivities(db),
     listAssignmentsForUser(db, userId),
   ]);
   const assignedActivityIds = new Set(existing.map((assignment) => assignment.activity_id));
-  return fixtureActivities.filter((activity) => !assignedActivityIds.has(activity.id));
+  return candidatePool.filter((activity) => !assignedActivityIds.has(activity.id));
 }
 
+/** Sprint 16 v1.3 — `available` agora reflete `isScheduleAvailable` (dev
+ *  local com fixtures explícitas OU pelo menos uma atividade real), nunca
+ *  só a flag de dev sozinha (nome do parâmetro atualizado por clareza). */
 export async function getSummary(
   db: D1Database,
   userId: string,
-  fixturesAllowed: boolean,
+  available: boolean,
   clock: Clock
 ): Promise<ScheduleSummary> {
   const timezone = await getTimezone(db, userId);
   const today = civilDateInTimezone(clock.now(), timezone);
-  if (!fixturesAllowed) {
+  if (!available) {
     return { available: false, today, timezone, plannedMinutesToday: 0, availableMinutesToday: 0, pendingCount: 0 };
   }
   const [plannedMinutesToday, availability, pending] = await Promise.all([
@@ -745,11 +759,12 @@ function inputSnapshotFor(
  *  a aplicação (a linha só passa a existir de fato se/quando aplicada). */
 async function listPlanCandidates(
   db: D1Database,
-  userId: string
+  userId: string,
+  fixturesAllowed: boolean
 ): Promise<Array<{ assignmentId: string; activityId: string; estimatedMinutes: number; isNewAssignment: boolean }>> {
   const [pending, unassignedActivities] = await Promise.all([
     listPendingAssignments(db, userId),
-    listUnassignedFixtureActivities(db, userId),
+    listUnassignedActivities(db, userId, fixturesAllowed),
   ]);
   const pendingActivities = await listActivitiesByIds(
     db,
@@ -772,11 +787,11 @@ async function listPlanCandidates(
   return [...fromExistingPending, ...fromUnassignedFixtures];
 }
 
-export async function previewPlan(db: D1Database, userId: string, clock: Clock): Promise<PlanPreviewResponse> {
+export async function previewPlan(db: D1Database, userId: string, clock: Clock, fixturesAllowed: boolean): Promise<PlanPreviewResponse> {
   const timezone = await getTimezone(db, userId);
   const today = civilDateInTimezone(clock.now(), timezone);
   const availability = await getAvailability(db, userId);
-  const candidates = await listPlanCandidates(db, userId);
+  const candidates = await listPlanCandidates(db, userId, fixturesAllowed);
   const candidateByAssignmentId = new Map(candidates.map((candidate) => [candidate.assignmentId, candidate]));
 
   const horizonEnd = addCivilDays(today, SCHEDULE_HORIZON_DAYS);
@@ -842,7 +857,7 @@ export interface ApplyPlanResult {
   appliedCount?: number;
 }
 
-export async function applyPlan(db: D1Database, userId: string, previewId: string, clock: Clock): Promise<ApplyPlanResult> {
+export async function applyPlan(db: D1Database, userId: string, previewId: string, clock: Clock, fixturesAllowed: boolean): Promise<ApplyPlanResult> {
   const preview = await findPlanPreview(db, previewId);
   if (!preview || preview.user_id !== userId) return { ok: false, notFound: true };
 
@@ -856,7 +871,7 @@ export async function applyPlan(db: D1Database, userId: string, previewId: strin
   }
 
   const availability = await getAvailability(db, userId);
-  const currentCandidates = await listPlanCandidates(db, userId);
+  const currentCandidates = await listPlanCandidates(db, userId, fixturesAllowed);
   const currentSnapshot = inputSnapshotFor(availability, currentCandidates);
   if (currentSnapshot !== preview.input_snapshot) {
     return { ok: false, stale: true };

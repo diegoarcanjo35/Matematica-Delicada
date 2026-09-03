@@ -110,8 +110,8 @@ describe("dois applies simultâneos criam exatamente UM bloco ativo (seção 19 
     const req = { blockType: "mixed" as const, patternSlug: null, size: 5 as const };
 
     const [r1, r2] = await Promise.all([
-      applyBlock(db as never, "u-race-apply", { mutationId: "mut-a", ...req }, CLOCK),
-      applyBlock(db as never, "u-race-apply", { mutationId: "mut-b", ...req }, CLOCK),
+      applyBlock(db as never, "u-race-apply", { mutationId: "mut-a", ...req }, false, CLOCK),
+      applyBlock(db as never, "u-race-apply", { mutationId: "mut-b", ...req }, false, CLOCK),
     ]);
 
     const results = [r1, r2];
@@ -133,8 +133,8 @@ describe("dois applies simultâneos criam exatamente UM bloco ativo (seção 19 
     const SHARED_MUTATION_ID = "mut-shared-same-op";
 
     const [r1, r2] = await Promise.allSettled([
-      applyBlock(db as never, "u-race-apply-same", { mutationId: SHARED_MUTATION_ID, ...req }, CLOCK),
-      applyBlock(db as never, "u-race-apply-same", { mutationId: SHARED_MUTATION_ID, ...req }, CLOCK),
+      applyBlock(db as never, "u-race-apply-same", { mutationId: SHARED_MUTATION_ID, ...req }, false, CLOCK),
+      applyBlock(db as never, "u-race-apply-same", { mutationId: SHARED_MUTATION_ID, ...req }, false, CLOCK),
     ]);
 
     expect(r1.status).toBe("fulfilled");
@@ -153,7 +153,7 @@ describe("dois applies simultâneos criam exatamente UM bloco ativo (seção 19 
     const SHARED_MUTATION_ID = "mut-shared-diff-op";
 
     const [r1, r2] = await Promise.allSettled([
-      applyBlock(db as never, "u-race-apply-diff-op", { mutationId: SHARED_MUTATION_ID, blockType: "mixed", patternSlug: null, size: 5 }, CLOCK),
+      applyBlock(db as never, "u-race-apply-diff-op", { mutationId: SHARED_MUTATION_ID, blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK),
       applyBlock(
         db as never,
         "u-race-apply-diff-op",
@@ -181,13 +181,13 @@ describe("dois applies simultâneos criam exatamente UM bloco ativo (seção 19 
 describe("start simultâneo cria/associa exatamente UMA tentativa (seção 19 da ordem)", () => {
   it("duas chamadas concorrentes de startItem no MESMO item resultam numa única question_attempts e um único item_started", async () => {
     await setupUserWithOneEligibleQuestion("u-race-start");
-    const applied = await applyBlock(db as never, "u-race-start", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-race-start", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
 
     const [r1, r2] = await Promise.all([
-      startItem(db as never, "u-race-start", blockId, itemRow.id, "start-a"),
-      startItem(db as never, "u-race-start", blockId, itemRow.id, "start-b"),
+      startItem(db as never, "u-race-start", blockId, itemRow.id, "start-a", false),
+      startItem(db as never, "u-race-start", blockId, itemRow.id, "start-b", false),
     ]);
 
     expect(r1.ok).toBe(true);
@@ -204,7 +204,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
     await setupUserWithOneEligibleQuestion("u-fail-apply");
     db.failNextMatching(/INSERT INTO simulation_block_events/);
 
-    await expect(applyBlock(db as never, "u-fail-apply", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK)).rejects.toThrow();
+    await expect(applyBlock(db as never, "u-fail-apply", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK)).rejects.toThrow();
 
     expect(countRows("simulation_blocks")).toBe(0);
     expect(countRows("simulation_block_items")).toBe(0);
@@ -212,12 +212,12 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
 
   it("start: INSERT de simulation_block_events forçado a falhar não deixa o item marcado in_progress sem evento, NEM uma tentativa órfã do Player", async () => {
     await setupUserWithOneEligibleQuestion("u-fail-start");
-    const applied = await applyBlock(db as never, "u-fail-start", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-fail-start", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
 
     db.failNextMatching(/INSERT INTO simulation_block_events/);
-    await expect(startItem(db as never, "u-fail-start", blockId, itemRow.id, "start-1")).rejects.toThrow();
+    await expect(startItem(db as never, "u-fail-start", blockId, itemRow.id, "start-1", false)).rejects.toThrow();
 
     const row = db.sqlite.prepare(`SELECT status, question_attempt_id, version FROM simulation_block_items WHERE id = ?`).get(itemRow.id) as {
       status: string;
@@ -234,7 +234,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
 
   it("complete: INSERT de simulation_block_events forçado a falhar não deixa o bloco marcado completed sem evento", async () => {
     await setupUserWithOneEligibleQuestion("u-fail-complete");
-    const applied = await applyBlock(db as never, "u-fail-complete", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-fail-complete", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
     await skipItem(db as never, "u-fail-complete", blockId, itemRow.id, "skip-1");
@@ -250,7 +250,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
 describe("colisão de mutationId retorna conflito controlado (seção 19 da ordem)", () => {
   it("completar o bloco duas vezes com o MESMO mutationId (sem ser retry do resultado já aplicado) retorna conflict, não corrompe nada", async () => {
     await setupUserWithOneEligibleQuestion("u-collision");
-    const applied = await applyBlock(db as never, "u-collision", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-collision", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
     await skipItem(db as never, "u-collision", blockId, itemRow.id, "skip-1");
@@ -277,14 +277,14 @@ describe("PO v1.1 — reaproveitar mutationId de OUTRA operação real (fora do 
 
   it("syncItem: mutationId já usado por um skipItem em OUTRO item deste bloco retorna conflict, nunca lança", async () => {
     await setupUserWithTwoEligibleQuestions("u-cross-sync");
-    const applied = await applyBlock(db as never, "u-cross-sync", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-cross-sync", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC`).all(blockId) as { id: string }[];
     const [itemA, itemB] = items;
     const REUSED_MUTATION_ID = "reused-mut-cross-sync";
 
     await skipItem(db as never, "u-cross-sync", blockId, itemA.id, REUSED_MUTATION_ID);
-    const started = await startItem(db as never, "u-cross-sync", blockId, itemB.id, "start-b");
+    const started = await startItem(db as never, "u-cross-sync", blockId, itemB.id, "start-b", false);
     expect(started.ok).toBe(true);
     // A tentativa REAL precisa estar `completed` — senão syncItem devolve
     // `changed:false` sem sequer tentar escrever, e o teste não exercitaria
@@ -303,13 +303,13 @@ describe("PO v1.1 — reaproveitar mutationId de OUTRA operação real (fora do 
 
   it("skipItem: mutationId já usado por um startItem em OUTRO item deste bloco retorna conflict, nunca lança", async () => {
     await setupUserWithTwoEligibleQuestions("u-cross-skip");
-    const applied = await applyBlock(db as never, "u-cross-skip", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-cross-skip", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC`).all(blockId) as { id: string }[];
     const [itemA, itemB] = items;
     const REUSED_MUTATION_ID = "reused-mut-cross-skip";
 
-    const started = await startItem(db as never, "u-cross-skip", blockId, itemA.id, REUSED_MUTATION_ID);
+    const started = await startItem(db as never, "u-cross-skip", blockId, itemA.id, REUSED_MUTATION_ID, false);
     expect(started.ok).toBe(true);
 
     const result = await skipItem(db as never, "u-cross-skip", blockId, itemB.id, REUSED_MUTATION_ID);
@@ -322,7 +322,7 @@ describe("PO v1.1 — reaproveitar mutationId de OUTRA operação real (fora do 
 
   it("completeBlock: mutationId já usado por um evento de ITEM (não pelo próprio bloco) retorna conflict, nunca lança — o bloco permanece active", async () => {
     await setupUserWithOneEligibleQuestion("u-cross-complete");
-    const applied = await applyBlock(db as never, "u-cross-complete", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-cross-complete", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
     const REUSED_MUTATION_ID = "reused-mut-cross-complete";
@@ -343,11 +343,11 @@ describe("PO v1.1 — reaproveitar mutationId de OUTRA operação real (fora do 
 
   it("abandonBlock: mutationId já usado por um evento de ITEM (não pelo próprio bloco) retorna conflict, nunca lança — o bloco permanece active", async () => {
     await setupUserWithOneEligibleQuestion("u-cross-abandon");
-    const applied = await applyBlock(db as never, "u-cross-abandon", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-cross-abandon", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
     const REUSED_MUTATION_ID = "reused-mut-cross-abandon";
-    const started = await startItem(db as never, "u-cross-abandon", blockId, itemRow.id, REUSED_MUTATION_ID);
+    const started = await startItem(db as never, "u-cross-abandon", blockId, itemRow.id, REUSED_MUTATION_ID, false);
     expect(started.ok).toBe(true);
 
     // Se esta chamada lançasse (comportamento antigo, sem try/catch ao
@@ -364,7 +364,7 @@ describe("PO v1.1 — reaproveitar mutationId de OUTRA operação real (fora do 
 describe("complete com item não terminal falha antes do commit (seção 12/19 da ordem)", () => {
   it("tentar completar com um item ainda pending nunca muda o status do bloco", async () => {
     await setupUserWithOneEligibleQuestion("u-not-terminal");
-    const applied = await applyBlock(db as never, "u-not-terminal", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-not-terminal", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
 
     const result = await completeBlock(db as never, "u-not-terminal", blockId, "complete-1");
@@ -395,7 +395,7 @@ describe("auditoria só é gravada quando a mutação é REAL (seção 18 da ord
 describe("startItem — corrida real de TOCTOU no mutationId, duas operações DIFERENTES", () => {
   it("duas chamadas CONCORRENTES de startItem, itens diferentes, MESMO mutationId: ambas passam pelo pre-check, exatamente uma vence, a outra recebe 409 controlado, sem escrita parcial", async () => {
     await setupUserWithTwoEligibleQuestions("u-toctou-race");
-    const applied = await applyBlock(db as never, "u-toctou-race", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-toctou-race", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC`).all(blockId) as { id: string }[];
     expect(items.length).toBe(2);
@@ -405,8 +405,8 @@ describe("startItem — corrida real de TOCTOU no mutationId, duas operações D
     const gate = db.pauseReadsMatching(/SELECT 1 as found FROM simulation_block_events WHERE id = \?/, 2);
 
     const racePromise = Promise.allSettled([
-      startItem(db as never, "u-toctou-race", blockId, itemA.id, SHARED_MUTATION_ID),
-      startItem(db as never, "u-toctou-race", blockId, itemB.id, SHARED_MUTATION_ID),
+      startItem(db as never, "u-toctou-race", blockId, itemA.id, SHARED_MUTATION_ID, false),
+      startItem(db as never, "u-toctou-race", blockId, itemB.id, SHARED_MUTATION_ID, false),
     ]);
 
     await gate.arrived;
@@ -445,15 +445,15 @@ describe("startItem — corrida real de TOCTOU no mutationId, duas operações D
 
   it("retry da MESMA operação (mesmo item, mesmo mutationId) CONCORRENTE consigo mesma continua idempotente — nunca vira conflito", async () => {
     await setupUserWithOneEligibleQuestion("u-toctou-retry-same");
-    const applied = await applyBlock(db as never, "u-toctou-retry-same", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-toctou-retry-same", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
     const SHARED_MUTATION_ID = "toctou-retry-same-mut";
 
     const gate = db.pauseReadsMatching(/SELECT 1 as found FROM simulation_block_events WHERE id = \?/, 2);
     const racePromise = Promise.allSettled([
-      startItem(db as never, "u-toctou-retry-same", blockId, itemRow.id, SHARED_MUTATION_ID),
-      startItem(db as never, "u-toctou-retry-same", blockId, itemRow.id, SHARED_MUTATION_ID),
+      startItem(db as never, "u-toctou-retry-same", blockId, itemRow.id, SHARED_MUTATION_ID, false),
+      startItem(db as never, "u-toctou-retry-same", blockId, itemRow.id, SHARED_MUTATION_ID, false),
     ]);
     await gate.arrived;
     gate.release();
@@ -473,7 +473,7 @@ describe("startItem — corrida real de TOCTOU no mutationId, duas operações D
 describe("bloco preexistente ativo não é apagado por rollback do abandono/conclusão", () => {
   it("falha ao completar não altera status/versão do bloco (permanece ativo, intocado)", async () => {
     await setupUserWithOneEligibleQuestion("u-block-preserved");
-    const applied = await applyBlock(db as never, "u-block-preserved", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-block-preserved", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).get(blockId) as { id: string };
     await skipItem(db as never, "u-block-preserved", blockId, itemRow.id, "skip-1");
@@ -490,7 +490,7 @@ describe("bloco preexistente ativo não é apagado por rollback do abandono/conc
 describe("abandonar duas vezes é idempotente", () => {
   it("segunda chamada de abandonBlock não grava um segundo evento nem falha", async () => {
     await setupUserWithOneEligibleQuestion("u-abandon-twice");
-    const applied = await applyBlock(db as never, "u-abandon-twice", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-abandon-twice", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const r1 = await abandonBlock(db as never, "u-abandon-twice", blockId, "abandon-1");
     const r2 = await abandonBlock(db as never, "u-abandon-twice", blockId, "abandon-2");

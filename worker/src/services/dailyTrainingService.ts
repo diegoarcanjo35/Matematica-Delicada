@@ -45,7 +45,7 @@ import {
   type TrainableQuestionRow,
 } from "../repositories/dailyTrainingRepository";
 import { findEntryById, selectSimilarQuestion } from "../repositories/errorNotebookRepository";
-import { findQuestionById } from "../repositories/questionRepository";
+import { findQuestionForStudent } from "../repositories/questionRepository";
 import { findPublishedPatternById } from "../repositories/patternsRepository";
 import { findProfile } from "../repositories/onboardingRepository";
 import { findActiveAttempt, findActiveReviewAttempt, findAttemptByIdForUser } from "../repositories/playerRepository";
@@ -150,7 +150,7 @@ function pickQuestion(candidates: TrainableQuestionRow[], recentlyCompleted: Set
  *  de prioridade, a partir SOMENTE de dados reais já existentes (nunca
  *  fabricados). Determinístico para o mesmo estado do banco e o mesmo
  *  `clock` (nenhuma aleatoriedade, nenhum `Date.now()` implícito). */
-async function buildCandidates(db: D1Database, userId: string, clock: Clock): Promise<BuiltCandidates> {
+async function buildCandidates(db: D1Database, userId: string, clock: Clock, fixturesAllowed: boolean): Promise<BuiltCandidates> {
   const timezone = await getTimezone(db, userId);
   const now = clock.now();
   const nowIso = now.toISOString();
@@ -183,12 +183,16 @@ async function buildCandidates(db: D1Database, userId: string, clock: Clock): Pr
   const overdueRows = await listOverdueReviewCandidates(db, userId, nowIso, MAX_OVERDUE_REVIEW_CANDIDATES);
   const tierOverdue: DailyTrainingCandidate[] = [];
   for (const row of overdueRows) {
-    const selection = await selectSimilarQuestion(db, {
-      originalQuestionId: row.originalQuestionId,
-      primaryPatternId: row.primaryPatternId,
-      excludeQuestionIds: [],
-    });
-    const question = await findQuestionById(db, selection.questionId);
+    const selection = await selectSimilarQuestion(
+      db,
+      {
+        originalQuestionId: row.originalQuestionId,
+        primaryPatternId: row.primaryPatternId,
+        excludeQuestionIds: [],
+      },
+      fixturesAllowed
+    );
+    const question = await findQuestionForStudent(db, selection.questionId, fixturesAllowed);
     if (!question) continue;
     tierOverdue.push({
       questionId: question.id,
@@ -225,7 +229,7 @@ async function buildCandidates(db: D1Database, userId: string, clock: Clock): Pr
       attemptsWithHelp: evidence.attemptsWithHelp,
       hasOverdueActiveReview,
     });
-    const trainable = await listTrainableQuestionsForPattern(db, pattern.id);
+    const trainable = await listTrainableQuestionsForPattern(db, pattern.id, fixturesAllowed);
     const chosen = pickQuestion(trainable, recentlyCompleted);
     if (!chosen) continue;
     const candidate: DailyTrainingCandidate = {
@@ -279,8 +283,8 @@ async function buildCandidates(db: D1Database, userId: string, clock: Clock): Pr
   };
 }
 
-async function selectionItemToDto(db: D1Database, item: DailyTrainingSelectionItem): Promise<TrainingItemDto> {
-  const question = await findQuestionById(db, item.questionId);
+async function selectionItemToDto(db: D1Database, item: DailyTrainingSelectionItem, fixturesAllowed: boolean): Promise<TrainingItemDto> {
+  const question = await findQuestionForStudent(db, item.questionId, fixturesAllowed);
   const pattern = item.patternId ? await findPublishedPatternById(db, item.patternId) : null;
   return {
     id: "",
@@ -307,12 +311,12 @@ async function selectionItemToDto(db: D1Database, item: DailyTrainingSelectionIt
 /** GET — 100% somente leitura (seção 6 da ordem: "o GET de preview nunca
  *  pode criar lista, item, tentativa, evento ou auditoria"). Determinístico
  *  para o mesmo estado do banco e o mesmo `clock`. */
-export async function preview(db: D1Database, userId: string, clock: Clock = systemClock): Promise<PreviewDto> {
-  const built = await buildCandidates(db, userId, clock);
+export async function preview(db: D1Database, userId: string, fixturesAllowed: boolean, clock: Clock = systemClock): Promise<PreviewDto> {
+  const built = await buildCandidates(db, userId, clock, fixturesAllowed);
   const result = selectDailyTrainingItems({ candidatesByTier: built.candidatesByTier, availableMinutes: built.availableMinutes });
 
   const items: TrainingItemDto[] = [];
-  for (const item of result.items) items.push(await selectionItemToDto(db, item));
+  for (const item of result.items) items.push(await selectionItemToDto(db, item, fixturesAllowed));
 
   const compositionMap = new Map<DailyTrainingReasonCode, number>();
   for (const item of result.items) compositionMap.set(item.reason, (compositionMap.get(item.reason) ?? 0) + 1);
@@ -351,10 +355,10 @@ function isUniqueEventIdViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("daily_training_events");
 }
 
-async function toListDto(db: D1Database, list: DailyTrainingListRow): Promise<TrainingListDto> {
+async function toListDto(db: D1Database, list: DailyTrainingListRow, fixturesAllowed: boolean): Promise<TrainingListDto> {
   const rows = await listItemsForList(db, list.id);
   const items: TrainingItemDto[] = [];
-  for (const row of rows) items.push(await itemRowToDto(db, row));
+  for (const row of rows) items.push(await itemRowToDto(db, row, fixturesAllowed));
   return {
     id: list.id,
     date: list.training_date,
@@ -369,8 +373,8 @@ async function toListDto(db: D1Database, list: DailyTrainingListRow): Promise<Tr
   };
 }
 
-async function itemRowToDto(db: D1Database, row: DailyTrainingItemRow): Promise<TrainingItemDto> {
-  const question = await findQuestionById(db, row.question_id);
+async function itemRowToDto(db: D1Database, row: DailyTrainingItemRow, fixturesAllowed: boolean): Promise<TrainingItemDto> {
+  const question = await findQuestionForStudent(db, row.question_id, fixturesAllowed);
   const pattern = row.primary_pattern_id ? await findPublishedPatternById(db, row.primary_pattern_id) : null;
   let isCorrect: boolean | null = null;
   if (row.question_attempt_id && row.status === "completed") {
@@ -401,8 +405,14 @@ async function itemRowToDto(db: D1Database, row: DailyTrainingItemRow): Promise<
  *  MESMOS candidatos que `preview` (nunca reaproveita uma prévia
  *  armazenada) e persiste lista+itens ATOMICAMENTE, num único db.batch()
  *  com o núcleo primeiro e o evento incondicional por último. */
-export async function applyList(db: D1Database, userId: string, mutationId: string, clock: Clock = systemClock): Promise<MutationResult<{ listId: string }>> {
-  const built = await buildCandidates(db, userId, clock);
+export async function applyList(
+  db: D1Database,
+  userId: string,
+  mutationId: string,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<MutationResult<{ listId: string }>> {
+  const built = await buildCandidates(db, userId, clock, fixturesAllowed);
 
   const existing = await findActiveListForUserDate(db, userId, built.todayCivil);
   if (existing) {
@@ -477,18 +487,18 @@ export async function applyList(db: D1Database, userId: string, mutationId: stri
  *  nova (seção 12 da ordem: "refresh sem perda de progresso"). `null`
  *  apenas quando NENHUMA lista existe ainda para hoje — só nesse caso o
  *  frontend cai para o preview. Continua 100% somente leitura. */
-export async function getCurrent(db: D1Database, userId: string, clock: Clock = systemClock): Promise<TrainingListDto | null> {
+export async function getCurrent(db: D1Database, userId: string, fixturesAllowed: boolean, clock: Clock = systemClock): Promise<TrainingListDto | null> {
   const timezone = await getTimezone(db, userId);
   const today = civilDateInTimezone(clock.now(), timezone);
   const list = await findLatestListForUserDate(db, userId, today);
   if (!list) return null;
-  return toListDto(db, list);
+  return toListDto(db, list, fixturesAllowed);
 }
 
-export async function getListDetail(db: D1Database, userId: string, listId: string): Promise<TrainingListDto | null> {
+export async function getListDetail(db: D1Database, userId: string, listId: string, fixturesAllowed: boolean): Promise<TrainingListDto | null> {
   const list = await findListForUser(db, listId, userId);
   if (!list) return null;
-  return toListDto(db, list);
+  return toListDto(db, list, fixturesAllowed);
 }
 
 /* ------------------------------------- Início do item ------------------------------------- */
@@ -510,7 +520,14 @@ export interface StartItemResult extends MutationResult<{ attemptId: string; que
  *  continua sendo. Só quando uma tentativa NOVA precisa ser criada é que a
  *  composição num único lote passa a ser necessária para fechar a janela
  *  de órfã. */
-export async function startItem(db: D1Database, userId: string, listId: string, itemId: string, mutationId: string): Promise<StartItemResult> {
+export async function startItem(
+  db: D1Database,
+  userId: string,
+  listId: string,
+  itemId: string,
+  mutationId: string,
+  fixturesAllowed: boolean
+): Promise<StartItemResult> {
   const list = await findListForUser(db, listId, userId);
   if (!list) return { ok: false, notFound: true };
   if (list.status !== "active") return { ok: false, fieldErrors: { status: "Esta lista não está mais ativa." } };
@@ -562,7 +579,7 @@ export async function startItem(db: D1Database, userId: string, listId: string, 
       await markBlocked();
       return { ok: false, blocked: true, fieldErrors: { question: "Esta revisão não está mais disponível." } };
     }
-    const questionVersion = (await findQuestionById(db, item.question_id))?.version ?? 1;
+    const questionVersion = (await findQuestionForStudent(db, item.question_id, fixturesAllowed))?.version ?? 1;
     const planned = await planStartOrResumeReviewAttempt(db, userId, item.error_entry_id, entry.version, item.question_id, questionVersion);
     if (!planned.ok) {
       if (planned.notFound) {
@@ -575,12 +592,12 @@ export async function startItem(db: D1Database, userId: string, listId: string, 
     const errorEntryId = item.error_entry_id;
     rereadWinnerAttemptId = async () => (await findActiveReviewAttempt(db, userId, errorEntryId))?.id ?? null;
   } else {
-    const question = await findQuestionById(db, item.question_id);
+    const question = await findQuestionForStudent(db, item.question_id, fixturesAllowed);
     if (!question || question.editorial_status !== "published") {
       await markBlocked();
       return { ok: false, blocked: true, fieldErrors: { question: "Esta questão não está mais disponível." } };
     }
-    const planned = await planStartOrResumeAttempt(db, userId, item.question_id, item.player_mode);
+    const planned = await planStartOrResumeAttempt(db, userId, item.question_id, item.player_mode, fixturesAllowed);
     if (!planned.ok) {
       if (planned.notFound) {
         await markBlocked();

@@ -71,6 +71,32 @@ CREATE TABLE audit_log (
   metadata TEXT
 );
 
+-- Espelho manual do DDL de migrations/0002_rate_limit_counters.sql — faltava
+-- neste schema (nenhum teste anterior exercitava checkRateLimit/
+-- checkCombinedRateLimit por uma rota real via FakeD1Database; Sprint 16
+-- v1.0, A1, adicionado para permitir testes de rota fim a fim para
+-- signup/request-confirmation/request-reset).
+CREATE TABLE rate_limit_counters (
+  scope TEXT NOT NULL,
+  identifier_hash TEXT NOT NULL,
+  window_start TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, identifier_hash, window_start)
+);
+
+CREATE INDEX idx_rate_limit_counters_window ON rate_limit_counters (window_start);
+
+-- Espelho manual do DDL de migrations/0001_init.sql (dev_email_outbox) —
+-- também faltava neste schema pelo mesmo motivo acima (Sprint 16 v1.0, A1).
+CREATE TABLE dev_email_outbox (
+  id TEXT PRIMARY KEY,
+  to_email TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE student_profiles (
   user_id TEXT PRIMARY KEY REFERENCES users (id),
   current_grade TEXT,
@@ -96,6 +122,7 @@ CREATE TABLE diagnostic_questions (
   id TEXT PRIMARY KEY,
   prompt TEXT NOT NULL,
   position INTEGER NOT NULL DEFAULT 0,
+  is_local_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_local_fixture IN (0, 1)),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

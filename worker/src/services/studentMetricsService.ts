@@ -102,7 +102,11 @@ async function buildPatternMetric(db: D1Database, userId: string, pattern: Patte
  *  reduzindo o que o backend calcula (o aluno pode alternar filtro sem
  *  nova rodada de requisições). */
 export async function listPatternMetrics(db: D1Database, userId: string, clock: Clock = systemClock): Promise<PatternMetricSummaryDTO[]> {
-  const patterns = await listPublishedPatterns(db, userId, ALL_PATTERNS_FILTERS, MAX_PATTERNS, 0);
+  // Sprint 16 v1.3 — `includeFixtures: false` sempre: o Mapa ENEM é gated
+  // por isQuestionBankAvailable (v1.2), não por isLocalPatternFixturesAllowed
+  // — não tem um conceito próprio de "fixture de padrões habilitada
+  // localmente", então nunca inclui fixture, o lado seguro por padrão.
+  const patterns = await listPublishedPatterns(db, userId, ALL_PATTERNS_FILTERS, MAX_PATTERNS, 0, false);
   const results: PatternMetricSummaryDTO[] = [];
   for (const pattern of patterns) {
     results.push(await buildPatternMetric(db, userId, pattern, clock));
@@ -124,7 +128,7 @@ export interface StudentMetricsSummaryDTO {
  *  Dashboard/página devem mostrar o estado vazio honesto, nunca um "0%". */
 export async function getStudentMetricsSummary(db: D1Database, userId: string, clock: Clock = systemClock): Promise<StudentMetricsSummaryDTO> {
   const patterns = await listPatternMetrics(db, userId, clock);
-  const totalPublishedPatterns = await countPublishedPatterns(db, userId, ALL_PATTERNS_FILTERS);
+  const totalPublishedPatterns = await countPublishedPatterns(db, userId, ALL_PATTERNS_FILTERS, false);
 
   const patternsByState: Record<ProvisionalState, number> = {
     sem_evidencias: 0,
@@ -202,7 +206,9 @@ export async function getPatternMetricDetail(
   slug: string,
   clock: Clock = systemClock
 ): Promise<PatternMetricDetailDTO | null> {
-  const pattern = await findPublishedPatternBySlug(db, slug);
+  // Sprint 16 v1.3 — `includeFixtures: false` sempre, mesmo raciocínio de
+  // listPatternMetrics acima.
+  const pattern = await findPublishedPatternBySlug(db, slug, false);
   if (!pattern) return null;
 
   const summary = await buildPatternMetric(db, userId, pattern, clock);

@@ -24,19 +24,30 @@
 -- 12 questões existem, sem tocar no que já existir. Reaplicar é seguro e
 -- idempotente (npm run test:e2e duas vezes seguidas depende disso).
 
-INSERT OR IGNORE INTO diagnostic_questions (id, prompt, position) VALUES
-  ('fixture-q01', '[PROVISÓRIO] Uma caixa tem 8 bolas azuis e 12 bolas vermelhas. Qual fração das bolas é azul?', 0),
-  ('fixture-q02', '[PROVISÓRIO] Um produto custava R$ 80 e teve um desconto de 25%. Qual o novo preço?', 1),
-  ('fixture-q03', '[PROVISÓRIO] Se 3 máquinas produzem 90 peças em 2 horas, quantas peças 3 máquinas produzem em 6 horas, mantendo o mesmo ritmo?', 2),
-  ('fixture-q04', '[PROVISÓRIO] Um mapa usa escala 1:50.000. Uma distância de 3 cm no mapa corresponde a quantos km no real?', 3),
-  ('fixture-q05', '[PROVISÓRIO] Numa turma de 40 alunos, 24 são meninas. Qual a razão entre meninos e meninas, na forma mais simples?', 4),
-  ('fixture-q06', '[PROVISÓRIO] Em uma pesquisa com 200 pessoas, 30% preferem a opção A. Quantas pessoas preferem a opção A?', 5),
-  ('fixture-q07', '[PROVISÓRIO] Qual o valor de x na equação 2x + 6 = 20?', 6),
-  ('fixture-q08', '[PROVISÓRIO] Um carro percorre 240 km em 4 horas, em velocidade constante. Qual a velocidade média, em km/h?', 7),
-  ('fixture-q09', '[PROVISÓRIO] Um terreno retangular tem 12 m de frente e 20 m de fundo. Qual a área do terreno, em m²?', 8),
-  ('fixture-q10', '[PROVISÓRIO] Um valor de R$ 500 aplicado rende 4% ao mês, em juros simples. Qual o rendimento em 3 meses?', 9),
-  ('fixture-q11', '[PROVISÓRIO] Numa sequência 2, 5, 8, 11, ..., qual é o próximo número?', 10),
-  ('fixture-q12', '[PROVISÓRIO] Uma pizza foi dividida em 8 pedaços iguais. Se 3 pessoas comeram 2 pedaços cada, qual fração da pizza restou?', 11);
+-- Sprint 16 v1.2 — `is_local_fixture = 1` explícito em toda linha (migration
+-- 0021 acrescentou a coluna, DEFAULT 0/"real"): este seed é sempre e
+-- somente conteúdo técnico de fixture, nunca conteúdo real — a mesma
+-- distinção que já existia para questions/schedule_activities/patterns
+-- desde a Sprint 16 v1.0/v1.1 (A2) agora também se aplica ao diagnóstico.
+INSERT OR IGNORE INTO diagnostic_questions (id, prompt, position, is_local_fixture) VALUES
+  ('fixture-q01', '[PROVISÓRIO] Uma caixa tem 8 bolas azuis e 12 bolas vermelhas. Qual fração das bolas é azul?', 0, 1),
+  ('fixture-q02', '[PROVISÓRIO] Um produto custava R$ 80 e teve um desconto de 25%. Qual o novo preço?', 1, 1),
+  ('fixture-q03', '[PROVISÓRIO] Se 3 máquinas produzem 90 peças em 2 horas, quantas peças 3 máquinas produzem em 6 horas, mantendo o mesmo ritmo?', 2, 1),
+  ('fixture-q04', '[PROVISÓRIO] Um mapa usa escala 1:50.000. Uma distância de 3 cm no mapa corresponde a quantos km no real?', 3, 1),
+  ('fixture-q05', '[PROVISÓRIO] Numa turma de 40 alunos, 24 são meninas. Qual a razão entre meninos e meninas, na forma mais simples?', 4, 1),
+  ('fixture-q06', '[PROVISÓRIO] Em uma pesquisa com 200 pessoas, 30% preferem a opção A. Quantas pessoas preferem a opção A?', 5, 1),
+  ('fixture-q07', '[PROVISÓRIO] Qual o valor de x na equação 2x + 6 = 20?', 6, 1),
+  ('fixture-q08', '[PROVISÓRIO] Um carro percorre 240 km em 4 horas, em velocidade constante. Qual a velocidade média, em km/h?', 7, 1),
+  ('fixture-q09', '[PROVISÓRIO] Um terreno retangular tem 12 m de frente e 20 m de fundo. Qual a área do terreno, em m²?', 8, 1),
+  ('fixture-q10', '[PROVISÓRIO] Um valor de R$ 500 aplicado rende 4% ao mês, em juros simples. Qual o rendimento em 3 meses?', 9, 1),
+  ('fixture-q11', '[PROVISÓRIO] Numa sequência 2, 5, 8, 11, ..., qual é o próximo número?', 10, 1),
+  ('fixture-q12', '[PROVISÓRIO] Uma pizza foi dividida em 8 pedaços iguais. Se 3 pessoas comeram 2 pedaços cada, qual fração da pizza restou?', 11, 1);
+
+-- Auto-corretivo para um D1 local que já tinha estas 12 linhas ANTES da
+-- migration 0021 (quando a coluna não existia e por isso o INSERT OR
+-- IGNORE acima não as re-escreve): garante que ficam marcadas como fixture
+-- mesmo num banco local mais antigo, sem exigir recriar o D1 do zero.
+UPDATE diagnostic_questions SET is_local_fixture = 1 WHERE id LIKE 'fixture-q%';
 
 INSERT OR IGNORE INTO diagnostic_question_options (id, question_id, position, text, is_correct) VALUES
   ('fixture-q01-a', 'fixture-q01', 0, '2/5', 1),

@@ -7,14 +7,19 @@ import "./AdminLayout.css";
 
 /* Layout da área administrativa — Sprint 15 v1.0, seção 8/19 da ordem.
    Mesmo padrão de src/layouts/TeacherLayout.tsx: navegação própria, mínima
-   (Visão Geral, Usuários, Vínculos — seção 19: "não criar placeholders de
-   funcionalidades futuras"), reaproveitando .sidebar/.mobile-nav/Header já
-   existentes — nenhum design system duplicado. */
+   (seção 19: "não criar placeholders de funcionalidades futuras").
+   Sprint 16 v1.2, seção 9 da ordem — três itens novos: os pipelines
+   administrativos mínimos de conteúdo (Diagnóstico/Cronograma/Padrões),
+   integrados a esta MESMA área (nenhum dashboard novo, nenhuma navegação
+   paralela). */
 
 const ADMIN_NAV_ITEMS = [
   { path: "/admin", label: "Visão Geral", icon: "🏠", end: true },
   { path: "/admin/usuarios", label: "Usuários", icon: "👥", end: false },
   { path: "/admin/vinculos", label: "Vínculos", icon: "🔗", end: false },
+  { path: "/admin/diagnostico", label: "Diagnóstico", icon: "📝", end: false },
+  { path: "/admin/cronograma", label: "Cronograma", icon: "🗓️", end: false },
+  { path: "/admin/padroes", label: "Padrões", icon: "🧩", end: false },
 ] as const;
 
 export function AdminLayout() {

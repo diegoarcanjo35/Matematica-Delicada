@@ -287,7 +287,10 @@ export async function getStudentDetail(db: D1Database, teacherId: string, studen
     listPatternMetrics(db, studentId, clock),
     errorNotebookSummaryForUser(db, studentId, nowIso),
     countByErrorType(db, studentId),
-    getCurrentTrainingList(db, studentId, clock),
+    // Sprint 16 v1.4 — painel do professor nunca teve conceito próprio de
+    // "fixture editorial habilitada localmente"; `false` preserva o
+    // comportamento real (nunca mostra fixture ao professor).
+    getCurrentTrainingList(db, studentId, false, clock),
   ]);
 
   // getReportForWeek só falha com weekStart explicitamente inválido — aqui

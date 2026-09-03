@@ -511,9 +511,9 @@ describe("índices indisponíveis — NULL nunca vira zero", () => {
 
   it("o serviço preserva NULL de ponta a ponta (nenhuma camada converte para 0)", async () => {
     await seedUser("u-servico");
-    const result = await getPatternDetail(db as never, "u-servico", "escala");
+    const result = await getPatternDetail(db as never, "u-servico", "escala", true);
     expect(result!.progress.indices.mastery.value).toBeNull();
-    const listed = await listPatterns(db as never, "u-servico", { ...ALL_FILTERS }, 1, 50);
+    const listed = await listPatterns(db as never, "u-servico", { ...ALL_FILTERS }, 1, 50, true);
     for (const pattern of listed.patterns) {
       expect(pattern.progress.indices.mastery.value).toBeNull();
     }
@@ -523,7 +523,7 @@ describe("índices indisponíveis — NULL nunca vira zero", () => {
 describe("Sprint 8 v1.1 — 'Treinar este padrão' (trainableQuestionId, seção 13 da ordem)", () => {
   it("sem nenhuma questão publicada ligada ao padrão, trainableQuestionId é null (nunca inventa um caminho)", async () => {
     await seedUser("u-treinar-1");
-    const result = await getPatternDetail(db as never, "u-treinar-1", "escala");
+    const result = await getPatternDetail(db as never, "u-treinar-1", "escala", true);
     expect(result!.trainableQuestionId).toBeNull();
   });
 
@@ -536,7 +536,7 @@ describe("Sprint 8 v1.1 — 'Treinar este padrão' (trainableQuestionId, seção
       `INSERT INTO question_patterns (id, question_id, pattern_id, role) VALUES ('qp-trein-1', 'q-trein-1', 'fixture-pat-04', 'principal')`
     );
     await seedUser("u-treinar-2");
-    const result = await getPatternDetail(db as never, "u-treinar-2", "mediana-e-frequencia");
+    const result = await getPatternDetail(db as never, "u-treinar-2", "mediana-e-frequencia", true);
     expect(result!.trainableQuestionId).toBe("q-trein-1");
   });
 
@@ -549,7 +549,7 @@ describe("Sprint 8 v1.1 — 'Treinar este padrão' (trainableQuestionId, seção
       `INSERT INTO question_patterns (id, question_id, pattern_id, role) VALUES ('qp-trein-draft', 'q-trein-draft', 'fixture-pat-01', 'principal')`
     );
     await seedUser("u-treinar-3");
-    const result = await getPatternDetail(db as never, "u-treinar-3", "razao-em-grafico");
+    const result = await getPatternDetail(db as never, "u-treinar-3", "razao-em-grafico", true);
     expect(result!.trainableQuestionId).toBeNull();
   });
 });
@@ -575,8 +575,8 @@ describe("GET /api/patterns/:slug/progress — isolamento por usuário", () => {
     await seedUser("u-sql-b");
     seedProgress("u-sql-a", "fixture-pat-03", { mastery: 0.6 });
 
-    const forA = await getPatternProgress(db as never, "u-sql-a", "porcentagem-direta");
-    const forB = await getPatternProgress(db as never, "u-sql-b", "porcentagem-direta");
+    const forA = await getPatternProgress(db as never, "u-sql-a", "porcentagem-direta", true);
+    const forB = await getPatternProgress(db as never, "u-sql-b", "porcentagem-direta", true);
     expect(forA!.progress.indices.mastery.value).toBe(0.6);
     expect(forB!.progress.indices.mastery.value).toBeNull();
   });

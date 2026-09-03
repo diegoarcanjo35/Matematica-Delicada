@@ -937,7 +937,7 @@ describe("Sprint 9 v1.1 — exclusividade mútua entre fluxo normal e conclusão
     const before = await findEntryByUserAndQuestion(db as never, "excl5", originalId);
     const errorCountBefore = before!.error_count;
 
-    const start = await startReview(db as never, "excl5", before!.id);
+    const start = await startReview(db as never, "excl5", before!.id, false);
     await saveAnswer(db as never, "excl5", start.attemptId!, 1, "B");
     await confirmAnswer(db as never, "excl5", start.attemptId!, 2);
 
@@ -954,7 +954,7 @@ describe("Sprint 9 v1.1 — exclusividade mútua entre fluxo normal e conclusão
     const before = await findEntryByUserAndQuestion(db as never, "excl6", originalId);
     const errorCountBefore = before!.error_count;
 
-    const start = await startReview(db as never, "excl6", before!.id);
+    const start = await startReview(db as never, "excl6", before!.id, false);
     await saveAnswer(db as never, "excl6", start.attemptId!, 1, "A"); // errada
     await confirmAnswer(db as never, "excl6", start.attemptId!, 2);
 
@@ -976,7 +976,7 @@ describe("Sprint 9 v1.1 — exclusividade mútua entre fluxo normal e conclusão
     // "before" é capturado DEPOIS de iniciar a revisão (que já grava sua
     // própria versão, marcando in_review) — para medir exatamente o
     // efeito da CONFIRMAÇÃO em si, não do início.
-    const start = await startReview(db as never, "excl7", entry!.id);
+    const start = await startReview(db as never, "excl7", entry!.id, false);
     const before = await findEntryByUserAndQuestion(db as never, "excl7", originalId);
     await saveAnswer(db as never, "excl7", start.attemptId!, 1, "A");
     await confirmAnswer(db as never, "excl7", start.attemptId!, 2);
@@ -1023,7 +1023,7 @@ describe("Sprint 9 v1.1 — reversão completa em falha (itens 8-9)", () => {
     seedPublishedQuestion({ id: "rev9-sim", code: "REV9-SIM" });
     await startAndConfirmWrong("rev9", originalId);
     const freshEntry = await findEntryByUserAndQuestion(db as never, "rev9", originalId);
-    const start = await startReview(db as never, "rev9", freshEntry!.id);
+    const start = await startReview(db as never, "rev9", freshEntry!.id, false);
     // "entryBefore" é capturado DEPOIS de iniciar a revisão, pela mesma
     // razão do item 7 acima: iniciar já grava sua própria versão.
     const entryBefore = await findEntryByUserAndQuestion(db as never, "rev9", originalId);
@@ -1056,10 +1056,10 @@ describe("Sprint 9 v1.1 — reativação formalizada de entradas corrected/archi
     const entry = await findEntryByUserAndQuestion(db as never, "react10", originalId);
 
     // Duas revisões corretas em questões distintas → corrected.
-    const start1 = await startReview(db as never, "react10", entry!.id);
+    const start1 = await startReview(db as never, "react10", entry!.id, false);
     await saveAnswer(db as never, "react10", start1.attemptId!, 1, "B");
     await confirmAnswer(db as never, "react10", start1.attemptId!, 2);
-    const start2 = await startReview(db as never, "react10", entry!.id);
+    const start2 = await startReview(db as never, "react10", entry!.id, false);
     // "B" é sempre a alternativa correta nas questões de
     // worker/testing/questionFixtures.ts:seedQuestion (convenção do
     // helper) — a 2ª revisão precisa acertar de verdade também.
@@ -1135,7 +1135,7 @@ describe("Sprint 9 v1.1 — retry não duplica nenhuma das operações acima (it
     const entry = await findEntryByUserAndQuestion(db as never, "retry12", originalId);
 
     // Fluxo de revisão + retry.
-    const start = await startReview(db as never, "retry12", entry!.id);
+    const start = await startReview(db as never, "retry12", entry!.id, false);
     await callPlayerRoute(`/api/player/attempts/${start.attemptId}/answer`, token, { method: "PATCH", body: JSON.stringify({ version: 1, alternative: "B" }) });
     await callPlayerRoute(`/api/player/attempts/${start.attemptId}/confirm`, token, { method: "POST", body: JSON.stringify({ version: 2 }) });
     await callPlayerRoute(`/api/player/attempts/${start.attemptId}/confirm`, token, { method: "POST", body: JSON.stringify({ version: 2 }) }); // retry

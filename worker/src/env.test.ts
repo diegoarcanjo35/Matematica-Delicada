@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isDevOutboxAllowed,
   isLocalDiagnosticFixturesAllowed,
+  isRealEmailProviderConfigured,
   isTestRateLimitIsolationAllowed,
   shouldOmitSecureCookie,
   type Env,
@@ -139,5 +140,47 @@ describe("isLocalDiagnosticFixturesAllowed — três condições obrigatórias (
     const productionEnv = envWith({});
     const productionUrl = new URL("https://matematica-delicada.proffandreia5.workers.dev/api/diagnostic/status");
     expect(isLocalDiagnosticFixturesAllowed(productionEnv, productionUrl)).toBe(false);
+  });
+});
+
+/* Sprint 16 v1.0 (A1) — ao contrário das flags ENABLE_LOCAL_.../DEV_..., esta
+   NÃO depende de ambiente/hostname: precisa funcionar em produção de
+   verdade. A única condição é ter os dois valores necessários presentes e
+   minimamente válidos. */
+describe("isRealEmailProviderConfigured — exige secret + remetente válidos, sem depender de ambiente", () => {
+  it("nenhuma das duas variáveis presente -> não configurado", () => {
+    expect(isRealEmailProviderConfigured(envWith({}))).toBe(false);
+  });
+
+  it("só o secret presente -> não configurado (falta remetente)", () => {
+    expect(
+      isRealEmailProviderConfigured(envWith({ RESEND_API_KEY: "re_1234567890abcdef1234567890" }))
+    ).toBe(false);
+  });
+
+  it("só o remetente presente -> não configurado (falta secret)", () => {
+    expect(isRealEmailProviderConfigured(envWith({ EMAIL_FROM_ADDRESS: "no-reply@exemplo.com" }))).toBe(false);
+  });
+
+  it("secret curto demais (<20 caracteres) -> não configurado, mesmo com remetente válido", () => {
+    expect(
+      isRealEmailProviderConfigured(envWith({ RESEND_API_KEY: "curto", EMAIL_FROM_ADDRESS: "no-reply@exemplo.com" }))
+    ).toBe(false);
+  });
+
+  it("remetente sem '@' -> não configurado, mesmo com secret válido", () => {
+    expect(
+      isRealEmailProviderConfigured(
+        envWith({ RESEND_API_KEY: "re_1234567890abcdef1234567890", EMAIL_FROM_ADDRESS: "nao-e-um-email" })
+      )
+    ).toBe(false);
+  });
+
+  it("ambos presentes e válidos -> configurado, mesmo sem ENVIRONMENT algum (produção real)", () => {
+    expect(
+      isRealEmailProviderConfigured(
+        envWith({ RESEND_API_KEY: "re_1234567890abcdef1234567890", EMAIL_FROM_ADDRESS: "no-reply@exemplo.com" })
+      )
+    ).toBe(true);
   });
 });

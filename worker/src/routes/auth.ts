@@ -1,11 +1,12 @@
 import type { Env } from "../env";
-import { isDevOutboxAllowed, shouldOmitSecureCookie } from "../env";
+import { isDevOutboxAllowed, isRealEmailProviderConfigured, shouldOmitSecureCookie } from "../env";
 import { Errors, json, readJsonBody } from "../lib/response";
 import { isValidEmail, isValidName, isValidPassword, normalizeEmail } from "../lib/validation";
 import { buildExpiredSessionCookie, buildSessionCookie, readSessionToken } from "../lib/cookies";
 import { checkEmailRateLimit, checkRateLimit, clientIdentifier } from "../lib/rateLimit";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
 import { DevOutboxEmailAdapter, NoProviderEmailAdapter } from "../email/devOutboxAdapter";
+import { ResendEmailAdapter } from "../email/resendAdapter";
 import {
   checkSession,
   confirmEmail,
@@ -44,8 +45,34 @@ function newId(): string {
 function emailAdapterFor(env: Env, url: URL) {
   // Falha fechada (Sprint 2 v1.2): só usa o outbox dev quando as três condições
   // de isDevOutboxAllowed passam (ambiente + flag local + hostname local).
+  // Precede o provedor real deliberadamente: um teste local nunca deve
+  // acidentalmente disparar um envio real, mesmo que RESEND_API_KEY esteja
+  // configurado (ex.: preview environment com secret compartilhado).
   if (isDevOutboxAllowed(env, url)) return new DevOutboxEmailAdapter(env.DB, newId);
+  // Sprint 16 v1.0 (A1) — provedor real, só quando genuinamente configurado
+  // (env.ts:isRealEmailProviderConfigured). Nunca lido de nenhum arquivo
+  // versionado — ver worker/src/email/resendAdapter.ts.
+  if (isRealEmailProviderConfigured(env)) {
+    return new ResendEmailAdapter(env.RESEND_API_KEY as string, env.EMAIL_FROM_ADDRESS as string);
+  }
   return new NoProviderEmailAdapter();
+}
+
+/** Sprint 16 v1.0 (A1) — falha de envio nunca é silenciosa (ordem, seção
+ *  A1). Chamado pela rota depois de requestEmailConfirmation/
+ *  requestPasswordReset, nunca dentro do serviço (mesma separação já
+ *  existente no projeto: services devolvem fato, routes decidem o que
+ *  auditar). Não revela nada ao chamador HTTP (a resposta continua
+ *  genérica, por desenho anti-enumeração) — só torna a falha observável
+ *  no lado do servidor, via audit_log, que já é consultável por quem tem
+ *  acesso direto ao D1. */
+async function auditEmailSendOutcome(
+  env: Env,
+  outcome: { attempted: boolean; sent: boolean },
+  kind: "email_confirmation" | "password_reset"
+): Promise<void> {
+  if (!outcome.attempted || outcome.sent) return;
+  await audit(env, "email_send_failed", null, { kind });
 }
 
 function toPublicUser(user: { id: string; name: string; email: string; email_confirmed_at: string | null }) {
@@ -115,6 +142,7 @@ export async function handleAuthRequest(
     }
 
     await audit(env, "signup", result.user?.id ?? null);
+    if (result.emailOutcome) await auditEmailSendOutcome(env, result.emailOutcome, "email_confirmation");
     return json({ ok: true }, { status: 201 });
   }
 
@@ -182,7 +210,8 @@ export async function handleAuthRequest(
     );
     if (!allowed) return Errors.tooManyRequests();
 
-    await requestEmailConfirmation(env.DB, emailAdapterFor(env, url), emailNormalized, url.origin);
+    const emailOutcome = await requestEmailConfirmation(env.DB, emailAdapterFor(env, url), emailNormalized, url.origin);
+    await auditEmailSendOutcome(env, emailOutcome, "email_confirmation");
     // Resposta sempre genérica — não revela se o e-mail existe ou já foi confirmado.
     return json({ ok: true });
   }
@@ -213,8 +242,9 @@ export async function handleAuthRequest(
     );
     if (!allowed) return Errors.tooManyRequests();
 
-    await requestPasswordReset(env.DB, emailAdapterFor(env, url), body.email, url.origin);
+    const emailOutcome = await requestPasswordReset(env.DB, emailAdapterFor(env, url), body.email, url.origin);
     await audit(env, "password_reset_requested", null);
+    await auditEmailSendOutcome(env, emailOutcome, "password_reset");
     // Resposta sempre genérica — não enumera usuários.
     return json({ ok: true });
   }

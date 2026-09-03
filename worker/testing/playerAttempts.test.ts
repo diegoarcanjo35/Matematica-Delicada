@@ -98,9 +98,17 @@ function countRows(table: string, where = ""): number {
 /* Gate local                                                              */
 /* ---------------------------------------------------------------------- */
 
-describe("gate local (reaproveita isLocalEditorialFixturesAllowed — nenhum gate novo)", () => {
-  it("fora do gate (flag ausente): resposta acolhedora, sem tocar em question_attempts", async () => {
-    const qId = seedPublishedQuestion();
+describe("gate de disponibilidade do módulo (Sprint 16 v1.1, A2 — isQuestionBankAvailable substitui o antigo gate 'só fixture local liga tudo')", () => {
+  it("fora do gate (flag ausente) e sem NENHUMA questão real publicada: resposta acolhedora, sem tocar em question_attempts", async () => {
+    // Sprint 16 v1.1 — `seedPublishedQuestion()`/`seedQuestion()` agora semeia
+    // `is_local_fixture = 0` por padrão (uma questão REAL para efeitos do
+    // teste, ver worker/testing/questionFixtures.ts). Este teste passou a
+    // precisar semear explicitamente uma questão de FIXTURE para continuar
+    // provando o caso que sempre foi seu objetivo real: fixture local nunca
+    // vaza quando a flag está desligada — nunca "nenhum conteúdo publicado
+    // vira disponibilidade", que é um cenário DIFERENTE (e correto) coberto
+    // logo abaixo.
+    const qId = seedPublishedQuestion({ isLocalFixture: true });
     const token = await seedUserWithSession("u1");
     const response = await callRoute(
       "/api/player/attempts",
@@ -112,6 +120,19 @@ describe("gate local (reaproveita isLocalEditorialFixturesAllowed — nenhum gat
     const body = (await response.json()) as { available: boolean };
     expect(body.available).toBe(false);
     expect(countRows("question_attempts")).toBe(0);
+  });
+
+  it("fora do gate (flag ausente) mas com uma questão REAL publicada: módulo fica disponível — nova capacidade da Sprint 16 v1.1, nunca dependente só da flag de dev", async () => {
+    const qId = seedPublishedQuestion();
+    const token = await seedUserWithSession("u1");
+    const response = await callRoute(
+      "/api/player/attempts",
+      token,
+      { method: "POST", body: JSON.stringify({ questionId: qId, mode: "learning" }) },
+      localEnv({ ENABLE_LOCAL_EDITORIAL_FIXTURES: undefined })
+    );
+    expect(response.status).toBe(201);
+    expect(countRows("question_attempts")).toBe(1);
   });
 
   it("sem sessão: 401, mesmo dentro do gate", async () => {

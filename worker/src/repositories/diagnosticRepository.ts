@@ -4,10 +4,13 @@
    "build*Statement" retornam D1PreparedStatement para compor um único
    db.batch() atômico no serviço (mesmo padrão das Sprints 2/3). */
 
+import { isLocalDiagnosticFixturesAllowed, type Env } from "../env";
+
 export interface DiagnosticQuestionRow {
   id: string;
   prompt: string;
   position: number;
+  is_local_fixture: number;
   created_at: string;
   updated_at: string;
 }
@@ -65,6 +68,56 @@ export async function listQuestionsOrdered(db: D1Database): Promise<DiagnosticQu
     .prepare("SELECT * FROM diagnostic_questions ORDER BY position ASC, id ASC")
     .all<DiagnosticQuestionRow>();
   return result.results ?? [];
+}
+
+/** Sprint 16 v1.3 — leitura destinada ao aluno FORA do dev local com a flag
+ *  explícita (produção real, ou dev local sem a flag): só questões REAIS
+ *  (`is_local_fixture = 0`), nunca uma fixture. Usada por `createAttempt`
+ *  quando `fixturesAllowed` é falso — a MESMA função também alimenta a
+ *  listagem administrativa (diagnosticAdminRepository.ts a reexporta) —
+ *  única fonte de verdade para "quais questões são reais", nunca duas
+ *  consultas mantidas em paralelo. */
+export async function listRealQuestionsOrdered(db: D1Database): Promise<DiagnosticQuestionRow[]> {
+  const result = await db
+    .prepare("SELECT * FROM diagnostic_questions WHERE is_local_fixture = 0 ORDER BY position ASC, id ASC")
+    .all<DiagnosticQuestionRow>();
+  return result.results ?? [];
+}
+
+/** Sprint 16 v1.3 — "conteúdo real suficiente para o fluxo funcionar" NÃO é
+ *  "existe 1 linha" (seção 2 da ordem, explícito): a regra funcional JÁ
+ *  exigida pelo módulo (não inventada aqui) é que uma questão só é
+ *  respondível se tiver pelo menos 2 alternativas com exatamente uma
+ *  correta — exatamente a mesma invariante que
+ *  diagnosticAdminValidation.ts:validateDiagnosticOptionSet já impõe em
+ *  toda escrita administrativa. Esta consulta verifica essa estrutura
+ *  DIRETAMENTE no banco (defesa em profundidade — nunca confia cegamente
+ *  que "foi criada pelo pipeline admin, logo está íntegra") em vez de só
+ *  contar linhas de `diagnostic_questions`. `true` assim que UMA questão
+ *  real e estruturalmente completa existir. */
+export async function hasSufficientRealDiagnosticContent(db: D1Database): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 as found FROM diagnostic_questions q
+       WHERE q.is_local_fixture = 0
+         AND (SELECT COUNT(*) FROM diagnostic_question_options o WHERE o.question_id = q.id) >= 2
+         AND EXISTS (SELECT 1 FROM diagnostic_question_options o2 WHERE o2.question_id = q.id AND o2.is_correct = 1)
+       LIMIT 1`
+    )
+    .first<{ found: number }>();
+  return row !== null;
+}
+
+/** Sprint 16 v1.3, seção 1 da ordem — critério ÚNICO de disponibilidade do
+ *  Diagnóstico, mesmo desenho de questionRepository.ts:isQuestionBankAvailable:
+ *    1) dev local com ENABLE_LOCAL_DIAGNOSTIC_FIXTURES explicitamente
+ *       habilitado -> disponível incondicionalmente (comportamento
+ *       IDÊNTICO ao gate antigo, fixtures continuam servidas normalmente);
+ *    2) qualquer outro caso (produção real inclusive) -> disponível SOMENTE
+ *       quando existir conteúdo real estruturalmente suficiente. */
+export async function isDiagnosticAvailable(env: Env, url: URL, db: D1Database): Promise<boolean> {
+  if (isLocalDiagnosticFixturesAllowed(env, url)) return true;
+  return hasSufficientRealDiagnosticContent(db);
 }
 
 export async function findQuestion(db: D1Database, questionId: string): Promise<DiagnosticQuestionRow | null> {

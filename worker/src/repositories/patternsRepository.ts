@@ -17,6 +17,7 @@ import {
   type PatternRelationType,
   type PatternSort,
 } from "../lib/patternsValidation";
+import { isLocalPatternFixturesAllowed, type Env } from "../env";
 
 export interface PatternRow {
   id: string;
@@ -89,10 +90,20 @@ function likeTerm(term: string): string {
  *  dono da sessão. */
 function buildFilterClause(
   filters: PatternListFilters,
-  userId: string
+  userId: string,
+  includeFixtures: boolean
 ): { sql: string; params: unknown[] } {
   const conditions: string[] = ["p.editorial_status = ?"];
   const params: unknown[] = [STUDENT_VISIBLE_EDITORIAL_STATUS];
+  // Sprint 16 v1.3, seção 1/3 da ordem — fora do dev local com a flag
+  // explícita (produção real, ou dev local sem a flag), nunca mostra uma
+  // fixture local ao aluno, mesmo que ela esteja `published` (as 5
+  // fixtures de patterns-fixtures.local.sql SÃO publicadas por desenho —
+  // sem este filtro, elas apareceriam misturadas com conteúdo real assim
+  // que o gate de rota abrisse para produção). `includeFixtures` preserva
+  // byte a byte o comportamento de dev local com a flag (nenhuma condição
+  // extra), exatamente como diagnosticRepository.ts/scheduleRepository.ts.
+  if (!includeFixtures) conditions.push("p.is_local_fixture = 0");
 
   if (filters.search !== null) {
     conditions.push(
@@ -141,9 +152,10 @@ function orderByClause(sort: PatternSort): string {
 export async function countPublishedPatterns(
   db: D1Database,
   userId: string,
-  filters: PatternListFilters
+  filters: PatternListFilters,
+  includeFixtures: boolean
 ): Promise<number> {
-  const where = buildFilterClause(filters, userId);
+  const where = buildFilterClause(filters, userId, includeFixtures);
   const row = await db
     .prepare(`SELECT COUNT(*) as total FROM patterns p WHERE ${where.sql}`)
     .bind(...where.params)
@@ -156,9 +168,10 @@ export async function listPublishedPatterns(
   userId: string,
   filters: PatternListFilters,
   limit: number,
-  offset: number
+  offset: number,
+  includeFixtures: boolean
 ): Promise<PatternRow[]> {
-  const where = buildFilterClause(filters, userId);
+  const where = buildFilterClause(filters, userId, includeFixtures);
   const result = await db
     .prepare(
       `SELECT p.* FROM patterns p WHERE ${where.sql} ${orderByClause(filters.sort)} LIMIT ? OFFSET ?`
@@ -171,10 +184,13 @@ export async function listPublishedPatterns(
 /** Um padrão só é encontrável pelo aluno se estiver `published`. Slug
  *  inexistente e slug de rascunho retornam exatamente a mesma coisa (null) —
  *  a rota converte os dois no MESMO 404, sem vazar a existência do
- *  rascunho. */
-export async function findPublishedPatternBySlug(db: D1Database, slug: string): Promise<PatternRow | null> {
+ *  rascunho. Sprint 16 v1.3 — `includeFixtures` (mesmo raciocínio de
+ *  buildFilterClause acima): fora do dev local com a flag, um slug de
+ *  fixture local também responde 404, nunca revela conteúdo. */
+export async function findPublishedPatternBySlug(db: D1Database, slug: string, includeFixtures: boolean): Promise<PatternRow | null> {
+  const fixtureClause = includeFixtures ? "" : " AND is_local_fixture = 0";
   const row = await db
-    .prepare("SELECT * FROM patterns WHERE slug = ? AND editorial_status = ?")
+    .prepare(`SELECT * FROM patterns WHERE slug = ? AND editorial_status = ?${fixtureClause}`)
     .bind(slug, STUDENT_VISIBLE_EDITORIAL_STATUS)
     .first<PatternRow>();
   return row ?? null;
@@ -212,22 +228,47 @@ export async function listAttributesForPatterns(
 }
 
 /** Relações que SAEM deste padrão, já resolvidas para o padrão de destino e
- *  restritas a destinos publicados. Ordenação determinística. */
+ *  restritas a destinos publicados. Ordenação determinística. Sprint 16
+ *  v1.3 — `includeFixtures` (mesmo raciocínio das funções acima): fora do
+ *  dev local com a flag, uma relação apontando para um padrão de fixture
+ *  nunca aparece. */
 export async function listRelationsForPattern(
   db: D1Database,
-  patternId: string
+  patternId: string,
+  includeFixtures: boolean
 ): Promise<PatternRelationTargetRow[]> {
+  const fixtureClause = includeFixtures ? "" : " AND target.is_local_fixture = 0";
   const result = await db
     .prepare(
       `SELECT r.relation_type, target.code, target.slug, target.name
        FROM pattern_relations r
        JOIN patterns target ON target.id = r.to_pattern_id
-       WHERE r.from_pattern_id = ? AND target.editorial_status = ?
+       WHERE r.from_pattern_id = ? AND target.editorial_status = ?${fixtureClause}
        ORDER BY r.relation_type ASC, target.code ASC, target.id ASC`
     )
     .bind(patternId, STUDENT_VISIBLE_EDITORIAL_STATUS)
     .all<PatternRelationTargetRow>();
   return result.results ?? [];
+}
+
+/** Sprint 16 v1.3, seção 2 da ordem — "disponível quando existir pelo
+ *  menos padrão REAL publicado/elegível": mesma regra de
+ *  questionRepository.ts:hasAnyPublishedQuestion, aplicada a `patterns`. */
+export async function hasAnyRealPublishedPattern(db: D1Database): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 as found FROM patterns WHERE editorial_status = ? AND is_local_fixture = 0 LIMIT 1")
+    .bind(STUDENT_VISIBLE_EDITORIAL_STATUS)
+    .first<{ found: number }>();
+  return row !== null;
+}
+
+/** Sprint 16 v1.3, seção 1 da ordem — critério ÚNICO de disponibilidade do
+ *  catálogo de Padrões, mesmo desenho de
+ *  questionRepository.ts:isQuestionBankAvailable/diagnosticRepository.ts:
+ *  isDiagnosticAvailable/scheduleRepository.ts:isScheduleAvailable. */
+export async function isPatternsAvailable(env: Env, url: URL, db: D1Database): Promise<boolean> {
+  if (isLocalPatternFixturesAllowed(env, url)) return true;
+  return hasAnyRealPublishedPattern(db);
 }
 
 /** Progresso de UM aluno num padrão. Retorna null quando a linha não existe

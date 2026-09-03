@@ -5,15 +5,19 @@ import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
 import { findPublishedPatternBySlug } from "../repositories/patternsRepository";
+import { isQuestionBankAvailable } from "../repositories/questionRepository";
 import { archiveEntry, getEntryDetail, getSummary, listEntries, patchEntry, startReview } from "../services/errorNotebookService";
 
 /* Rotas do Caderno de Erros — Sprint 9 v1.0.
 
    Mesma ordem obrigatória de checagens do Player (Sprint 8) e do restante
-   do namespace do aluno: 1) sessão válida (401); 2) gate local de
-   fixtures (reaproveita EXATAMENTE isLocalEditorialFixturesAllowed —
-   nenhum gate novo, mesma decisão de projeto do Player); 3) validação de
-   parâmetros; 4) só então o serviço consulta/muta o banco.
+   do namespace do aluno: 1) sessão válida (401); 2) disponibilidade do
+   módulo — Sprint 16 v1.1 (A2): `isQuestionBankAvailable`
+   (questionRepository.ts) substitui o antigo gate "só fixture local liga
+   tudo": disponível em dev local com fixtures explicitamente habilitadas,
+   OU em qualquer outro ambiente (produção real inclusive) quando existir
+   ao menos uma questão REAL publicada; 3) validação de parâmetros; 4) só
+   então o serviço consulta/muta o banco.
 
    Uma entrada de outro aluno SEMPRE responde 404 (nunca 403) — o
    repositório já escopa por `user_id` no SQL, então "não encontrar" já é
@@ -65,8 +69,11 @@ export async function handleErrorNotebookRequest(request: Request, env: Env, url
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  const available = await isQuestionBankAvailable(env, url, env.DB);
+  if (!available) return unavailableResponse();
+  // Sprint 16 v1.4 — corrige o achado da v1.3: com a flag habilitada,
+  // fixtures editoriais voltam a ser servidas normalmente em dev local.
   const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
-  if (!fixturesAllowed) return unavailableResponse();
 
   if (path === "/api/error-notebook/summary") {
     if (method !== "GET") return Errors.methodNotAllowed();
@@ -81,7 +88,13 @@ export async function handleErrorNotebookRequest(request: Request, env: Env, url
     // padrões nunca expõe `id` ao cliente); o id real só é resolvido aqui,
     // no servidor.
     const patternSlug = url.searchParams.get("patternSlug");
-    const pattern = patternSlug ? await findPublishedPatternBySlug(env.DB, patternSlug) : null;
+    // Sprint 16 v1.3 — sempre `includeFixtures: false` aqui: este filtro é
+    // consumido pelo namespace do Banco de Questões (gate
+    // isQuestionBankAvailable, não isLocalPatternFixturesAllowed), que
+    // desde a v1.1 já nunca serve questão de fixture ao aluno
+    // (findQuestionForStudent) — um padrão de fixture nunca deveria ser
+    // alcançável por aqui de qualquer forma; nunca incluir é o lado seguro.
+    const pattern = patternSlug ? await findPublishedPatternBySlug(env.DB, patternSlug, false) : null;
     const filters = {
       patternId: pattern?.id,
       errorType: url.searchParams.get("errorType") ?? undefined,
@@ -93,7 +106,7 @@ export async function handleErrorNotebookRequest(request: Request, env: Env, url
       limit: parsePositiveInt(url.searchParams.get("limit"), 20, 50),
       offset: Math.max(0, Number(url.searchParams.get("offset")) || 0),
     };
-    const { entries, total } = await listEntries(env.DB, user.id, filters);
+    const { entries, total } = await listEntries(env.DB, user.id, filters, fixturesAllowed);
     return json({ ok: true, entries, total, limit: filters.limit, offset: filters.offset });
   }
 
@@ -101,7 +114,7 @@ export async function handleErrorNotebookRequest(request: Request, env: Env, url
   if (startReviewMatch) {
     if (method !== "POST") return Errors.methodNotAllowed();
     const entryId = startReviewMatch[1];
-    const result = await startReview(env.DB, user.id, entryId);
+    const result = await startReview(env.DB, user.id, entryId, fixturesAllowed);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       return json({ error: { code: "validation_error", message: "Não foi possível iniciar a revisão.", fields: result.fieldErrors } }, { status: 400 });
@@ -159,7 +172,7 @@ export async function handleErrorNotebookRequest(request: Request, env: Env, url
   if (entryMatch) {
     if (method !== "GET") return Errors.methodNotAllowed();
     const entryId = entryMatch[1];
-    const detail = await getEntryDetail(env.DB, user.id, entryId);
+    const detail = await getEntryDetail(env.DB, user.id, entryId, fixturesAllowed);
     if (!detail) return Errors.notFound();
     return json({ ok: true, entry: detail });
   }

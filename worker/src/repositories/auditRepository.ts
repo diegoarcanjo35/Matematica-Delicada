@@ -4,6 +4,11 @@ export type AuditEventType =
   | "login_failure"
   | "logout"
   | "email_confirmed"
+  /** Sprint 16 v1.0 (A1) — falha REAL de envio (provedor retornou erro ou o
+   *  fetch falhou), nunca engolida em silêncio. metadata: { kind:
+   *  "email_confirmation" | "password_reset" } — nunca o e-mail do
+   *  destinatário nem o corpo/token. */
+  | "email_send_failed"
   | "password_reset_requested"
   | "password_reset_completed"
   | "session_revoked"
@@ -73,7 +78,22 @@ export type AuditEventType =
   | "admin_teacher_student_link_created"
   | "admin_teacher_student_link_reactivated"
   | "admin_teacher_student_link_deactivated"
-  | "admin_bootstrap_completed";
+  | "admin_bootstrap_completed"
+  // Sprint 16 v1.2 — Fechamento Funcional Final (ordem seções 2-4): os três
+  // pipelines administrativos mínimos de conteúdo real (Diagnóstico,
+  // Cronograma, Padrões). Nunca registram o CONTEÚDO em si (enunciado,
+  // texto de opções, etc.) — só o `id` do recurso e, quando fizer
+  // diferença para auditoria, o `action` (mesma disciplina de metadata
+  // mínimo do resto do audit_log).
+  | "admin_diagnostic_question_created"
+  | "admin_diagnostic_question_deleted"
+  | "admin_schedule_activity_created"
+  | "admin_schedule_activity_updated"
+  | "admin_schedule_activity_deleted"
+  | "admin_pattern_created"
+  | "admin_pattern_updated"
+  | "admin_pattern_published"
+  | "admin_pattern_inactivated";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

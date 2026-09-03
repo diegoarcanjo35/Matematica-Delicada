@@ -172,13 +172,30 @@ export interface TrainableQuestionRow {
  *  TODAS as candidatas (não só a primeira), para permitir escolher a
  *  primeira ainda não usada na lista/recentemente concluída (seção 7 da
  *  ordem: "evitar questão concluída recentemente quando houver
- *  alternativa elegível"). */
-export async function listTrainableQuestionsForPattern(db: D1Database, patternId: string): Promise<TrainableQuestionRow[]> {
+ *  alternativa elegível").
+ *
+ *  Sprint 16 v1.1 — `AND q.is_local_fixture = 0`: esta é a consulta de
+ *  CANDIDATOS do Treino Diário e (via re-export, simulationsRepository.ts)
+ *  dos Simulados — o ponto onde uma questão de fixture local entraria no
+ *  preview/aplicação de uma lista/bloco antes mesmo de qualquer tentativa
+ *  existir. Sem este filtro aqui, uma questão de fixture publicada
+ *  apareceria como candidata real (código, tempo estimado) no preview, que
+ *  é 100% leitura e nunca passa pelo choke-point de início de tentativa
+ *  (`planStartOrResumeAttempt`, playerService.ts) — daí o filtro precisar
+ *  estar nesta consulta, não só lá.
+ *
+ *  Sprint 16 v1.4 — `includeFixtures` (mesmo raciocínio de
+ *  questionRepository.ts:findQuestionForStudent): fora do dev local com a
+ *  flag, o filtro continua incondicional; dentro dele, fixtures voltam a
+ *  contar como candidatas, restaurando o teste local do Treino
+ *  Diário/Simulados com `ENABLE_LOCAL_EDITORIAL_FIXTURES=true`. */
+export async function listTrainableQuestionsForPattern(db: D1Database, patternId: string, includeFixtures: boolean): Promise<TrainableQuestionRow[]> {
+  const fixtureClause = includeFixtures ? "" : " AND q.is_local_fixture = 0";
   const result = await db
     .prepare(
       `SELECT q.id, q.code, q.tempo_estimado_segundos FROM questions q
        JOIN question_patterns qp ON qp.question_id = q.id
-       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'
+       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'${fixtureClause}
        ORDER BY q.code ASC, q.id ASC`
     )
     .bind(patternId)

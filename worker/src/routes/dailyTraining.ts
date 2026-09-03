@@ -4,6 +4,7 @@ import { Errors, json, readJsonBody } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
+import { isQuestionBankAvailable } from "../repositories/questionRepository";
 import {
   abandonList,
   applyList,
@@ -20,9 +21,11 @@ import {
 
    Mesma ordem obrigatória de checagens do resto do namespace do aluno
    (Player/Caderno de Erros/Mapa ENEM desde as Sprints 8-10): 1) sessão
-   válida (401); 2) gate local de fixtures (reaproveita
-   isLocalEditorialFixturesAllowed — o treino diário depende de questões e
-   padrões publicados, o mesmo conteúdo técnico que já exige este gate);
+   válida (401); 2) disponibilidade do módulo — Sprint 16 v1.1 (A2):
+   `isQuestionBankAvailable` (questionRepository.ts) substitui o antigo gate
+   "só fixture local liga tudo": disponível em dev local com fixtures
+   explicitamente habilitadas, OU em qualquer outro ambiente (produção
+   real inclusive) quando existir ao menos uma questão REAL publicada;
    3) validação de parâmetros; 4) só então o serviço consulta/muta o banco.
 
    Um recurso (lista ou item) de outro aluno SEMPRE responde 404 (nunca
@@ -84,12 +87,15 @@ export async function handleDailyTrainingRequest(request: Request, env: Env, url
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  const available = await isQuestionBankAvailable(env, url, env.DB);
+  if (!available) return unavailableResponse();
+  // Sprint 16 v1.4 — corrige o achado da v1.3: com a flag habilitada,
+  // fixtures editoriais voltam a ser servidas normalmente em dev local.
   const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
-  if (!fixturesAllowed) return unavailableResponse();
 
   if (path === "/api/daily-training/preview") {
     if (method !== "GET") return Errors.methodNotAllowed();
-    const result = await preview(env.DB, user.id);
+    const result = await preview(env.DB, user.id, fixturesAllowed);
     return json({ ok: true, preview: result });
   }
 
@@ -98,7 +104,7 @@ export async function handleDailyTrainingRequest(request: Request, env: Env, url
     const body = await readJsonBody<{ mutationId?: unknown }>(request);
     const mutationId = readMutationId(body);
     if (!mutationId) return fieldErrorResponse("mutationId é obrigatório.", { mutationId: "mutationId é obrigatório." });
-    const result = await applyList(env.DB, user.id, mutationId);
+    const result = await applyList(env.DB, user.id, mutationId, fixturesAllowed);
     if (!result.ok) {
       if (result.empty) return json({ ok: true, empty: true });
       return fieldErrorResponse("Não foi possível aplicar o treino de hoje.", result.fieldErrors);
@@ -109,7 +115,7 @@ export async function handleDailyTrainingRequest(request: Request, env: Env, url
 
   if (path === "/api/daily-training/current") {
     if (method !== "GET") return Errors.methodNotAllowed();
-    const list = await getCurrent(env.DB, user.id);
+    const list = await getCurrent(env.DB, user.id, fixturesAllowed);
     return json({ ok: true, list });
   }
 
@@ -154,7 +160,7 @@ export async function handleDailyTrainingRequest(request: Request, env: Env, url
     const body = await readJsonBody<{ mutationId?: unknown }>(request);
     const mutationId = readMutationId(body);
     if (!mutationId) return fieldErrorResponse("mutationId é obrigatório.", { mutationId: "mutationId é obrigatório." });
-    const result = await startItem(env.DB, user.id, listId, itemId, mutationId);
+    const result = await startItem(env.DB, user.id, listId, itemId, mutationId, fixturesAllowed);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.conflict) return conflictResponse();
@@ -205,7 +211,7 @@ export async function handleDailyTrainingRequest(request: Request, env: Env, url
   if (listMatch) {
     if (method !== "GET") return Errors.methodNotAllowed();
     const listId = listMatch[1];
-    const list = await getListDetail(env.DB, user.id, listId);
+    const list = await getListDetail(env.DB, user.id, listId, fixturesAllowed);
     if (!list) return Errors.notFound();
     return json({ ok: true, list });
   }

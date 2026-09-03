@@ -841,3 +841,45 @@ describe("GET somente leitura — por endpoint, com audit_log e idempotência (c
     });
   }
 });
+
+/* Sprint 16 v1.2 (correção do bloqueador remanescente da v1.1, seção 1 da
+   ordem) — o Mapa ENEM migrou de isLocalEditorialFixturesAllowed para
+   isQuestionBankAvailable, o MESMO critério já usado por Player/Treino
+   Diário/Simulados/Caderno de Erros desde a v1.1. Mesma matriz de prova já
+   usada em worker/testing/playerAttempts.test.ts para o Player. */
+describe("gate de disponibilidade do módulo (Sprint 16 v1.2 — isQuestionBankAvailable substitui isLocalEditorialFixturesAllowed)", () => {
+  function prodEnv(): Env {
+    return { DB: db as never, ASSETS: {} as never };
+  }
+
+  it("produção real (sem flag) sem nenhuma questão real publicada: resposta acolhedora, nunca 401/404", async () => {
+    const token = await ensureUserSession("u-gate-1");
+    const request = new Request("https://matematica-delicada.proffandreia5.workers.dev/api/student-metrics/summary", {
+      headers: { Cookie: `md_session=${token}` },
+    });
+    const response = (await handleStudentMetricsRequest(request, prodEnv(), new URL(request.url)))!;
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { available: boolean };
+    expect(body.available).toBe(false);
+  });
+
+  it("produção real (sem flag) COM uma questão real publicada: módulo disponível, mesma capacidade nova do Player/Treino/Simulados/Caderno", async () => {
+    seedPublishedQuestion();
+    const token = await ensureUserSession("u-gate-2");
+    const request = new Request("https://matematica-delicada.proffandreia5.workers.dev/api/student-metrics/summary", {
+      headers: { Cookie: `md_session=${token}` },
+    });
+    const response = (await handleStudentMetricsRequest(request, prodEnv(), new URL(request.url)))!;
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { available?: boolean };
+    expect(body.available).not.toBe(false);
+  });
+
+  it("dev local com ENABLE_LOCAL_EDITORIAL_FIXTURES habilitado: continua disponível incondicionalmente (comportamento antigo preservado)", async () => {
+    const token = await ensureUserSession("u-gate-3");
+    const response = await callMetricsRoute("/api/student-metrics/summary", token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { available?: boolean };
+    expect(body.available).not.toBe(false);
+  });
+});

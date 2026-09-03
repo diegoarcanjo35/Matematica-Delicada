@@ -36,6 +36,18 @@ export interface Env {
    *  (worker/testing/adminBootstrap.test.ts), nunca lida de um arquivo
    *  versionado. */
   ADMIN_BOOTSTRAP_SECRET?: string;
+  /** Sprint 16 v1.0 (A1) — e-mail transacional real (Resend). Secret, nunca
+   *  presente em nenhum arquivo de configuração versionado (nem
+   *  wrangler.jsonc, nem wrangler.local.jsonc) — configurado via
+   *  `wrangler secret put` numa rodada separada, só depois de auditoria da
+   *  implementação (mesma disciplina de ADMIN_BOOTSTRAP_SECRET). Ausente =
+   *  nenhum provedor real configurado ainda; ver isRealEmailProviderConfigured. */
+  RESEND_API_KEY?: string;
+  /** Endereço "From" usado nos envios reais (ex.: "Matemática Delicada <no-reply@dominio>").
+   *  Não é secret (não é sensível), mas também nunca hardcoded no código —
+   *  vive em "vars" comuns, ao lado dela mesma exigindo domínio verificado
+   *  na Resend antes de funcionar de verdade. */
+  EMAIL_FROM_ADDRESS?: string;
 }
 
 const LOCAL_DEV_ENVIRONMENTS = new Set(["development", "test"]);
@@ -181,4 +193,22 @@ export function isLocalEditorialFixturesAllowed(env: Env, url: URL): boolean {
    ambiente (local, preview, produção) e a rota responde 404. */
 export function isAdminBootstrapConfigured(env: Env): boolean {
   return typeof env.ADMIN_BOOTSTRAP_SECRET === "string" && env.ADMIN_BOOTSTRAP_SECRET.length >= 20;
+}
+
+/* Sprint 16 v1.0 (A1) — mesmo padrão de isAdminBootstrapConfigured: a única
+   condição de existência de um provedor real de e-mail é ter os dois
+   valores necessários configurados (secret + remetente). Nenhuma
+   verificação de ambiente/hostname aqui — ao contrário das flags
+   ENABLE_LOCAL_.../DEV_..., um provedor real DEVE poder funcionar em
+   produção (é exatamente o objetivo desta sprint); a condição de
+   "ambiente local" já é tratada separadamente por isDevOutboxAllowed, que
+   tem prioridade quando ambas fossem tecnicamente verdadeiras (ver
+   emailAdapterFor em worker/src/routes/auth.ts). */
+export function isRealEmailProviderConfigured(env: Env): boolean {
+  return (
+    typeof env.RESEND_API_KEY === "string" &&
+    env.RESEND_API_KEY.length >= 20 &&
+    typeof env.EMAIL_FROM_ADDRESS === "string" &&
+    env.EMAIL_FROM_ADDRESS.includes("@")
+  );
 }

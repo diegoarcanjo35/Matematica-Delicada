@@ -15,6 +15,8 @@
 -- (mesmo hash pré-computado de teacher-fixtures.local.sql — não é segredo
 -- real, nunca usado fora do ambiente local). Login via API normal
 -- (POST /api/auth/login).
+-- ATUALIZADO: regenerado a 100000 iterações (de 600000), mesmo motivo e
+-- mesma senha/salt documentados em teacher-fixtures.local.sql.
 --
 -- IMPORTANTE — este arquivo NÃO É o bootstrap administrativo do adendo
 -- v1.1 (worker/src/services/adminBootstrapService.ts): é só uma fixture de
@@ -36,8 +38,8 @@
 
 INSERT OR IGNORE INTO users (id, name, email, email_normalized, password_hash, status, email_confirmed_at)
 VALUES
-  ('fixture-admin-1', '[PROVISÓRIO] Administradora 1 (Fixture Técnica)', 'fixture-admin-1@local.teste', 'fixture-admin-1@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-plain-user-1', '[PROVISÓRIO] Usuário Comum (Fixture Técnica)', 'fixture-plain-user-1@local.teste', 'fixture-plain-user-1@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now'));
+  ('fixture-admin-1', '[PROVISÓRIO] Administradora 1 (Fixture Técnica)', 'fixture-admin-1@local.teste', 'fixture-admin-1@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-plain-user-1', '[PROVISÓRIO] Usuário Comum (Fixture Técnica)', 'fixture-plain-user-1@local.teste', 'fixture-plain-user-1@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now'));
 
 -- RBAC (migrations/0008): garante que a linha de 'admin' existe em `roles`
 -- (idempotente — mesmo padrão de worker/src/routes/dev.ts) antes de

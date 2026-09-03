@@ -1,5 +1,6 @@
 import type { Env } from "../env";
 import { isLocalPatternFixturesAllowed } from "../env";
+import { isPatternsAvailable } from "../repositories/patternsRepository";
 import { Errors, json } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
@@ -67,8 +68,14 @@ export async function handlePatternsRequest(request: Request, env: Env, url: URL
 
   if (method !== "GET") return Errors.methodNotAllowed();
 
-  // Gate ANTES de qualquer consulta às tabelas pattern_*.
-  if (!isLocalPatternFixturesAllowed(env, url)) return unavailableResponse();
+  // Sprint 16 v1.3, seção 1 da ordem — `fixturesAllowed` continua
+  // existindo (controla SÓ se fixtures locais entram nas consultas). O
+  // GATE de disponibilidade em si passou a ser `isPatternsAvailable`, que
+  // também abre em produção real quando existe padrão REAL publicado —
+  // nunca mais só a flag de dev sozinha. Gate ANTES de qualquer consulta
+  // às tabelas pattern_*.
+  const fixturesAllowed = isLocalPatternFixturesAllowed(env, url);
+  if (!(await isPatternsAvailable(env, url, env.DB))) return unavailableResponse();
 
   if (path === "/api/patterns") {
     const searchResult = validatePatternSearch(url.searchParams.get("busca"));
@@ -103,7 +110,8 @@ export async function handlePatternsRequest(request: Request, env: Env, url: URL
         sort: sortResult.value!,
       },
       pageResult.value!,
-      limitResult.value!
+      limitResult.value!,
+      fixturesAllowed
     );
     return json({ ok: true, available: true, ...result });
   }
@@ -114,7 +122,7 @@ export async function handlePatternsRequest(request: Request, env: Env, url: URL
     // Slug malformado responde o MESMO 404 de slug inexistente — nunca 400,
     // para não permitir distinguir "formato errado" de "não existe".
     if (!isValidPatternSlug(slug)) return Errors.notFound();
-    const result = await getPatternProgress(env.DB, user.id, slug);
+    const result = await getPatternProgress(env.DB, user.id, slug, fixturesAllowed);
     if (!result) return Errors.notFound();
     return json({ ok: true, available: true, ...result });
   }
@@ -123,7 +131,7 @@ export async function handlePatternsRequest(request: Request, env: Env, url: URL
   if (slugMatch) {
     const slug = decodeURIComponent(slugMatch[1]);
     if (!isValidPatternSlug(slug)) return Errors.notFound();
-    const pattern = await getPatternDetail(env.DB, user.id, slug);
+    const pattern = await getPatternDetail(env.DB, user.id, slug, fixturesAllowed);
     // Não publicado e inexistente produzem exatamente esta mesma resposta.
     if (!pattern) return Errors.notFound();
     return json({ ok: true, available: true, pattern });

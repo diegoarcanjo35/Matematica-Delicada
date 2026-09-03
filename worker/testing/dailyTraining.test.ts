@@ -98,7 +98,7 @@ describe("preview — somente leitura (seção 6 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    await preview(db as never, "u1", CLOCK);
+    await preview(db as never, "u1", false, CLOCK);
 
     expect(countRows("daily_training_lists")).toBe(0);
     expect(countRows("daily_training_items")).toBe(0);
@@ -112,8 +112,8 @@ describe("preview — somente leitura (seção 6 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const r1 = await preview(db as never, "u1", CLOCK);
-    const r2 = await preview(db as never, "u1", CLOCK);
+    const r1 = await preview(db as never, "u1", false, CLOCK);
+    const r2 = await preview(db as never, "u1", false, CLOCK);
     expect(r1).toEqual(r2);
   });
 
@@ -124,7 +124,7 @@ describe("preview — somente leitura (seção 6 da ordem)", () => {
     const otherWeekday = (["dom", "seg", "ter", "qua", "qui", "sex", "sab"] as const).find((d) => d !== TODAY_WEEKDAY)!;
     seedProfile("u1", [otherWeekday], 60);
 
-    const result = await preview(db as never, "u1", CLOCK);
+    const result = await preview(db as never, "u1", false, CLOCK);
     expect(result.hasAvailabilityToday).toBe(false);
     expect(result.itemCount).toBe(0);
     expect(result.items).toEqual([]);
@@ -133,7 +133,7 @@ describe("preview — somente leitura (seção 6 da ordem)", () => {
   it("sem nenhuma questão publicada elegível gera preview vazio honesto (itemCount 0, mas disponibilidade real)", async () => {
     await seedUser("u1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
-    const result = await preview(db as never, "u1", CLOCK);
+    const result = await preview(db as never, "u1", false, CLOCK);
     expect(result.hasAvailabilityToday).toBe(true);
     expect(result.itemCount).toBe(0);
   });
@@ -149,7 +149,7 @@ describe("prioridade de revisão vencida (seção 7 da ordem)", () => {
     seedOverdueReviewEntry("u1", "entry-1", "q-overdue", "p-overdue");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const result = await preview(db as never, "u1", CLOCK);
+    const result = await preview(db as never, "u1", false, CLOCK);
     expect(result.items.length).toBeGreaterThanOrEqual(2);
     expect(result.items[0].reason).toBe("overdue_review");
     expect(result.items[0].questionId).toBe("q-overdue");
@@ -165,7 +165,7 @@ describe("capacidade diária (seção 8 da ordem)", () => {
     seedPublishedQuestion("q2", "C2", "p2");
     seedProfile("u1", [TODAY_WEEKDAY], 2); // só cabe 1 questão de 2min
 
-    const result = await preview(db as never, "u1", CLOCK);
+    const result = await preview(db as never, "u1", false, CLOCK);
     expect(result.estimatedMinutes).toBeLessThanOrEqual(2);
     expect(result.itemCount).toBe(1);
   });
@@ -178,7 +178,7 @@ describe("padrão principal apenas (seção 7 da ordem)", () => {
     seedQuestion(db.sqlite, { id: "q1", code: "C1", status: "published", version: 1, patternId: "p1", withPrincipalPattern: false, secondaryPatternIds: ["p1"] });
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const result = await preview(db as never, "u1", CLOCK);
+    const result = await preview(db as never, "u1", false, CLOCK);
     expect(result.itemCount).toBe(0);
   });
 });
@@ -193,7 +193,7 @@ describe("timezone/data (seção 8 da ordem)", () => {
     const weekdayForAugust31 = weekdayCodeForCivilDate("2026-08-31");
     seedProfile("u1", [weekdayForAugust31], 60);
 
-    const result = await preview(db as never, "u1", earlyClock);
+    const result = await preview(db as never, "u1", false, earlyClock);
     expect(result.date).toBe("2026-08-31");
     expect(result.timezone).toBe("America/Sao_Paulo");
   });
@@ -206,7 +206,7 @@ describe("apply — atômico e idempotente (seção 6 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const result = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const result = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     expect(result.ok).toBe(true);
     expect(result.changed).toBe(true);
     const listId = result.value!.listId;
@@ -222,8 +222,8 @@ describe("apply — atômico e idempotente (seção 6 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const first = await applyList(db as never, "u1", "mut-1", CLOCK);
-    const second = await applyList(db as never, "u1", "mut-2", CLOCK);
+    const first = await applyList(db as never, "u1", "mut-1", false, CLOCK);
+    const second = await applyList(db as never, "u1", "mut-2", false, CLOCK);
 
     expect(second.ok).toBe(true);
     expect(second.changed).toBe(false);
@@ -235,7 +235,7 @@ describe("apply — atômico e idempotente (seção 6 da ordem)", () => {
     await seedUser("u1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const result = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const result = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     expect(result.ok).toBe(false);
     expect(result.empty).toBe(true);
     expect(countRows("daily_training_lists")).toBe(0);
@@ -251,15 +251,15 @@ describe("isolamento entre alunos (seção 9/14 da ordem)", () => {
     seedProfile("u1", [TODAY_WEEKDAY], 60);
     seedProfile("u2", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
 
-    const ownDetail = await getListDetail(db as never, "u1", listId);
-    const otherDetail = await getListDetail(db as never, "u2", listId);
+    const ownDetail = await getListDetail(db as never, "u1", listId, false);
+    const otherDetail = await getListDetail(db as never, "u2", listId, false);
     expect(ownDetail).not.toBeNull();
     expect(otherDetail).toBeNull();
 
-    const otherCurrent = await getCurrent(db as never, "u2", CLOCK);
+    const otherCurrent = await getCurrent(db as never, "u2", false, CLOCK);
     expect(otherCurrent).toBeNull();
   });
 });
@@ -271,12 +271,12 @@ describe("integração com o Player (seção 10 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
-    const list = await getListDetail(db as never, "u1", listId);
+    const list = await getListDetail(db as never, "u1", listId, false);
     const itemId = list!.items[0].id;
 
-    const startResult = await startItem(db as never, "u1", listId, itemId, "start-mut-1");
+    const startResult = await startItem(db as never, "u1", listId, itemId, "start-mut-1", false);
     expect(startResult.ok).toBe(true);
     const attemptId = startResult.value!.attemptId;
     expect(countRows("question_attempts", `WHERE id = '${attemptId}' AND status = 'in_progress'`)).toBe(1);
@@ -302,13 +302,13 @@ describe("integração com o Player (seção 10 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
-    const list = await getListDetail(db as never, "u1", listId);
+    const list = await getListDetail(db as never, "u1", listId, false);
     const itemId = list!.items[0].id;
 
-    const first = await startItem(db as never, "u1", listId, itemId, "start-mut-1");
-    const second = await startItem(db as never, "u1", listId, itemId, "start-mut-2");
+    const first = await startItem(db as never, "u1", listId, itemId, "start-mut-1", false);
+    const second = await startItem(db as never, "u1", listId, itemId, "start-mut-2", false);
     expect(second.ok).toBe(true);
     expect(second.value!.attemptId).toBe(first.value!.attemptId);
     expect(countRows("question_attempts", `WHERE user_id = 'u1'`)).toBe(1);
@@ -322,9 +322,9 @@ describe("pular item (seção 12 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
-    const list = await getListDetail(db as never, "u1", listId);
+    const list = await getListDetail(db as never, "u1", listId, false);
     const itemId = list!.items[0].id;
 
     const result = await skipItem(db as never, "u1", listId, itemId, "skip-mut-1", "too_hard");
@@ -343,9 +343,9 @@ describe("pular item (seção 12 da ordem)", () => {
     seedPattern("p1", "PAD-01");
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
-    const list = await getListDetail(db as never, "u1", listId);
+    const list = await getListDetail(db as never, "u1", listId, false);
     const itemId = list!.items[0].id;
 
     const result = await skipItem(db as never, "u1", listId, itemId, "skip-mut-1", "motivo_livre");
@@ -361,9 +361,9 @@ describe("conclusão e resumo factual (seção 11 da ordem)", () => {
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
-    const list = await getListDetail(db as never, "u1", listId);
+    const list = await getListDetail(db as never, "u1", listId, false);
     const itemId = list!.items[0].id;
 
     const tooEarly = await completeList(db as never, "u1", listId, "complete-mut-1");
@@ -387,14 +387,14 @@ describe("GET current — refresh sem perda de progresso (seção 12 da ordem)",
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
-    const list = await getListDetail(db as never, "u1", listId);
+    const list = await getListDetail(db as never, "u1", listId, false);
     const itemId = list!.items[0].id;
     await skipItem(db as never, "u1", listId, itemId, "skip-1", "not_now");
     await completeList(db as never, "u1", listId, "complete-1");
 
-    const current = await getCurrent(db as never, "u1", CLOCK);
+    const current = await getCurrent(db as never, "u1", false, CLOCK);
     expect(current).not.toBeNull();
     expect(current!.id).toBe(listId);
     expect(current!.status).toBe("completed");
@@ -406,11 +406,11 @@ describe("GET current — refresh sem perda de progresso (seção 12 da ordem)",
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
 
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
     await abandonList(db as never, "u1", listId, "abandon-1");
 
-    const current = await getCurrent(db as never, "u1", CLOCK);
+    const current = await getCurrent(db as never, "u1", false, CLOCK);
     expect(current).not.toBeNull();
     expect(current!.id).toBe(listId);
     expect(current!.status).toBe("abandoned");
@@ -419,7 +419,7 @@ describe("GET current — refresh sem perda de progresso (seção 12 da ordem)",
   it("sem NENHUMA lista para hoje, GET current devolve null (cai para o preview)", async () => {
     await seedUser("u1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
-    const current = await getCurrent(db as never, "u1", CLOCK);
+    const current = await getCurrent(db as never, "u1", false, CLOCK);
     expect(current).toBeNull();
   });
 });
@@ -430,7 +430,7 @@ describe("abandonar treino", () => {
     seedPattern("p1", "PAD-01");
     seedPublishedQuestion("q1", "C1", "p1");
     seedProfile("u1", [TODAY_WEEKDAY], 60);
-    const applied = await applyList(db as never, "u1", "mut-1", CLOCK);
+    const applied = await applyList(db as never, "u1", "mut-1", false, CLOCK);
     const listId = applied.value!.listId;
 
     const result = await abandonList(db as never, "u1", listId, "abandon-mut-1");

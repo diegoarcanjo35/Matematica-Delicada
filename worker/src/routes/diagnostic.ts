@@ -4,6 +4,7 @@ import { Errors, json, readJsonBody } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
+import { isDiagnosticAvailable } from "../repositories/diagnosticRepository";
 import {
   completeAttempt,
   createAttempt,
@@ -60,17 +61,24 @@ export async function handleDiagnosticRequest(
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  // Sprint 16 v1.3, seção 1 da ordem — `fixturesAllowed` continua existindo
+  // (controla SÓ a seleção de conteúdo dentro de createAttempt: dev local
+  // com a flag usa fixture+real, qualquer outro caso usa só real). O GATE
+  // de disponibilidade em si passou a ser `isDiagnosticAvailable`, que
+  // também abre em produção real quando existe conteúdo REAL suficiente —
+  // nunca mais só a flag de dev sozinha.
   const fixturesAllowed = isLocalDiagnosticFixturesAllowed(env, url);
+  const available = await isDiagnosticAvailable(env, url, env.DB);
 
   if (path === "/api/diagnostic/status" && method === "GET") {
-    const status = await getStatus(env.DB, user.id, fixturesAllowed);
+    const status = await getStatus(env.DB, user.id, available);
     return json({ ok: true, ...status });
   }
 
-  if (!fixturesAllowed) {
-    // Fora do ambiente local/teste autorizado, nenhum outro endpoint de
-    // diagnóstico toca nas tabelas diagnostic_* — resposta acolhedora
-    // padrão, igual para todos eles (seção 2 da ordem).
+  if (!available) {
+    // Fora do ambiente local/teste autorizado e sem conteúdo real
+    // suficiente, nenhum outro endpoint de diagnóstico toca nas tabelas
+    // diagnostic_* — resposta acolhedora padrão, igual para todos eles.
     return unavailableResponse();
   }
 

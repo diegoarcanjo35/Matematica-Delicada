@@ -45,10 +45,23 @@ function toSqliteExpiry(msFromNow: number): string {
     .replace(/\.\d+Z$/, "");
 }
 
+export interface EmailSendOutcome {
+  /** false quando a conta não existe/já está confirmada — não é uma falha,
+   *  é o caso "nada a fazer" (mesma resposta genérica anti-enumeração). */
+  attempted: boolean;
+  /** Só significativo quando attempted === true. */
+  sent: boolean;
+}
+
 export interface SignupResult {
   ok: boolean;
   reason?: "email_in_use";
   user?: UserRow;
+  /** Sprint 16 v1.0 (A1) — resultado do envio do e-mail de confirmação
+   *  disparado por este cadastro, para a rota poder auditar uma falha real
+   *  sem que ela fique silenciosa (nunca muda o contrato HTTP público do
+   *  cadastro em si — a conta já foi criada de qualquer forma). */
+  emailOutcome?: EmailSendOutcome;
 }
 
 export async function signup(
@@ -70,10 +83,10 @@ export async function signup(
     passwordHash,
   });
 
-  await requestEmailConfirmation(db, email, emailNormalized, params.origin);
+  const emailOutcome = await requestEmailConfirmation(db, email, emailNormalized, params.origin);
 
   const user = await findUserById(db, id);
-  return { ok: true, user: user ?? undefined };
+  return { ok: true, user: user ?? undefined, emailOutcome };
 }
 
 export interface LoginResult {
@@ -148,10 +161,12 @@ export async function requestEmailConfirmation(
   email: EmailAdapter,
   emailNormalized: string,
   origin: string
-): Promise<void> {
+): Promise<EmailSendOutcome> {
   const user = await findUserByNormalizedEmail(db, emailNormalized);
-  // Resposta ao chamador é sempre genérica — não revela se o e-mail existe.
-  if (!user || user.email_confirmed_at) return;
+  // Resposta ao chamador HTTP continua sempre genérica (auth.ts) — não
+  // revela se o e-mail existe. O resultado aqui é só para o servidor
+  // auditar uma falha real de envio, nunca exposto ao cliente.
+  if (!user || user.email_confirmed_at) return { attempted: false, sent: false };
 
   const token = generateOpaqueToken();
   const tokenHash = await sha256Hex(token);
@@ -165,12 +180,13 @@ export async function requestEmailConfirmation(
   });
 
   const link = `${origin}/confirmar-email?token=${token}`;
-  await email.send({
+  const result = await email.send({
     to: user.email,
     subject: "Confirme seu e-mail — Matemática Delicada",
     body: `Olá, ${user.name}! Confirme seu e-mail acessando: ${link}`,
     kind: "email_confirmation",
   });
+  return { attempted: true, sent: result.sent };
 }
 
 /** Confirmação de e-mail — consumo do token e confirmação do e-mail ocorrem
@@ -206,11 +222,12 @@ export async function requestPasswordReset(
   email: EmailAdapter,
   emailInput: string,
   origin: string
-): Promise<void> {
+): Promise<EmailSendOutcome> {
   const emailNormalized = emailInput.trim().toLowerCase();
   const user = await findUserByNormalizedEmail(db, emailNormalized);
-  // Resposta ao chamador é sempre genérica — não enumera usuários existentes.
-  if (!user) return;
+  // Resposta ao chamador HTTP continua sempre genérica (auth.ts) — não
+  // enumera usuários existentes. Idêntico raciocínio de requestEmailConfirmation acima.
+  if (!user) return { attempted: false, sent: false };
 
   const token = generateOpaqueToken();
   const tokenHash = await sha256Hex(token);
@@ -219,12 +236,13 @@ export async function requestPasswordReset(
   await issueToken(db, "password_reset", { id: newId(), userId: user.id, tokenHash, expiresAt });
 
   const link = `${origin}/redefinir-senha?token=${token}`;
-  await email.send({
+  const result = await email.send({
     to: user.email,
     subject: "Redefinição de senha — Matemática Delicada",
     body: `Olá, ${user.name}! Redefina sua senha acessando: ${link} (válido por 30 minutos)`,
     kind: "password_reset",
   });
+  return { attempted: true, sent: result.sent };
 }
 
 /** Redefinição de senha — consumo do token, troca de senha (com bump de

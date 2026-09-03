@@ -16,10 +16,14 @@
 --
 -- A senha de todas as contas de fixture é a mesma, só para uso local:
 --   fixture-teacher-local-only-1
--- (hash PBKDF2-HMAC-SHA256/600000 pré-computado com
+-- (hash PBKDF2-HMAC-SHA256/100000 pré-computado com
 -- worker/src/lib/crypto.ts:hashPassword, salt fixo zerado — não é segredo
 -- real, nunca usado fora do ambiente local). Login via API normal
 -- (POST /api/auth/login) com o e-mail e esta senha.
+-- ATUALIZADO: regenerado a 100000 iterações (de 600000) porque
+-- worker/src/lib/crypto.ts:verifyPassword agora rejeita qualquer hash acima
+-- de PBKDF2_MAX_SUPPORTED_ITERATIONS (teto real do runtime Workers em
+-- produção) — mesma senha em texto puro, mesmo salt zerado.
 --
 -- Cenários cobertos (ordem seção 9):
 --   professor A (fixture-teacher-a) -> aluno 1 (fixture-student-1): ativo
@@ -44,13 +48,13 @@
 
 INSERT OR IGNORE INTO users (id, name, email, email_normalized, password_hash, status, email_confirmed_at)
 VALUES
-  ('fixture-teacher-a', '[PROVISÓRIO] Professora A (Fixture Técnica)', 'fixture-professora-a@local.teste', 'fixture-professora-a@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-teacher-b', '[PROVISÓRIO] Professor B (Fixture Técnica)', 'fixture-professor-b@local.teste', 'fixture-professor-b@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-teacher-c', '[PROVISÓRIO] Professora C, sem alunos (Fixture Técnica)', 'fixture-professora-c@local.teste', 'fixture-professora-c@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-student-1', '[PROVISÓRIO] Aluno 1 (Fixture Técnica)', 'fixture-aluno-1@local.teste', 'fixture-aluno-1@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-student-2', '[PROVISÓRIO] Aluna 2 (Fixture Técnica)', 'fixture-aluno-2@local.teste', 'fixture-aluno-2@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-student-3', '[PROVISÓRIO] Aluno 3 (Fixture Técnica)', 'fixture-aluno-3@local.teste', 'fixture-aluno-3@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now')),
-  ('fixture-student-4', '[PROVISÓRIO] Aluna 4, sem professor (Fixture Técnica)', 'fixture-aluno-4@local.teste', 'fixture-aluno-4@local.teste', 'pbkdf2-sha256-v1$600000$AAAAAAAAAAAAAAAAAAAAAA$ZktRipUeDRkHHgMc0SecziHg5s8HCG5c2BYKklMI27s', 'active', datetime('now'));
+  ('fixture-teacher-a', '[PROVISÓRIO] Professora A (Fixture Técnica)', 'fixture-professora-a@local.teste', 'fixture-professora-a@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-teacher-b', '[PROVISÓRIO] Professor B (Fixture Técnica)', 'fixture-professor-b@local.teste', 'fixture-professor-b@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-teacher-c', '[PROVISÓRIO] Professora C, sem alunos (Fixture Técnica)', 'fixture-professora-c@local.teste', 'fixture-professora-c@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-student-1', '[PROVISÓRIO] Aluno 1 (Fixture Técnica)', 'fixture-aluno-1@local.teste', 'fixture-aluno-1@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-student-2', '[PROVISÓRIO] Aluna 2 (Fixture Técnica)', 'fixture-aluno-2@local.teste', 'fixture-aluno-2@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-student-3', '[PROVISÓRIO] Aluno 3 (Fixture Técnica)', 'fixture-aluno-3@local.teste', 'fixture-aluno-3@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now')),
+  ('fixture-student-4', '[PROVISÓRIO] Aluna 4, sem professor (Fixture Técnica)', 'fixture-aluno-4@local.teste', 'fixture-aluno-4@local.teste', 'pbkdf2-sha256-v1$100000$AAAAAAAAAAAAAAAAAAAAAA$KzzMpMWIP6f6INq1Qp01P4z6sCUF30RhcW35Sn6Z9EY', 'active', datetime('now'));
 
 -- Perfil mínimo (só a série, para exercitar "série, se já disponível" na
 -- lista/detalhe) para o aluno 1 apenas — os demais ficam sem perfil, para

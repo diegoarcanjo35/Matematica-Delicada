@@ -4,6 +4,8 @@
    para compor um único db.batch() atômico no serviço (mesmo padrão das
    Sprints 2-4). */
 
+import { isLocalScheduleFixturesAllowed, type Env } from "../env";
+
 export interface ScheduleActivityRow {
   id: string;
   type: string;
@@ -17,6 +19,13 @@ export interface ScheduleActivityRow {
   resource_ref: string | null;
   dismissible: number;
   is_local_fixture: number;
+  // Sprint 16 v1.3 — colunas que já existiam no schema (migration 0006)
+  // mas nunca tinham sido declaradas aqui (o fluxo do aluno nunca
+  // precisou delas); completadas ao consolidar `listRealActivities` para
+  // reúso pela listagem administrativa (scheduleAdminRepository.ts), que
+  // precisa exibir quando cada atividade foi criada/atualizada.
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ScheduleAssignmentRow {
@@ -80,6 +89,39 @@ export async function listLocalFixtureActivities(db: D1Database): Promise<Schedu
     .prepare("SELECT * FROM schedule_activities WHERE is_local_fixture = 1")
     .all<ScheduleActivityRow>();
   return result.results ?? [];
+}
+
+/** Sprint 16 v1.3 — o análogo REAL de `listLocalFixtureActivities`: usado
+ *  pelo fluxo do aluno (`listPlanCandidates`, scheduleService.ts) fora do
+ *  dev local com a flag explícita — produção real, ou dev local sem a
+ *  flag. Também reexportada por scheduleAdminRepository.ts (fonte de
+ *  verdade única, nunca duas consultas mantidas em paralelo). */
+export async function listRealActivities(db: D1Database): Promise<ScheduleActivityRow[]> {
+  const result = await db
+    .prepare("SELECT * FROM schedule_activities WHERE is_local_fixture = 0 ORDER BY title ASC, id ASC")
+    .all<ScheduleActivityRow>();
+  return result.results ?? [];
+}
+
+/** Sprint 16 v1.3, seção 2 da ordem — "disponível quando existir pelo
+ *  menos atividade REAL elegível/publicada": `schedule_activities` nunca
+ *  teve um conceito de `editorial_status`/publicação (migration 0006) —
+ *  uma linha real é, por desenho, sempre uma definição de atividade
+ *  autocontida e imediatamente utilizável (nenhuma opção/estrutura
+ *  filha que possa estar incompleta, diferente do Diagnóstico). Por
+ *  isso "elegível" aqui é exatamente `is_local_fixture = 0` — nenhuma
+ *  checagem estrutural adicional é necessária ou inventada. */
+export async function hasAnyRealActivity(db: D1Database): Promise<boolean> {
+  const row = await db.prepare("SELECT 1 as found FROM schedule_activities WHERE is_local_fixture = 0 LIMIT 1").first<{ found: number }>();
+  return row !== null;
+}
+
+/** Sprint 16 v1.3, seção 1 da ordem — critério ÚNICO de disponibilidade do
+ *  Cronograma, mesmo desenho de questionRepository.ts:isQuestionBankAvailable
+ *  e diagnosticRepository.ts:isDiagnosticAvailable. */
+export async function isScheduleAvailable(env: Env, url: URL, db: D1Database): Promise<boolean> {
+  if (isLocalScheduleFixturesAllowed(env, url)) return true;
+  return hasAnyRealActivity(db);
 }
 
 export async function findAssignment(db: D1Database, assignmentId: string): Promise<ScheduleAssignmentRow | null> {

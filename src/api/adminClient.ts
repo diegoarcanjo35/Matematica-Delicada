@@ -169,3 +169,178 @@ export function reactivateAdminBond(bondId: string, mutationId: string): Promise
 export function deactivateAdminBond(bondId: string, mutationId: string): Promise<{ ok: true; changed: boolean; bondId: string | null }> {
   return patchBond(bondId, "deactivate", mutationId);
 }
+
+/* -------------------------------------------------------------------- */
+/* Diagnóstico — pipeline administrativo mínimo (Sprint 16 v1.2, seção 2)  */
+/* -------------------------------------------------------------------- */
+
+export interface DiagnosticAdminOption {
+  text: string;
+  isCorrect: boolean;
+}
+
+export interface DiagnosticAdminQuestion {
+  id: string;
+  prompt: string;
+  position: number;
+  options: DiagnosticAdminOption[];
+  recognitionOptions: DiagnosticAdminOption[];
+  helpLayers: Partial<Record<1 | 2 | 3 | 4, string>>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function fetchAdminDiagnosticQuestions(): Promise<{ ok: true; questions: DiagnosticAdminQuestion[] }> {
+  return request("/api/admin/diagnostic-questions");
+}
+
+export interface CreateDiagnosticQuestionInput {
+  prompt: string;
+  options: DiagnosticAdminOption[];
+  recognitionOptions: DiagnosticAdminOption[];
+  helpLayers: Partial<Record<1 | 2 | 3 | 4, string>>;
+  mutationId: string;
+}
+
+export function createAdminDiagnosticQuestion(input: CreateDiagnosticQuestionInput): Promise<{ ok: true; changed: boolean; questionId: string }> {
+  return request("/api/admin/diagnostic-questions", jsonInit("POST", input));
+}
+
+export function deleteAdminDiagnosticQuestion(questionId: string): Promise<{ ok: true; changed: boolean }> {
+  return request(`/api/admin/diagnostic-questions/${encodeURIComponent(questionId)}`, { method: "DELETE" });
+}
+
+/* -------------------------------------------------------------------- */
+/* Cronograma — pipeline administrativo mínimo (Sprint 16 v1.2, seção 3)   */
+/* -------------------------------------------------------------------- */
+
+export const SCHEDULE_ACTIVITY_TYPES = [
+  "diagnostico",
+  "reconhecimento",
+  "estudo_de_padrao",
+  "conteudo_de_base",
+  "aula_video",
+  "treino_de_questoes",
+  "correcao_de_erro",
+  "revisao_espacada",
+  "lista_do_professor",
+  "simulado",
+  "live",
+  "leitura_de_resumo",
+] as const;
+export const SCHEDULE_COMPLETION_MODES = ["manual", "automatic", "external_evidence"] as const;
+export const SCHEDULE_ACTIVITY_ORIGINS = ["system", "teacher", "diagnostic", "review"] as const;
+
+export interface ScheduleActivityAdmin {
+  id: string;
+  type: string;
+  title: string;
+  objective: string;
+  estimatedMinutes: number;
+  completionCriteria: string;
+  explanation: string;
+  completionMode: string;
+  origin: string;
+  resourceRef: string | null;
+  dismissible: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleActivityInput {
+  type: string;
+  title: string;
+  objective: string;
+  estimatedMinutes: number;
+  completionCriteria: string;
+  explanation: string;
+  completionMode: string;
+  origin: string;
+  resourceRef?: string | null;
+  dismissible?: boolean;
+  mutationId: string;
+}
+
+export function fetchAdminScheduleActivities(): Promise<{ ok: true; activities: ScheduleActivityAdmin[] }> {
+  return request("/api/admin/schedule-activities");
+}
+
+export function createAdminScheduleActivity(input: ScheduleActivityInput): Promise<{ ok: true; changed: boolean; activityId: string }> {
+  return request("/api/admin/schedule-activities", jsonInit("POST", input));
+}
+
+export function updateAdminScheduleActivity(activityId: string, input: ScheduleActivityInput): Promise<{ ok: true; changed: boolean }> {
+  return request(`/api/admin/schedule-activities/${encodeURIComponent(activityId)}`, jsonInit("PATCH", input));
+}
+
+export function deleteAdminScheduleActivity(activityId: string): Promise<{ ok: true; changed: boolean }> {
+  return request(`/api/admin/schedule-activities/${encodeURIComponent(activityId)}`, { method: "DELETE" });
+}
+
+/* -------------------------------------------------------------------- */
+/* Padrões — superfície administrativa (Sprint 16 v1.2, seção 4)           */
+/* -------------------------------------------------------------------- */
+
+export interface PatternAttributeLists {
+  frequentClues: string[];
+  recurringPhrases: string[];
+  recurringVisualElements: string[];
+  alternativeStrategies: string[];
+  requiredContents: string[];
+  prerequisiteContents: string[];
+  commonMistakes: string[];
+  tags: string[];
+}
+
+export interface PatternAdmin {
+  id: string;
+  code: string;
+  slug: string;
+  name: string;
+  recognitionPhrase: string;
+  description: string;
+  mainStrategy: string;
+  introductoryExample: string;
+  strategicSummary: string;
+  editorialStatus: string;
+  version: number;
+  attributes: PatternAttributeLists;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PatternCoreInput {
+  code: string;
+  slug: string;
+  name: string;
+  recognitionPhrase: string;
+  description: string;
+  mainStrategy: string;
+  introductoryExample: string;
+  strategicSummary: string;
+  attributes?: Partial<PatternAttributeLists>;
+}
+
+export function fetchAdminPatterns(): Promise<{ ok: true; patterns: PatternAdmin[] }> {
+  return request("/api/admin/patterns");
+}
+
+export function createAdminPattern(input: PatternCoreInput & { mutationId: string }): Promise<{ ok: true; changed: boolean; patternId: string }> {
+  return request("/api/admin/patterns", jsonInit("POST", input));
+}
+
+export function updateAdminPattern(
+  patternId: string,
+  input: PatternCoreInput & { expectedVersion: number; mutationId: string }
+): Promise<{ ok: true; changed: boolean }> {
+  return request(`/api/admin/patterns/${encodeURIComponent(patternId)}`, jsonInit("PATCH", input));
+}
+
+export function transitionAdminPatternStatus(
+  patternId: string,
+  action: "publish" | "inactivate",
+  expectedVersion: number,
+  mutationId: string
+): Promise<{ ok: true; changed: boolean }> {
+  return request(`/api/admin/patterns/${encodeURIComponent(patternId)}/status`, jsonInit("PATCH", { action, expectedVersion, mutationId }));
+}

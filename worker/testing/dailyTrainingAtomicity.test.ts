@@ -127,8 +127,8 @@ describe("dois applies simultâneos criam exatamente UMA lista ativa (seção 15
     await setupUserWithOneEligibleQuestion("u-race-apply");
 
     const [r1, r2] = await Promise.all([
-      applyList(db as never, "u-race-apply", "mut-a", CLOCK),
-      applyList(db as never, "u-race-apply", "mut-b", CLOCK),
+      applyList(db as never, "u-race-apply", "mut-a", false, CLOCK),
+      applyList(db as never, "u-race-apply", "mut-b", false, CLOCK),
     ]);
 
     expect(r1.ok).toBe(true);
@@ -142,13 +142,13 @@ describe("dois applies simultâneos criam exatamente UMA lista ativa (seção 15
 describe("start simultâneo cria/associa exatamente UMA tentativa (seção 15 da ordem)", () => {
   it("duas chamadas concorrentes de startItem no MESMO item resultam numa única question_attempts e um único item_started", async () => {
     await setupUserWithOneEligibleQuestion("u-race-start");
-    const applied = await applyList(db as never, "u-race-start", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-race-start", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
 
     const [r1, r2] = await Promise.all([
-      startItem(db as never, "u-race-start", listId, itemRow.id, "start-a"),
-      startItem(db as never, "u-race-start", listId, itemRow.id, "start-b"),
+      startItem(db as never, "u-race-start", listId, itemRow.id, "start-a", false),
+      startItem(db as never, "u-race-start", listId, itemRow.id, "start-b", false),
     ]);
 
     expect(r1.ok).toBe(true);
@@ -165,7 +165,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
     await setupUserWithOneEligibleQuestion("u-fail-apply");
     db.failNextMatching(/INSERT INTO daily_training_events/);
 
-    await expect(applyList(db as never, "u-fail-apply", "mut-1", CLOCK)).rejects.toThrow();
+    await expect(applyList(db as never, "u-fail-apply", "mut-1", false, CLOCK)).rejects.toThrow();
 
     expect(countRows("daily_training_lists")).toBe(0);
     expect(countRows("daily_training_items")).toBe(0);
@@ -173,12 +173,12 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
 
   it("start: INSERT de daily_training_events forçado a falhar não deixa o item marcado in_progress sem evento, NEM uma tentativa órfã do Player (PO v1.1, seção 1-3)", async () => {
     await setupUserWithOneEligibleQuestion("u-fail-start");
-    const applied = await applyList(db as never, "u-fail-start", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-fail-start", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
 
     db.failNextMatching(/INSERT INTO daily_training_events/);
-    await expect(startItem(db as never, "u-fail-start", listId, itemRow.id, "start-1")).rejects.toThrow();
+    await expect(startItem(db as never, "u-fail-start", listId, itemRow.id, "start-1", false)).rejects.toThrow();
 
     const row = db.sqlite.prepare(`SELECT status, question_attempt_id, version FROM daily_training_items WHERE id = ?`).get(itemRow.id) as {
       status: string;
@@ -215,7 +215,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
        VALUES ('${entryId}', 'u-fail-review', '${questionId}', '${originalAttemptId}', '${originalAttemptId}', 'p-fail-review', 'scheduled', '2020-01-01T00:00:00.000Z')`
     );
 
-    const applied = await applyList(db as never, "u-fail-review", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-fail-review", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id, error_entry_id FROM daily_training_items WHERE list_id = ?`).get(listId) as {
       id: string;
@@ -224,7 +224,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
     expect(itemRow.error_entry_id).toBe(entryId); // confirma que é o item de revisão
 
     db.failNextMatching(/INSERT INTO daily_training_events/);
-    await expect(startItem(db as never, "u-fail-review", listId, itemRow.id, "start-1")).rejects.toThrow();
+    await expect(startItem(db as never, "u-fail-review", listId, itemRow.id, "start-1", false)).rejects.toThrow();
 
     const item = db.sqlite.prepare(`SELECT status, question_attempt_id FROM daily_training_items WHERE id = ?`).get(itemRow.id) as {
       status: string;
@@ -247,7 +247,7 @@ describe("falha genuína de SQL no INSERT do evento reverte também o núcleo (s
 describe("colisão de mutationId retorna conflito controlado (seção 15 da ordem)", () => {
   it("completar a lista duas vezes com o MESMO mutationId (sem ser retry do resultado já aplicado) retorna conflict, não corrompe nada", async () => {
     await setupUserWithOneEligibleQuestion("u-collision");
-    const applied = await applyList(db as never, "u-collision", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-collision", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
 
@@ -443,7 +443,7 @@ describe("startItem — mutationId reaproveitado para uma operação DIFERENTE (
 describe("startItem — tentativa pré-existente e legitimamente retomável (PO v1.1, seção 4)", () => {
   it("uma tentativa in_progress já aberta pelo Player (mesma questão+modo, ANTES do treino diário) é associada exatamente uma vez, sem criar uma segunda", async () => {
     await setupUserWithOneEligibleQuestion("u-preexisting-attempt");
-    const applied = await applyList(db as never, "u-preexisting-attempt", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-preexisting-attempt", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id, question_id, player_mode FROM daily_training_items WHERE list_id = ?`).get(listId) as {
       id: string;
@@ -459,7 +459,7 @@ describe("startItem — tentativa pré-existente e legitimamente retomável (PO 
        VALUES ('${preexistingAttemptId}', 'u-preexisting-attempt', '${itemRow.question_id}', 1, '${itemRow.player_mode}', 'in_progress')`
     );
 
-    const result = await startItem(db as never, "u-preexisting-attempt", listId, itemRow.id, "start-resume");
+    const result = await startItem(db as never, "u-preexisting-attempt", listId, itemRow.id, "start-resume", false);
     expect(result.ok).toBe(true);
     expect(result.value!.attemptId).toBe(preexistingAttemptId);
     expect(countRows("question_attempts", `WHERE user_id = 'u-preexisting-attempt'`)).toBe(1);
@@ -469,7 +469,7 @@ describe("startItem — tentativa pré-existente e legitimamente retomável (PO 
 
   it("falha ao associar uma tentativa JÁ EXISTENTE (retomada) não altera nem apaga essa tentativa pré-existente", async () => {
     await setupUserWithOneEligibleQuestion("u-preexisting-fail");
-    const applied = await applyList(db as never, "u-preexisting-fail", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-preexisting-fail", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id, question_id, player_mode FROM daily_training_items WHERE list_id = ?`).get(listId) as {
       id: string;
@@ -483,7 +483,7 @@ describe("startItem — tentativa pré-existente e legitimamente retomável (PO 
     );
 
     db.failNextMatching(/INSERT INTO daily_training_events/);
-    await expect(startItem(db as never, "u-preexisting-fail", listId, itemRow.id, "start-resume-fail")).rejects.toThrow();
+    await expect(startItem(db as never, "u-preexisting-fail", listId, itemRow.id, "start-resume-fail", false)).rejects.toThrow();
 
     const attempt = db.sqlite.prepare(`SELECT status, version FROM question_attempts WHERE id = ?`).get(preexistingAttemptId) as {
       status: string;
@@ -518,13 +518,13 @@ describe("startItem — isolamento entre alunos na resolução da tentativa (PO 
        VALUES ('${otherUserAttemptId}', 'u-other-attempt', '${sharedQuestionId}', 1, 'learning', 'in_progress')`
     );
 
-    const applied = await applyList(db as never, "u-owner-attempt", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-owner-attempt", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ? AND question_id = ?`).get(listId, sharedQuestionId) as {
       id: string;
     };
 
-    const result = await startItem(db as never, "u-owner-attempt", listId, itemRow.id, "start-owner");
+    const result = await startItem(db as never, "u-owner-attempt", listId, itemRow.id, "start-owner", false);
     expect(result.ok).toBe(true);
     expect(result.value!.attemptId).not.toBe(otherUserAttemptId);
 
@@ -571,7 +571,7 @@ describe("startItem — isolamento entre alunos na resolução da tentativa (PO 
 describe("startItem — corrida real de TOCTOU no mutationId, duas operações DIFERENTES (PO v1.2)", () => {
   it("duas chamadas CONCORRENTES de startItem, itens diferentes, MESMO mutationId: ambas passam pelo pre-check, exatamente uma vence, a outra recebe 409 controlado, sem escrita parcial", async () => {
     await setupUserWithTwoEligibleQuestions("u-toctou-race");
-    const applied = await applyList(db as never, "u-toctou-race", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-toctou-race", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const items = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ? ORDER BY position ASC`).all(listId) as { id: string }[];
     expect(items.length).toBe(2);
@@ -586,8 +586,8 @@ describe("startItem — corrida real de TOCTOU no mutationId, duas operações D
     const gate = db.pauseReadsMatching(/SELECT 1 as found FROM daily_training_events WHERE id = \?/, 2);
 
     const racePromise = Promise.allSettled([
-      startItem(db as never, "u-toctou-race", listId, itemA.id, SHARED_MUTATION_ID),
-      startItem(db as never, "u-toctou-race", listId, itemB.id, SHARED_MUTATION_ID),
+      startItem(db as never, "u-toctou-race", listId, itemA.id, SHARED_MUTATION_ID, false),
+      startItem(db as never, "u-toctou-race", listId, itemB.id, SHARED_MUTATION_ID, false),
     ]);
 
     await gate.arrived; // as DUAS já leram "não em uso" — nenhuma escreveu ainda.
@@ -655,15 +655,15 @@ describe("startItem — corrida real de TOCTOU no mutationId, duas operações D
 
   it("retry da MESMA operação (mesmo item, mesmo mutationId) CONCORRENTE consigo mesma continua idempotente — nunca vira conflito", async () => {
     await setupUserWithOneEligibleQuestion("u-toctou-retry-same");
-    const applied = await applyList(db as never, "u-toctou-retry-same", "mut-apply", CLOCK);
+    const applied = await applyList(db as never, "u-toctou-retry-same", "mut-apply", false, CLOCK);
     const listId = applied.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
     const SHARED_MUTATION_ID = "toctou-retry-same-mut";
 
     const gate = db.pauseReadsMatching(/SELECT 1 as found FROM daily_training_events WHERE id = \?/, 2);
     const racePromise = Promise.allSettled([
-      startItem(db as never, "u-toctou-retry-same", listId, itemRow.id, SHARED_MUTATION_ID),
-      startItem(db as never, "u-toctou-retry-same", listId, itemRow.id, SHARED_MUTATION_ID),
+      startItem(db as never, "u-toctou-retry-same", listId, itemRow.id, SHARED_MUTATION_ID, false),
+      startItem(db as never, "u-toctou-retry-same", listId, itemRow.id, SHARED_MUTATION_ID, false),
     ]);
     await gate.arrived;
     gate.release();
@@ -688,14 +688,14 @@ describe("startItem — corrida real de TOCTOU no mutationId, duas operações D
 describe("regra de unicidade diária — apenas UMA lista ativa por vez (PO v1.1, seção 5)", () => {
   it("depois que a lista ativa do dia é CONCLUÍDA, um novo apply() para o MESMO dia cria uma SEGUNDA lista (histórico, não um erro)", async () => {
     await setupUserWithOneEligibleQuestion("u-second-list-completed");
-    const first = await applyList(db as never, "u-second-list-completed", "mut-apply-1", CLOCK);
+    const first = await applyList(db as never, "u-second-list-completed", "mut-apply-1", false, CLOCK);
     const firstListId = first.value!.listId;
     const itemRow = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(firstListId) as { id: string };
     await skipItem(db as never, "u-second-list-completed", firstListId, itemRow.id, "skip-1", "not_now");
     const completed = await completeList(db as never, "u-second-list-completed", firstListId, "complete-1");
     expect(completed.ok).toBe(true);
 
-    const second = await applyList(db as never, "u-second-list-completed", "mut-apply-2", CLOCK);
+    const second = await applyList(db as never, "u-second-list-completed", "mut-apply-2", false, CLOCK);
     expect(second.ok).toBe(true);
     expect(second.changed).toBe(true);
     expect(second.value!.listId).not.toBe(firstListId);
@@ -707,12 +707,12 @@ describe("regra de unicidade diária — apenas UMA lista ativa por vez (PO v1.1
 
   it("depois que a lista ativa do dia é ABANDONADA, um novo apply() para o MESMO dia cria uma SEGUNDA lista (histórico, não um erro)", async () => {
     await setupUserWithOneEligibleQuestion("u-second-list-abandoned");
-    const first = await applyList(db as never, "u-second-list-abandoned", "mut-apply-1", CLOCK);
+    const first = await applyList(db as never, "u-second-list-abandoned", "mut-apply-1", false, CLOCK);
     const firstListId = first.value!.listId;
     const abandoned = await abandonList(db as never, "u-second-list-abandoned", firstListId, "abandon-1");
     expect(abandoned.ok).toBe(true);
 
-    const second = await applyList(db as never, "u-second-list-abandoned", "mut-apply-2", CLOCK);
+    const second = await applyList(db as never, "u-second-list-abandoned", "mut-apply-2", false, CLOCK);
     expect(second.ok).toBe(true);
     expect(second.value!.listId).not.toBe(firstListId);
     expect(countRows("daily_training_lists", `WHERE user_id = 'u-second-list-abandoned' AND training_date = '${TODAY_CIVIL}'`)).toBe(2);
@@ -720,8 +720,8 @@ describe("regra de unicidade diária — apenas UMA lista ativa por vez (PO v1.1
 
   it("enquanto a lista do dia continua ACTIVE, um novo apply() nunca cria uma segunda — devolve a existente (comportamento já coberto, reafirmado aqui)", async () => {
     await setupUserWithOneEligibleQuestion("u-still-active");
-    const first = await applyList(db as never, "u-still-active", "mut-apply-1", CLOCK);
-    const second = await applyList(db as never, "u-still-active", "mut-apply-2", CLOCK);
+    const first = await applyList(db as never, "u-still-active", "mut-apply-1", false, CLOCK);
+    const second = await applyList(db as never, "u-still-active", "mut-apply-2", false, CLOCK);
     expect(second.changed).toBe(false);
     expect(second.value!.listId).toBe(first.value!.listId);
     expect(countRows("daily_training_lists", `WHERE user_id = 'u-still-active' AND training_date = '${TODAY_CIVIL}'`)).toBe(1);

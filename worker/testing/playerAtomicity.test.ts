@@ -320,3 +320,104 @@ describe("audit_log só é gravado quando changed === true", () => {
     expect(auditRows).toBe(1);
   });
 });
+
+/* ---------------------------------------------------------------------- */
+/* 6) Sprint 16 v1.0 (A3) — student_pattern_progress: escrita mínima e     */
+/*    factual, no MESMO lote atômico do reconhecimento, nunca inventando  */
+/*    índice/score algum.                                                 */
+/* ---------------------------------------------------------------------- */
+
+function progressRow(
+  userId: string,
+  patternId: string
+): {
+  raw_evidence_count: number;
+  last_practiced_at: string | null;
+  next_review_at: string | null;
+  recognition_index: number | null;
+  resolution_index: number | null;
+  mastery_index: number | null;
+} | null {
+  return (
+    (db.sqlite
+      .prepare(
+        "SELECT raw_evidence_count, last_practiced_at, next_review_at, recognition_index, resolution_index, mastery_index FROM student_pattern_progress WHERE user_id = ? AND pattern_id = ?"
+      )
+      .get(userId, patternId) as never) ?? null
+  );
+}
+
+describe("student_pattern_progress: evidência real, mínima e factual (A3)", () => {
+  it("reconhecimento genuíno cria a linha de progresso com raw_evidence_count=1 e nenhum índice inventado", async () => {
+    const { attemptId } = await startAttempt("u-progress-new", "recognition");
+    expect(progressRow("u-progress-new", "pat-1")).toBeNull(); // nada antes
+
+    const result = await saveRecognition(db as never, "u-progress-new", attemptId, 1, {
+      patternSlug: "padrao-1",
+      clue: "reconheço pelo enunciado",
+      strategy: "isolar a variável",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+
+    const row = progressRow("u-progress-new", "pat-1");
+    expect(row).not.toBeNull();
+    expect(row!.raw_evidence_count).toBe(1);
+    expect(row!.last_practiced_at).not.toBeNull();
+    // Nunca zero, nunca um cálculo improvisado — só ausência real (NULL).
+    expect(row!.next_review_at).toBeNull();
+    expect(row!.recognition_index).toBeNull();
+    expect(row!.resolution_index).toBeNull();
+    expect(row!.mastery_index).toBeNull();
+  });
+
+  it("uma segunda evidência real (outra tentativa) incrementa raw_evidence_count para 2", async () => {
+    const first = await startAttempt("u-progress-two", "recognition");
+    await saveRecognition(db as never, "u-progress-two", first.attemptId, 1, { patternSlug: "padrao-1", clue: "a", strategy: "b" });
+
+    const qId2 = seedPublishedQuestion();
+    const second = await startOrResumeAttempt(db as never, "u-progress-two", qId2, "recognition");
+    await saveRecognition(db as never, "u-progress-two", second.value!.attemptId, 1, {
+      patternSlug: "padrao-1",
+      clue: "c",
+      strategy: "d",
+    });
+
+    expect(progressRow("u-progress-two", "pat-1")!.raw_evidence_count).toBe(2);
+  });
+
+  it("repetição idêntica (idempotente, changed:false) NÃO incrementa raw_evidence_count de novo", async () => {
+    const { attemptId } = await startAttempt("u-progress-idem", "recognition");
+    await saveRecognition(db as never, "u-progress-idem", attemptId, 1, { patternSlug: "padrao-1", clue: "a", strategy: "b" });
+    expect(progressRow("u-progress-idem", "pat-1")!.raw_evidence_count).toBe(1);
+
+    const repeat = await saveRecognition(db as never, "u-progress-idem", attemptId, 2, {
+      patternSlug: "padrao-1",
+      clue: "a",
+      strategy: "b",
+    });
+    expect(repeat.ok).toBe(true);
+    expect(repeat.changed).toBe(false);
+    expect(progressRow("u-progress-idem", "pat-1")!.raw_evidence_count).toBe(1); // inalterado
+  });
+
+  it("conflito de versão real (409) não cria nenhuma linha de progresso", async () => {
+    const { attemptId } = await startAttempt("u-progress-conflict", "recognition");
+    const result = await saveRecognition(db as never, "u-progress-conflict", attemptId, 99, {
+      patternSlug: "padrao-1",
+      clue: "a",
+      strategy: "b",
+    });
+    expect(result.conflict).toBe(true);
+    expect(progressRow("u-progress-conflict", "pat-1")).toBeNull();
+  });
+
+  it("falha genuína de SQL no INSERT do evento de reconhecimento reverte também o progresso do padrão (atomicidade)", async () => {
+    const { attemptId } = await startAttempt("u-progress-fail", "recognition");
+    db.failNextMatching(/INSERT INTO question_recognition_events/);
+    await expect(
+      saveRecognition(db as never, "u-progress-fail", attemptId, 1, { patternSlug: "padrao-1", clue: "a", strategy: "b" })
+    ).rejects.toThrow();
+    expect(progressRow("u-progress-fail", "pat-1")).toBeNull(); // nenhuma escrita parcial
+  });
+});

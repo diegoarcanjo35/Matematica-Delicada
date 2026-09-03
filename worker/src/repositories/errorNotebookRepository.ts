@@ -506,15 +506,28 @@ export interface SimilarQuestionSelection {
  *    4) a questão original (fallback final — sempre existe, é a própria
  *       entrada).
  *  Nunca revela rascunho nem questão de outro padrão/contexto (todo
- *  filtro exige `editorial_status = 'published'`). */
+ *  filtro exige `editorial_status = 'published'`). Sprint 16 v1.1: também
+ *  exige `is_local_fixture = 0` em ambas as consultas — esta função
+ *  escolhe a questão de revisão tanto do Caderno de Erros quanto (via
+ *  dailyTrainingService.ts, camada 1) do Treino Diário, então uma fixture
+ *  local nunca pode ser oferecida como "questão semelhante" real.
+ *
+ *  Sprint 16 v1.4 — `includeFixtures` (mesmo raciocínio de
+ *  questionRepository.ts:findQuestionForStudent): fora do dev local com a
+ *  flag, o filtro continua incondicional nas duas consultas; dentro dele,
+ *  fixtures voltam a poder ser oferecidas como "questão semelhante",
+ *  restaurando o teste local do Caderno de Erros/Treino Diário com
+ *  `ENABLE_LOCAL_EDITORIAL_FIXTURES=true`. */
 export async function selectSimilarQuestion(
   db: D1Database,
-  params: { originalQuestionId: string; primaryPatternId: string | null; excludeQuestionIds: string[] }
+  params: { originalQuestionId: string; primaryPatternId: string | null; excludeQuestionIds: string[] },
+  includeFixtures: boolean
 ): Promise<SimilarQuestionSelection> {
   if (!params.primaryPatternId) {
     return { questionId: params.originalQuestionId, reason: "original_fallback_no_pattern" };
   }
 
+  const fixtureClause = includeFixtures ? "" : " AND q.is_local_fixture = 0";
   const succeeded = new Set(params.excludeQuestionIds);
   const excludeStrict = Array.from(new Set([params.originalQuestionId, ...succeeded]));
   const placeholdersStrict = excludeStrict.map(() => "?").join(", ");
@@ -522,7 +535,7 @@ export async function selectSimilarQuestion(
     .prepare(
       `SELECT q.id FROM questions q
        JOIN question_patterns qp ON qp.question_id = q.id
-       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'
+       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'${fixtureClause}
          AND q.id NOT IN (${placeholdersStrict})
        ORDER BY q.code ASC
        LIMIT 1`
@@ -539,7 +552,7 @@ export async function selectSimilarQuestion(
     .prepare(
       `SELECT q.id FROM questions q
        JOIN question_patterns qp ON qp.question_id = q.id
-       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'
+       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'${fixtureClause}
          AND q.id != ?
        ORDER BY q.code ASC
        LIMIT 1`

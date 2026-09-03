@@ -153,20 +153,24 @@ function toSummaryDto(
   };
 }
 
+/** Sprint 16 v1.3 — `includeFixtures` (= `fixturesAllowed` da rota) decide
+ *  se fixtures locais entram na listagem: dev local com a flag preserva o
+ *  comportamento de sempre; qualquer outro caso mostra só padrões reais. */
 export async function listPatterns(
   db: D1Database,
   userId: string,
   filters: PatternListFilters,
   page: number,
-  pageSize: number
+  pageSize: number,
+  includeFixtures: boolean
 ): Promise<PatternListResultDto> {
-  const total = await countPublishedPatterns(db, userId, filters);
+  const total = await countPublishedPatterns(db, userId, filters, includeFixtures);
   const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
   const offset = (page - 1) * pageSize;
   // Uma página além do fim é uma página legitimamente vazia (nunca 404, nunca
   // "corrigida" silenciosamente para a última) — o total informado deixa o
   // cliente saber que não há mais resultados.
-  const rows = await listPublishedPatterns(db, userId, filters, pageSize, offset);
+  const rows = await listPublishedPatterns(db, userId, filters, pageSize, offset, includeFixtures);
   const patternIds = rows.map((row) => row.id);
   const [attributes, progressRows, hasAnyTrainableQuestion] = await Promise.all([
     listAttributesForPatterns(db, patternIds),
@@ -190,16 +194,17 @@ export async function listPatterns(
 export async function getPatternDetail(
   db: D1Database,
   userId: string,
-  slug: string
+  slug: string,
+  includeFixtures: boolean
 ): Promise<PatternDetailDto | null> {
-  const pattern = await findPublishedPatternBySlug(db, slug);
+  const pattern = await findPublishedPatternBySlug(db, slug, includeFixtures);
   if (!pattern) return null;
 
   const [attributes, relations, progress, trainableQuestionId] = await Promise.all([
     listAttributesForPatterns(db, [pattern.id]),
-    listRelationsForPattern(db, pattern.id),
+    listRelationsForPattern(db, pattern.id, includeFixtures),
     findStudentPatternProgress(db, userId, pattern.id),
-    findTrainableQuestionForPattern(db, pattern.id),
+    findTrainableQuestionForPattern(db, pattern.id, includeFixtures),
   ]);
 
   return {
@@ -232,9 +237,10 @@ export async function getPatternDetail(
 export async function getPatternProgress(
   db: D1Database,
   userId: string,
-  slug: string
+  slug: string,
+  includeFixtures: boolean
 ): Promise<{ slug: string; code: string; progress: PatternProgressDto } | null> {
-  const pattern = await findPublishedPatternBySlug(db, slug);
+  const pattern = await findPublishedPatternBySlug(db, slug, includeFixtures);
   if (!pattern) return null;
   const progress = await findStudentPatternProgress(db, userId, pattern.id);
   return { slug: pattern.slug, code: pattern.code, progress: toProgressDto(progress) };

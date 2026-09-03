@@ -1,0 +1,45 @@
+-- Sprint 16 v1.2 — Fechamento Funcional Final (seção 8 da ordem: "confirmar
+-- se o schema atual já comporta todos os pipelines antes de criar migration
+-- 0021"). Auditoria feita ANTES desta migration:
+--   * schedule_activities (migration 0006) JÁ tem `is_local_fixture` —
+--     nenhuma alteração necessária para o pipeline admin de Cronograma;
+--   * patterns (migration 0007) JÁ tem `is_local_fixture` E `editorial_status`
+--     E `version` — nenhuma alteração necessária para o pipeline admin de
+--     Padrões (charter emendado só na camada de aplicação, seção 4 da
+--     ordem — nenhuma mudança de schema requerida por essa emenda em si);
+--   * diagnostic_questions (migration 0004) é a ÚNICA lacuna real: nunca
+--     teve `is_local_fixture` porque, até esta sprint, TODA linha da tabela
+--     só podia vir do seed de fixture local (scripts/fixtures/
+--     diagnostic-fixtures.local.sql) — não havia conteúdo real para
+--     distinguir. Com o pipeline admin desta sprint, conteúdo REAL e
+--     fixture local passam a poder coexistir no mesmo banco (ambiente de
+--     desenvolvimento local), exigindo a MESMA defesa em profundidade já
+--     aplicada a `questions`/`schedule_activities`/`patterns` desde a
+--     Sprint 16 v1.0/v1.1 (A2): a distinção vive na CAMADA DE DADOS, nunca
+--     só no gate de rota.
+--
+-- Aditiva e não destrutiva: um único ALTER TABLE ADD COLUMN, com DEFAULT 0
+-- (linhas existentes — hoje só fixture — nunca precisam de um UPDATE
+-- retroativo aqui; a correção de valor das linhas de fixture já existentes
+-- acontece só no arquivo de seed local, reaplicado manualmente com
+-- INSERT OR IGNORE, que nunca sobrescreve uma linha já inserida — ver nota
+-- em scripts/fixtures/diagnostic-fixtures.local.sql sobre por que isso é
+-- aceitável: hoje, em qualquer ambiente real, TODA linha pré-existente
+-- desta tabela É fixture, então o valor correto para o histórico é
+-- justamente is_local_fixture = 1, não o DEFAULT 0 desta coluna nova — se
+-- algum dia isso importar de verdade, um UPDATE explícito e específico
+-- pode ser feito por uma migration futura; nesta sprint, D1 remoto nunca
+-- teve nenhuma linha em diagnostic_questions — ver relatório desta rodada,
+-- item 1 — então não há nenhum dado real em produção para migrar).
+--
+-- Verificado diretamente contra node:sqlite (mesma disciplina de
+-- migrations/0010) antes de escrever esta migration: `ALTER TABLE ... ADD
+-- COLUMN ... CHECK (...)` é aceito e o CHECK é de fato aplicado (SQLite
+-- 3.51.3, a versão empacotada neste projeto). Mesma ressalva de
+-- idempotência de 0010/0012/0014: esta linha `ALTER TABLE` NÃO é segura
+-- para reaplicação manual direta (falharia com "duplicate column name") —
+-- nunca acontece em uso real, já que o Wrangler rastreia migrations
+-- aplicadas e cada arquivo roda exatamente uma vez.
+ALTER TABLE diagnostic_questions ADD COLUMN is_local_fixture INTEGER NOT NULL DEFAULT 0 CHECK (is_local_fixture IN (0, 1));
+
+CREATE INDEX IF NOT EXISTS idx_diagnostic_questions_is_local_fixture ON diagnostic_questions (is_local_fixture);

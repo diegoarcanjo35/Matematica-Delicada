@@ -114,9 +114,9 @@ async function setupUserWithTwoPatterns(userId: string): Promise<{ patternA: str
 describe("preview — somente leitura (seção 7 da ordem)", () => {
   it("nunca cria bloco, item, evento ou auditoria, mesmo repetido várias vezes", async () => {
     await setupUserWithTwoPatterns("u1");
-    await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
-    await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
-    await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-p-a", size: 10 }, CLOCK);
+    await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
+    await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
+    await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-p-a", size: 10 }, false, CLOCK);
 
     expect(countRows("simulation_blocks")).toBe(0);
     expect(countRows("simulation_block_items")).toBe(0);
@@ -126,14 +126,14 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
 
   it("é determinístico para o mesmo estado do banco e o mesmo relógio", async () => {
     await setupUserWithTwoPatterns("u1");
-    const r1 = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
-    const r2 = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const r1 = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
+    const r2 = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     expect(r1).toEqual(r2);
   });
 
   it("bloco misto distribui entre os dois padrões publicados disponíveis", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const result = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.preview.composition.length).toBe(2);
@@ -143,7 +143,7 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
 
   it("bloco focado só traz questões do padrão escolhido, por slug resolvido no servidor", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, CLOCK);
+    const result = await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, false, CLOCK);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.preview.items.map((i) => i.patternId)).toEqual(["p-a"]);
@@ -151,7 +151,7 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
 
   it("padrão inexistente/rascunho no modo focado responde notFound, sem vazar conteúdo editorial", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-inexistente", size: 5 }, CLOCK);
+    const result = await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-inexistente", size: 5 }, false, CLOCK);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.notFound).toBe(true);
@@ -161,7 +161,7 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
     await seedUser("u1");
     seedPattern("p1", "PAD-01");
     seedDraftQuestion("q-draft", "C-DR", "p1");
-    const result = await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-p1", size: 5 }, CLOCK);
+    const result = await preview(db as never, "u1", { blockType: "pattern_focused", patternSlug: "slug-p1", size: 5 }, false, CLOCK);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.preview.availableCount).toBe(0);
@@ -170,7 +170,7 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
 
   it("tamanho fora de {5,10,15} é rejeitado com erro de validação, nunca um bloco de 45", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 45 }, CLOCK);
+    const result = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 45 }, false, CLOCK);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.fieldErrors.size).toBeTruthy();
@@ -178,7 +178,7 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
 
   it("aviso de quantidade insuficiente aparece quando há menos questões que o tamanho pedido", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 15 }, CLOCK);
+    const result = await preview(db as never, "u1", { blockType: "mixed", patternSlug: null, size: 15 }, false, CLOCK);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.preview.insufficientQuantity).toBe(true);
@@ -189,7 +189,7 @@ describe("preview — somente leitura (seção 7 da ordem)", () => {
 describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", () => {
   it("cria bloco + itens + evento atomicamente, nunca bloco vazio", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const result = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     expect(result.ok).toBe(true);
     expect(result.changed).toBe(true);
     expect(countRows("simulation_blocks", `WHERE id = '${result.value!.blockId}'`)).toBe(1);
@@ -199,8 +199,8 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 
   it("retry idempotente com o MESMO mutationId devolve o bloco existente, sem duplicar (PO v1.1 — identidade da mutação, nunca igualdade de conteúdo)", async () => {
     await setupUserWithTwoPatterns("u1");
-    const r1 = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
-    const r2 = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const r1 = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
+    const r2 = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     expect(r2.ok).toBe(true);
     expect(r2.changed).toBe(false);
     expect(r2.value!.blockId).toBe(r1.value!.blockId);
@@ -210,8 +210,8 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 
   it("PO v1.1 — mutationId DIFERENTE com configuração IDÊNTICA a um bloco já ativo NUNCA é tratado como retry idempotente (igualdade de conteúdo não prova mesma mutação)", async () => {
     await setupUserWithTwoPatterns("u1");
-    const r1 = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
-    const r2 = await applyBlock(db as never, "u1", { mutationId: "mut-2", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const r1 = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
+    const r2 = await applyBlock(db as never, "u1", { mutationId: "mut-2", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     expect(r2.ok).toBe(false);
     expect(r2.activeElsewhere).toBe(true);
     expect(r2.changed).toBeFalsy();
@@ -222,8 +222,8 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 
   it("PO v1.1 — mesmo mutationId de um bloco já ativo, mas configuração DIFERENTE, é um 409 controlado (identidade reaproveitada para outra operação)", async () => {
     await setupUserWithTwoPatterns("u1");
-    await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
-    const second = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, CLOCK);
+    await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
+    const second = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, false, CLOCK);
     expect(second.ok).toBe(false);
     expect(second.conflict).toBe(true);
     expect(countRows("simulation_blocks", `WHERE user_id = 'u1'`)).toBe(1);
@@ -232,8 +232,8 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 
   it("pedir um segundo bloco DIFERENTE enquanto um já está ativo é rejeitado explicitamente (nunca cria uma segunda sessão)", async () => {
     await setupUserWithTwoPatterns("u1");
-    await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
-    const second = await applyBlock(db as never, "u1", { mutationId: "mut-2", blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, CLOCK);
+    await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
+    const second = await applyBlock(db as never, "u1", { mutationId: "mut-2", blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, false, CLOCK);
     expect(second.ok).toBe(false);
     expect(second.activeElsewhere).toBe(true);
     expect(countRows("simulation_blocks", `WHERE user_id = 'u1' AND status = 'active'`)).toBe(1);
@@ -241,7 +241,7 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 
   it("nenhuma questão elegível resulta em `empty`, nunca um bloco vazio persistido", async () => {
     await seedUser("u1");
-    const result = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const result = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     expect(result.ok).toBe(false);
     expect(result.empty).toBe(true);
     expect(countRows("simulation_blocks")).toBe(0);
@@ -249,7 +249,7 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 
   it("bloco misto tem actual_item_count menor que planned_item_count quando há menos candidatas — nunca preenche artificialmente", async () => {
     await setupUserWithTwoPatterns("u1");
-    const result = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 15 }, CLOCK);
+    const result = await applyBlock(db as never, "u1", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 15 }, false, CLOCK);
     const row = db.sqlite.prepare("SELECT planned_item_count, actual_item_count FROM simulation_blocks WHERE id = ?").get(result.value!.blockId) as {
       planned_item_count: number;
       actual_item_count: number;
@@ -262,7 +262,7 @@ describe("apply — atômico, explícito e idempotente (seção 9 da ordem)", ()
 describe("integração com o Player (seção 10 da ordem)", () => {
   it("start cria a tentativa + associa ao item + grava evento, tudo atômico", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC LIMIT 1").get(blockId) as { id: string };
 
@@ -275,7 +275,7 @@ describe("integração com o Player (seção 10 da ordem)", () => {
 
   it("start retry com o mesmo mutationId é idempotente — nunca cria uma segunda tentativa", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC LIMIT 1").get(blockId) as { id: string };
 
@@ -288,7 +288,7 @@ describe("integração com o Player (seção 10 da ordem)", () => {
 
   it("sync só conclui o item quando a tentativa real está completed; resposta salva mas não confirmada não conclui", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare("SELECT id, question_id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC LIMIT 1").get(blockId) as {
       id: string;
@@ -312,7 +312,7 @@ describe("integração com o Player (seção 10 da ordem)", () => {
 
   it("acerto e erro do simulado alimentam o Caderno de Erros pela regra já existente do Player, sem duplicar", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC LIMIT 1").get(blockId) as { id: string };
     const started = await startItem(db as never, "u1", blockId, itemRow.id, "start-1");
@@ -331,7 +331,7 @@ describe("integração com o Player (seção 10 da ordem)", () => {
 describe("pular item (seção 15 da ordem)", () => {
   it("move o item para skipped e grava o evento; idempotente numa segunda chamada", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const itemRow = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC LIMIT 1").get(blockId) as { id: string };
 
@@ -348,7 +348,7 @@ describe("pular item (seção 15 da ordem)", () => {
 describe("conclusão do bloco (seção 12 da ordem)", () => {
   it("só conclui quando TODOS os itens estão em estado terminal", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ?").all(blockId) as { id: string }[];
     expect(items.length).toBe(2);
@@ -369,7 +369,7 @@ describe("conclusão do bloco (seção 12 da ordem)", () => {
 
   it("resumo factual nunca inclui TRI/nota/ranking — só campos factuais fechados", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ?").all(blockId) as { id: string }[];
     for (const item of items) await skipItem(db as never, "u1", blockId, item.id, `skip-${item.id}`);
@@ -395,14 +395,14 @@ describe("conclusão do bloco (seção 12 da ordem)", () => {
 describe("abandono do bloco", () => {
   it("move o bloco para abandoned e libera um novo apply em seguida", async () => {
     await setupUserWithTwoPatterns("u1");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
 
     const abandoned = await abandonBlock(db as never, "u1", blockId, "abandon-1");
     expect(abandoned.ok).toBe(true);
     expect(countRows("simulation_blocks", `WHERE id = '${blockId}' AND status = 'abandoned'`)).toBe(1);
 
-    const second = await applyBlock(db as never, "u1", { mutationId: "mut-apply-2", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const second = await applyBlock(db as never, "u1", { mutationId: "mut-apply-2", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     expect(second.ok).toBe(true);
     expect(second.value!.blockId).not.toBe(blockId);
   });
@@ -412,13 +412,13 @@ describe("histórico — somente leitura (seção 14 da ordem)", () => {
   it("lista somente blocos concluídos/abandonados deste aluno, nunca ativos, nunca de outro aluno", async () => {
     await setupUserWithTwoPatterns("u1");
     await seedUser("u2");
-    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
+    const applied = await applyBlock(db as never, "u1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare("SELECT id FROM simulation_block_items WHERE block_id = ?").all(blockId) as { id: string }[];
     for (const item of items) await skipItem(db as never, "u1", blockId, item.id, `skip-${item.id}`);
     await completeBlock(db as never, "u1", blockId, "complete-1");
 
-    const activeOnly = await applyBlock(db as never, "u1", { mutationId: "mut-active", blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, CLOCK);
+    const activeOnly = await applyBlock(db as never, "u1", { mutationId: "mut-active", blockType: "pattern_focused", patternSlug: "slug-p-a", size: 5 }, false, CLOCK);
     expect(activeOnly.ok).toBe(true);
 
     const history = await getHistory(db as never, "u1", null);
@@ -448,56 +448,56 @@ describe("histórico — somente leitura (seção 14 da ordem)", () => {
 describe("significado de GET /current (correção PO v1.1, seção 3 da ordem)", () => {
   it("1) devolve SOMENTE o bloco ativo — nunca um completed/abandoned", async () => {
     await setupUserWithTwoPatterns("u-current-1");
-    const applied = await applyBlock(db as never, "u-current-1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-current-1", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
 
-    const whileActive = await getCurrent(db as never, "u-current-1");
+    const whileActive = await getCurrent(db as never, "u-current-1", false);
     expect(whileActive?.id).toBe(blockId);
     expect(whileActive?.status).toBe("active");
   });
 
   it("2) um bloco COMPLETED nunca reaparece como current — devolve null depois de concluído", async () => {
     await setupUserWithTwoPatterns("u-current-2");
-    const applied = await applyBlock(db as never, "u-current-2", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-current-2", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).all(blockId) as { id: string }[];
     for (const item of items) await skipItem(db as never, "u-current-2", blockId, item.id, `skip-${item.id}`);
     await completeBlock(db as never, "u-current-2", blockId, "complete-1");
 
-    const current = await getCurrent(db as never, "u-current-2");
+    const current = await getCurrent(db as never, "u-current-2", false);
     expect(current).toBeNull();
   });
 
   it("2b) um bloco ABANDONED também nunca reaparece como current — devolve null depois de abandonado", async () => {
     await setupUserWithTwoPatterns("u-current-2b");
-    const applied = await applyBlock(db as never, "u-current-2b", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-current-2b", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     await abandonBlock(db as never, "u-current-2b", applied.value!.blockId, "abandon-1");
 
-    const current = await getCurrent(db as never, "u-current-2b");
+    const current = await getCurrent(db as never, "u-current-2b", false);
     expect(current).toBeNull();
   });
 
   it("3) blocos terminais (completed/abandoned) ficam a cargo do histórico, nunca de current", async () => {
     await setupUserWithTwoPatterns("u-current-3");
-    const applied = await applyBlock(db as never, "u-current-3", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-current-3", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).all(blockId) as { id: string }[];
     for (const item of items) await skipItem(db as never, "u-current-3", blockId, item.id, `skip-${item.id}`);
     await completeBlock(db as never, "u-current-3", blockId, "complete-1");
 
-    expect(await getCurrent(db as never, "u-current-3")).toBeNull();
+    expect(await getCurrent(db as never, "u-current-3", false)).toBeNull();
     const history = await getHistory(db as never, "u-current-3", null);
     expect(history.entries.map((e) => e.id)).toEqual([blockId]);
   });
 
   it("4) um refresh (múltiplas chamadas) durante um bloco ativo sempre retoma o MESMO bloco — nunca cria um segundo", async () => {
     await setupUserWithTwoPatterns("u-current-4");
-    const applied = await applyBlock(db as never, "u-current-4", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-current-4", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
 
-    const r1 = await getCurrent(db as never, "u-current-4");
-    const r2 = await getCurrent(db as never, "u-current-4");
-    const r3 = await getCurrent(db as never, "u-current-4");
+    const r1 = await getCurrent(db as never, "u-current-4", false);
+    const r2 = await getCurrent(db as never, "u-current-4", false);
+    const r3 = await getCurrent(db as never, "u-current-4", false);
     expect(r1?.id).toBe(blockId);
     expect(r2?.id).toBe(blockId);
     expect(r3?.id).toBe(blockId);
@@ -506,14 +506,14 @@ describe("significado de GET /current (correção PO v1.1, seção 3 da ordem)",
 
   it("5) após a conclusão, a tela de resultado é alcançada via blockId diretamente (getBlockDetail), sem criar uma nova prévia/bloco automaticamente", async () => {
     await setupUserWithTwoPatterns("u-current-5");
-    const applied = await applyBlock(db as never, "u-current-5", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const applied = await applyBlock(db as never, "u-current-5", { mutationId: "mut-apply", blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const blockId = applied.value!.blockId;
     const items = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).all(blockId) as { id: string }[];
     for (const item of items) await skipItem(db as never, "u-current-5", blockId, item.id, `skip-${item.id}`);
     await completeBlock(db as never, "u-current-5", blockId, "complete-1");
 
     const before = countRows("simulation_blocks", `WHERE user_id = 'u-current-5'`);
-    const detail = await getBlockDetail(db as never, "u-current-5", blockId);
+    const detail = await getBlockDetail(db as never, "u-current-5", blockId, false);
     expect(detail?.id).toBe(blockId);
     expect(detail?.status).toBe("completed");
     const after = countRows("simulation_blocks", `WHERE user_id = 'u-current-5'`);
@@ -542,8 +542,8 @@ describe("isolamento entre alunos e contrato HTTP (seção 17 da ordem)", () => 
   it("getBlockDetail também nunca vaza um bloco de outro aluno (chamado direto no serviço)", async () => {
     await setupUserWithTwoPatterns("u-owner-2");
     await seedUser("u-intruder-2");
-    const applied = await applyBlock(db as never, "u-owner-2", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, CLOCK);
-    const detail = await getBlockDetail(db as never, "u-intruder-2", applied.value!.blockId);
+    const applied = await applyBlock(db as never, "u-owner-2", { mutationId: "mut-1", blockType: "mixed", patternSlug: null, size: 10 }, false, CLOCK);
+    const detail = await getBlockDetail(db as never, "u-intruder-2", applied.value!.blockId, false);
     expect(detail).toBeNull();
   });
 
@@ -561,7 +561,7 @@ describe("isolamento entre alunos e contrato HTTP (seção 17 da ordem)", () => 
 
   it("GET current de um aluno sem bloco ativo devolve null, nunca cria nada", async () => {
     await setupUserWithTwoPatterns("u1");
-    const current = await getCurrent(db as never, "u1");
+    const current = await getCurrent(db as never, "u1", false);
     expect(current).toBeNull();
     expect(countRows("simulation_blocks")).toBe(0);
   });
@@ -622,13 +622,13 @@ describe("GET somente leitura — por endpoint, com contagem de linhas por tabel
     await setupUserWithTwoPatterns(userId);
     const token = await createSessionForUser(userId);
 
-    const firstApply = await applyBlock(db as never, userId, { mutationId: `${userId}-mut-apply-1`, blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const firstApply = await applyBlock(db as never, userId, { mutationId: `${userId}-mut-apply-1`, blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const firstBlockId = firstApply.value!.blockId;
     const firstItems = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ?`).all(firstBlockId) as { id: string }[];
     for (const item of firstItems) await skipItem(db as never, userId, firstBlockId, item.id, `${userId}-skip-${item.id}`);
     await completeBlock(db as never, userId, firstBlockId, `${userId}-mut-complete-1`);
 
-    const secondApply = await applyBlock(db as never, userId, { mutationId: `${userId}-mut-apply-2`, blockType: "mixed", patternSlug: null, size: 5 }, CLOCK);
+    const secondApply = await applyBlock(db as never, userId, { mutationId: `${userId}-mut-apply-2`, blockType: "mixed", patternSlug: null, size: 5 }, false, CLOCK);
     const activeBlockId = secondApply.value!.blockId;
     const secondItems = db.sqlite.prepare(`SELECT id FROM simulation_block_items WHERE block_id = ? ORDER BY position ASC`).all(activeBlockId) as {
       id: string;

@@ -45,6 +45,9 @@ import { AdminOverviewPage } from "./pages/admin/AdminOverviewPage";
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
 import { AdminUserDetailPage } from "./pages/admin/AdminUserDetailPage";
 import { AdminBondsPage } from "./pages/admin/AdminBondsPage";
+import { AdminDiagnosticPage } from "./pages/admin/AdminDiagnosticPage";
+import { AdminSchedulePage } from "./pages/admin/AdminSchedulePage";
+import { AdminPatternsPage } from "./pages/admin/AdminPatternsPage";
 import { STUDENT_NAV_ITEMS } from "./routes/studentNav";
 
 // Rotas do menu do aluno que já têm tela real e por isso NÃO recebem
@@ -168,6 +171,9 @@ export function App() {
           <Route path="/admin/usuarios" element={<AdminUsersPage />} />
           <Route path="/admin/usuarios/:userId" element={<AdminUserDetailPage />} />
           <Route path="/admin/vinculos" element={<AdminBondsPage />} />
+          <Route path="/admin/diagnostico" element={<AdminDiagnosticPage />} />
+          <Route path="/admin/cronograma" element={<AdminSchedulePage />} />
+          <Route path="/admin/padroes" element={<AdminPatternsPage />} />
         </Route>
 
         {/* Área do aluno — exige sessão válida no servidor. OnboardingStatusProvider

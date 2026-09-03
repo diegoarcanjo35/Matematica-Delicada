@@ -1,9 +1,9 @@
 import type { Env } from "../env";
-import { isLocalEditorialFixturesAllowed } from "../env";
 import { Errors, json } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { getPatternMetricDetail, getRecentActivity, getStudentMetricsSummary, listPatternMetrics } from "../services/studentMetricsService";
+import { isQuestionBankAvailable } from "../repositories/questionRepository";
 
 /* Rotas do Mapa ENEM do Aluno — Sprint 10 v1.0.
 
@@ -16,10 +16,16 @@ import { getPatternMetricDetail, getRecentActivity, getStudentMetricsSummary, li
    "GET nunca audita" — não há mutação real para auditar aqui).
 
    Mesma ordem obrigatória de checagens do resto do namespace do aluno
-   (Player, Caderno de Erros): 1) sessão válida (401); 2) gate local de
-   fixtures (reaproveita EXATAMENTE isLocalEditorialFixturesAllowed,
-   nenhum gate novo); 3) validação de parâmetros; 4) só então o serviço
-   consulta o banco. `userId` vem SEMPRE da sessão — nunca de
+   (Player, Caderno de Erros): 1) sessão válida (401); 2) disponibilidade
+   do módulo — Sprint 16 v1.2 (correção do bloqueador remanescente da
+   v1.1): `isQuestionBankAvailable` (questionRepository.ts) substitui
+   `isLocalEditorialFixturesAllowed`, migrando o Mapa ENEM para o MESMO
+   critério já aplicado a Player/Treino Diário/Simulados/Caderno de Erros
+   desde a v1.1 — disponível em dev local com fixtures explicitamente
+   habilitadas, OU em qualquer outro ambiente (produção real inclusive)
+   quando existir ao menos uma questão REAL publicada; 3) validação de
+   parâmetros; 4) só então o serviço consulta o banco. `userId` vem SEMPRE
+   da sessão — nunca de
    query/body/path (seção 8: "user_id sempre da sessão, nunca do
    corpo/query/path"). Um padrão de outro aluno nunca é exposto porque
    toda consulta já é escopada por `user_id` no repositório — um slug
@@ -50,8 +56,8 @@ export async function handleStudentMetricsRequest(request: Request, env: Env, ur
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
-  const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
-  if (!fixturesAllowed) return unavailableResponse();
+  const available = await isQuestionBankAvailable(env, url, env.DB);
+  if (!available) return unavailableResponse();
 
   if (path === "/api/student-metrics/summary") {
     if (method !== "GET") return Errors.methodNotAllowed();

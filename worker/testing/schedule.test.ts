@@ -481,27 +481,27 @@ describe("cronograma — GET é somente leitura (correção v1.1)", () => {
   it("preview não persiste nenhuma atribuição — só a prévia em si", async () => {
     await seedUser("user-preview-readonly");
     seedProfile("user-preview-readonly", ["seg"], 240);
-    await previewPlan(db as never, "user-preview-readonly", fixedClock);
+    await previewPlan(db as never, "user-preview-readonly", fixedClock, true);
     expect(countAssignments("user-preview-readonly")).toBe(0);
   });
 
   it("apply explícito persiste exatamente uma vez — chamando de novo não duplica", async () => {
     await seedUser("user-apply-once");
     seedProfile("user-apply-once", ["seg", "ter", "qua", "qui", "sex", "sab", "dom"], 240);
-    const preview = await previewPlan(db as never, "user-apply-once", fixedClock);
-    await applyPlan(db as never, "user-apply-once", preview.previewId, fixedClock);
+    const preview = await previewPlan(db as never, "user-apply-once", fixedClock, true);
+    await applyPlan(db as never, "user-apply-once", preview.previewId, fixedClock, true);
     const countAfterFirstApply = countAssignments("user-apply-once");
     expect(countAfterFirstApply).toBe(TEST_ACTIVITIES.length);
 
-    await applyPlan(db as never, "user-apply-once", preview.previewId, fixedClock);
+    await applyPlan(db as never, "user-apply-once", preview.previewId, fixedClock, true);
     expect(countAssignments("user-apply-once")).toBe(countAfterFirstApply);
   });
 
   it("leitura após apply continua sem efeito colateral (nenhuma escrita adicional)", async () => {
     await seedUser("user-read-after-apply");
     seedProfile("user-read-after-apply", ["seg", "ter", "qua", "qui", "sex", "sab", "dom"], 240);
-    const preview = await previewPlan(db as never, "user-read-after-apply", fixedClock);
-    await applyPlan(db as never, "user-read-after-apply", preview.previewId, fixedClock);
+    const preview = await previewPlan(db as never, "user-read-after-apply", fixedClock, true);
+    await applyPlan(db as never, "user-read-after-apply", preview.previewId, fixedClock, true);
     const countAfterApply = countAssignments("user-read-after-apply");
 
     await getSummary(db as never, "user-read-after-apply", FIXTURES_ALLOWED, fixedClock);
@@ -949,11 +949,11 @@ describe("cronograma — prévia e aplicação de plano", () => {
     // (90) nunca cabem em nenhum dia, por maiores que a capacidade diária.
     seedProfile("user-26", ["seg"], 20);
 
-    const preview = await previewPlan(db as never, "user-26", fixedClock);
+    const preview = await previewPlan(db as never, "user-26", fixedClock, true);
     expect(preview.placed).toHaveLength(2);
     expect(preview.unplaceableAssignmentIds).toHaveLength(3);
 
-    await applyPlan(db as never, "user-26", preview.previewId, fixedClock);
+    await applyPlan(db as never, "user-26", preview.previewId, fixedClock, true);
 
     const assigned = await getActivitiesView(db as never, "user-26", "assigned", fixedClock);
     expect(assigned.map((a) => a.activityId).sort()).toEqual(["test-sched-a1", "test-sched-a2"]);
@@ -966,8 +966,8 @@ describe("cronograma — prévia e aplicação de plano", () => {
     await seedUser("user-27");
     seedProfile("user-27", ["seg", "ter", "qua", "qui", "sex", "sab", "dom"], 1000);
 
-    const preview = await previewPlan(db as never, "user-27", fixedClock);
-    const applied = await applyPlan(db as never, "user-27", preview.previewId, fixedClock);
+    const preview = await previewPlan(db as never, "user-27", fixedClock, true);
+    const applied = await applyPlan(db as never, "user-27", preview.previewId, fixedClock, true);
     expect(applied.ok).toBe(true);
     expect(applied.appliedCount).toBe(TEST_ACTIVITIES.length);
 
@@ -984,9 +984,9 @@ describe("cronograma — prévia e aplicação de plano", () => {
     seedProfile("user-28", ["seg"], 60);
     await seedAssignment("user-28", "test-sched-a1", null, null);
 
-    const preview = await previewPlan(db as never, "user-28", fixedClock);
-    const first = await applyPlan(db as never, "user-28", preview.previewId, fixedClock);
-    const second = await applyPlan(db as never, "user-28", preview.previewId, fixedClock);
+    const preview = await previewPlan(db as never, "user-28", fixedClock, true);
+    const first = await applyPlan(db as never, "user-28", preview.previewId, fixedClock, true);
+    const second = await applyPlan(db as never, "user-28", preview.previewId, fixedClock, true);
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
     expect(second.alreadyApplied).toBe(true);
@@ -997,9 +997,9 @@ describe("cronograma — prévia e aplicação de plano", () => {
     seedProfile("user-29", ["seg"], 60);
     await seedAssignment("user-29", "test-sched-a1", null, null);
 
-    const preview = await previewPlan(db as never, "user-29", fixedClock);
+    const preview = await previewPlan(db as never, "user-29", fixedClock, true);
     const farFutureClock: Clock = { now: () => new Date(FIXED_NOW.getTime() + 60 * 60 * 1000) }; // +1h > TTL de 30min
-    const result = await applyPlan(db as never, "user-29", preview.previewId, farFutureClock);
+    const result = await applyPlan(db as never, "user-29", preview.previewId, farFutureClock, true);
     expect(result.ok).toBe(false);
     expect(result.expired).toBe(true);
   });
@@ -1009,11 +1009,11 @@ describe("cronograma — prévia e aplicação de plano", () => {
     seedProfile("user-30", ["seg"], 60);
     await seedAssignment("user-30", "test-sched-a1", null, null);
 
-    const preview = await previewPlan(db as never, "user-30", fixedClock);
+    const preview = await previewPlan(db as never, "user-30", fixedClock, true);
     // Muda a disponibilidade depois de gerar a prévia.
     seedProfile("user-30", ["seg", "ter"], 60);
 
-    const result = await applyPlan(db as never, "user-30", preview.previewId, fixedClock);
+    const result = await applyPlan(db as never, "user-30", preview.previewId, fixedClock, true);
     expect(result.ok).toBe(false);
     expect(result.stale).toBe(true);
   });
@@ -1024,8 +1024,8 @@ describe("cronograma — prévia e aplicação de plano", () => {
     seedProfile("user-31-a", ["seg"], 60);
     await seedAssignment("user-31-a", "test-sched-a1", null, null);
 
-    const preview = await previewPlan(db as never, "user-31-a", fixedClock);
-    const result = await applyPlan(db as never, "user-31-b", preview.previewId, fixedClock);
+    const preview = await previewPlan(db as never, "user-31-a", fixedClock, true);
+    const result = await applyPlan(db as never, "user-31-b", preview.previewId, fixedClock, true);
     expect(result.ok).toBe(false);
     expect(result.notFound).toBe(true);
   });
@@ -1059,9 +1059,9 @@ describe("cronograma — rollback em falha forçada", () => {
     const idA = await seedAssignment("user-33", "test-sched-a1", null, null);
     const idB = await seedAssignment("user-33", "test-sched-a2", null, null);
 
-    const preview = await previewPlan(db as never, "user-33", fixedClock);
+    const preview = await previewPlan(db as never, "user-33", fixedClock, true);
     db.failNextMatching(/UPDATE schedule_activity_assignments\s+SET planned_date/);
-    const result = await applyPlan(db as never, "user-33", preview.previewId, fixedClock);
+    const result = await applyPlan(db as never, "user-33", preview.previewId, fixedClock, true);
     expect(result.ok).toBe(false);
 
     const rowA = await findAssignment(db as never, idA);

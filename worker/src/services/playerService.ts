@@ -57,8 +57,9 @@ import {
   listRecognitionEvents,
   type QuestionAttemptRow,
 } from "../repositories/playerRepository";
-import { findDna, findQuestionById, listAlternatives, listImages, listPatternsForQuestion } from "../repositories/questionRepository";
+import { findDna, findQuestionForStudent, listAlternatives, listImages, listPatternsForQuestion } from "../repositories/questionRepository";
 import { findPublishedPatternById, findPublishedPatternBySlug } from "../repositories/patternsRepository";
+import { buildStudentPatternProgressUpsertStatement } from "../repositories/studentPatternProgressRepository";
 import {
   buildCompleteReviewEntryStatement,
   buildCreateEntryStatement,
@@ -173,8 +174,8 @@ export interface AttemptFeedbackDto {
   } | null;
 }
 
-async function buildQuestionDto(db: D1Database, questionId: string): Promise<AttemptQuestionDto | null> {
-  const question = await findQuestionById(db, questionId);
+async function buildQuestionDto(db: D1Database, questionId: string, fixturesAllowed: boolean): Promise<AttemptQuestionDto | null> {
+  const question = await findQuestionForStudent(db, questionId, fixturesAllowed);
   if (!question) return null;
   const [alternatives, images, patterns] = await Promise.all([
     listAlternatives(db, questionId),
@@ -200,7 +201,8 @@ async function buildQuestionDto(db: D1Database, questionId: string): Promise<Att
 async function buildHelpContent(
   db: D1Database,
   questionId: string,
-  openedLayers: number[]
+  openedLayers: number[],
+  fixturesAllowed: boolean
 ): Promise<Record<number, string>> {
   if (openedLayers.length === 0) return {};
   const content: Record<number, string> = {};
@@ -216,7 +218,7 @@ async function buildHelpContent(
   }
   if (openedLayers.includes(3) && dna) content[3] = dna.estrategia;
   if (openedLayers.includes(4)) {
-    const question = await findQuestionById(db, questionId);
+    const question = await findQuestionForStudent(db, questionId, fixturesAllowed);
     if (question) content[4] = question.resolucao_comentada;
   }
   return content;
@@ -255,12 +257,12 @@ async function buildFeedbackDto(db: D1Database, attempt: QuestionAttemptRow): Pr
   };
 }
 
-export async function toAttemptStateDto(db: D1Database, attempt: QuestionAttemptRow): Promise<AttemptStateDto | null> {
-  const question = await buildQuestionDto(db, attempt.question_id);
+export async function toAttemptStateDto(db: D1Database, attempt: QuestionAttemptRow, fixturesAllowed: boolean): Promise<AttemptStateDto | null> {
+  const question = await buildQuestionDto(db, attempt.question_id, fixturesAllowed);
   if (!question) return null;
   const helpEvents = await listHelpEvents(db, attempt.id);
   const openedLayers = helpEvents.map((e) => e.layer).sort((a, b) => a - b);
-  const helpContent = await buildHelpContent(db, attempt.question_id, openedLayers);
+  const helpContent = await buildHelpContent(db, attempt.question_id, openedLayers, fixturesAllowed);
   const feedback = await buildFeedbackDto(db, attempt);
   const bookmark = await findBookmark(db, attempt.user_id, attempt.question_id);
   return {
@@ -338,13 +340,14 @@ export async function planStartOrResumeAttempt(
   db: D1Database,
   userId: string,
   questionId: string,
-  mode: string
+  mode: string,
+  fixturesAllowed: boolean
 ): Promise<AttemptStartPlanResult> {
   if (!["learning", "practice", "recognition"].includes(mode)) {
     return { ok: false, fieldErrors: { mode: "Modo inválido." } };
   }
 
-  const question = await findQuestionById(db, questionId);
+  const question = await findQuestionForStudent(db, questionId, fixturesAllowed);
   if (!question || question.editorial_status !== PUBLISHED) return { ok: false, notFound: true };
 
   const active = await findActiveAttempt(db, userId, questionId, mode);
@@ -365,9 +368,10 @@ export async function startOrResumeAttempt(
   db: D1Database,
   userId: string,
   questionId: string,
-  mode: string
+  mode: string,
+  fixturesAllowed: boolean
 ): Promise<MutationResult<{ attemptId: string }>> {
-  const planned = await planStartOrResumeAttempt(db, userId, questionId, mode);
+  const planned = await planStartOrResumeAttempt(db, userId, questionId, mode, fixturesAllowed);
   if (!planned.ok) return planned;
   const { plan } = planned;
   if (plan.alreadyActive) return { ok: true, changed: false, value: { attemptId: plan.attemptId } };
@@ -474,7 +478,8 @@ export async function saveRecognition(
   userId: string,
   attemptId: string,
   expectedVersion: number,
-  input: { patternSlug: unknown; clue: unknown; strategy: unknown }
+  input: { patternSlug: unknown; clue: unknown; strategy: unknown },
+  fixturesAllowed: boolean
 ): Promise<MutationResult<{ attemptId: string }>> {
   const attempt = await findAttemptByIdForUser(db, attemptId, userId);
   if (!attempt) return { ok: false, notFound: true };
@@ -487,7 +492,11 @@ export async function saveRecognition(
   if (typeof input.patternSlug !== "string" || input.patternSlug.trim().length === 0) {
     return { ok: false, fieldErrors: { patternSlug: "Padrão obrigatório." } };
   }
-  const pattern = await findPublishedPatternBySlug(db, input.patternSlug);
+  // Sprint 16 v1.4 — `includeFixtures: fixturesAllowed` (corrigido; v1.3
+  // usava `false` sempre, o que impedia salvar reconhecimento contra um
+  // padrão de fixture mesmo em dev local com a flag — mesmo achado do
+  // relatório da v1.3, agora corrigido também aqui).
+  const pattern = await findPublishedPatternBySlug(db, input.patternSlug, fixturesAllowed);
   if (!pattern) return { ok: false, fieldErrors: { patternSlug: "Padrão inválido ou não publicado." } };
 
   const clueResult = validateRecognitionClue(input.clue);
@@ -511,6 +520,13 @@ export async function saveRecognition(
     await db.batch([
       buildRecognitionUpdateStatement(db, { attemptId, userId, guardVersion: expectedVersion, mutationId, patternId: pattern.id, clue, strategy }),
       buildRecognitionEventInsertStatement(db, { id: mutationId, attemptId, attemptVersion: expectedVersion + 1, patternId: pattern.id, clue, strategy }),
+      // Sprint 16 v1.0 (A3) — evidência REAL de prática do padrão, no MESMO
+      // lote atômico do reconhecimento em si: ou as três escritas persistem
+      // juntas, ou nenhuma persiste. `recognitionUnchanged` acima já garante
+      // que este ponto só é alcançado para uma mudança GENUÍNA (nunca uma
+      // repetição idêntica) — a mesma condição que evita duplicar o evento
+      // de reconhecimento também evita contar evidência duas vezes.
+      buildStudentPatternProgressUpsertStatement(db, { userId, patternId: pattern.id }),
     ]);
   } catch (error) {
     // Núcleo e evento sempre viajam juntos (trigger de identidade,
@@ -868,8 +884,14 @@ export async function openHelpLayer(
 
 /* -------------------------------- Revisão e denúncia ------------------------------- */
 
-export async function setBookmark(db: D1Database, userId: string, questionId: string, save: boolean): Promise<MutationResult<null>> {
-  const question = await findQuestionById(db, questionId);
+export async function setBookmark(
+  db: D1Database,
+  userId: string,
+  questionId: string,
+  save: boolean,
+  fixturesAllowed: boolean
+): Promise<MutationResult<null>> {
+  const question = await findQuestionForStudent(db, questionId, fixturesAllowed);
   if (!question || question.editorial_status !== PUBLISHED) return { ok: false, notFound: true };
 
   const existing = await findBookmark(db, userId, questionId);
@@ -889,9 +911,10 @@ export async function reportProblem(
   questionId: string,
   attemptId: string | null,
   category: string,
-  comment: string | null
+  comment: string | null,
+  fixturesAllowed: boolean
 ): Promise<MutationResult<{ reportId: string }>> {
-  const question = await findQuestionById(db, questionId);
+  const question = await findQuestionForStudent(db, questionId, fixturesAllowed);
   if (!question || question.editorial_status !== PUBLISHED) return { ok: false, notFound: true };
 
   if (attemptId) {

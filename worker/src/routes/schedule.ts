@@ -4,6 +4,7 @@ import { Errors, json, readJsonBody } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
+import { isScheduleAvailable } from "../repositories/scheduleRepository";
 import { isValidTimezone, validateBlockReason, validateVersion, validateView } from "../lib/scheduleValidation";
 import {
   applyPlan,
@@ -57,14 +58,20 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  // Sprint 16 v1.3, seção 1 da ordem — `fixturesAllowed` continua
+  // existindo (controla SÓ o pool de conteúdo dentro de previewPlan/
+  // applyPlan/listPlanCandidates). O GATE de disponibilidade em si passou
+  // a ser `isScheduleAvailable`, que também abre em produção real quando
+  // existe atividade REAL — nunca mais só a flag de dev sozinha.
   const fixturesAllowed = isLocalScheduleFixturesAllowed(env, url);
+  const available = await isScheduleAvailable(env, url, env.DB);
 
   if (path === "/api/schedule/summary" && method === "GET") {
-    const summary = await getSummary(env.DB, user.id, fixturesAllowed, systemClock);
+    const summary = await getSummary(env.DB, user.id, available, systemClock);
     return json({ ok: true, ...summary });
   }
 
-  if (!fixturesAllowed) {
+  if (!available) {
     return unavailableResponse();
   }
 
@@ -205,7 +212,7 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
   }
 
   if (path === "/api/schedule/plan/preview" && method === "POST") {
-    const preview = await previewPlan(env.DB, user.id, systemClock);
+    const preview = await previewPlan(env.DB, user.id, systemClock, fixturesAllowed);
     await audit(env, "schedule_plan_previewed", user.id, {
       placedCount: preview.placed.length,
       unplaceableCount: preview.unplaceableAssignmentIds.length,
@@ -218,7 +225,7 @@ export async function handleScheduleRequest(request: Request, env: Env, url: URL
     if (!body || typeof body.previewId !== "string" || body.previewId.trim() === "") {
       return Errors.badRequest("Informe o identificador da prévia.");
     }
-    const result = await applyPlan(env.DB, user.id, body.previewId, systemClock);
+    const result = await applyPlan(env.DB, user.id, body.previewId, systemClock, fixturesAllowed);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.expired) {

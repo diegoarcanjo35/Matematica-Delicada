@@ -4,6 +4,7 @@ import { Errors, json, readJsonBody } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
+import { isQuestionBankAvailable } from "../repositories/questionRepository";
 import { isValidHelpLayer, isValidProblemReportCategory, validateProblemReportComment } from "../lib/playerValidation";
 import {
   confirmAnswer,
@@ -22,13 +23,13 @@ import {
    Ordem obrigatória de checagens em toda requisição:
      1) sessão válida (401 sem sessão) — mesmo padrão de diagnostic.ts/
         patterns.ts/editorialQuestions.ts desde a Sprint 4;
-     2) gate local de fixtures — ANTES de qualquer consulta às tabelas
-        questions/question_attempts/etc. Reaproveita EXATAMENTE o gate do
-        Banco de Questões (isLocalEditorialFixturesAllowed) — nenhum gate
-        novo foi criado (seção 14 da ordem: só existe conteúdo técnico de
-        fixture nesta sprint, nenhuma questão oficial real, então o mesmo
-        gate que já protege `questions`/`question_dna`/etc. desde a
-        Sprint 7 é a fonte de verdade correta);
+     2) disponibilidade do módulo — ANTES de qualquer consulta às tabelas
+        question_attempts/etc. Sprint 16 v1.1 (A2): `isQuestionBankAvailable`
+        (questionRepository.ts) substitui o antigo gate "só fixture local
+        liga tudo" — disponível em dev local com fixtures explicitamente
+        habilitadas (comportamento inalterado), OU em qualquer outro
+        ambiente (incluindo produção real) quando existir ao menos uma
+        questão REAL publicada;
      3) validação de parâmetros (400/404);
      4) só então o serviço consulta/muta o banco.
 
@@ -82,8 +83,14 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  const available = await isQuestionBankAvailable(env, url, env.DB);
+  if (!available) return unavailableResponse();
+  // Sprint 16 v1.4 — `fixturesAllowed` (idêntico ao usado por
+  // isQuestionBankAvailable) é passado explicitamente a TODA função de
+  // serviço que lê questão/padrão — nunca reconsultado por elas via
+  // header/query/body. Corrige o achado da v1.3: com a flag habilitada,
+  // fixtures editoriais voltam a ser servidas normalmente em dev local.
   const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
-  if (!fixturesAllowed) return unavailableResponse();
 
   if (path === "/api/player/attempts") {
     if (method !== "POST") return Errors.methodNotAllowed();
@@ -91,7 +98,7 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
     if (!body || typeof body.questionId !== "string" || typeof body.mode !== "string") {
       return Errors.badRequest("questionId e mode são obrigatórios.");
     }
-    const result = await startOrResumeAttempt(env.DB, user.id, body.questionId, body.mode);
+    const result = await startOrResumeAttempt(env.DB, user.id, body.questionId, body.mode, fixturesAllowed);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       return json({ error: { code: "validation_error", message: "Não foi possível iniciar a tentativa.", fields: result.fieldErrors } }, { status: 400 });
@@ -108,7 +115,7 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
     if (method !== "GET") return Errors.methodNotAllowed();
     const attempt = await getAttempt(env.DB, user.id, attemptMatch[1]);
     if (!attempt) return Errors.notFound();
-    const dto = await toAttemptStateDto(env.DB, attempt);
+    const dto = await toAttemptStateDto(env.DB, attempt, fixturesAllowed);
     if (!dto) return Errors.notFound();
     return json({ ok: true, attempt: dto });
   }
@@ -119,7 +126,14 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
     const attemptId = recognitionMatch[1];
     const body = await readJsonBody<{ version?: unknown; patternSlug?: unknown; clue?: unknown; strategy?: unknown }>(request);
     if (!body || typeof body.version !== "number") return Errors.badRequest("version é obrigatória.");
-    const result = await saveRecognition(env.DB, user.id, attemptId, body.version, { patternSlug: body.patternSlug, clue: body.clue, strategy: body.strategy });
+    const result = await saveRecognition(
+      env.DB,
+      user.id,
+      attemptId,
+      body.version,
+      { patternSlug: body.patternSlug, clue: body.clue, strategy: body.strategy },
+      fixturesAllowed
+    );
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.conflict) return conflictResponse();
@@ -180,7 +194,7 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
       }
     }
     const attempt = await getAttempt(env.DB, user.id, attemptId);
-    const dto = attempt ? await toAttemptStateDto(env.DB, attempt) : null;
+    const dto = attempt ? await toAttemptStateDto(env.DB, attempt, fixturesAllowed) : null;
     return json({ ok: true, attempt: dto });
   }
 
@@ -202,7 +216,7 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
       await audit(env, "question_help_opened", user.id, { attemptId, layer });
     }
     const attempt = await getAttempt(env.DB, user.id, attemptId);
-    const dto = attempt ? await toAttemptStateDto(env.DB, attempt) : null;
+    const dto = attempt ? await toAttemptStateDto(env.DB, attempt, fixturesAllowed) : null;
     return json({ ok: true, attempt: dto });
   }
 
@@ -210,13 +224,13 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
   if (bookmarkMatch) {
     const questionId = bookmarkMatch[1];
     if (method === "PUT") {
-      const result = await setBookmark(env.DB, user.id, questionId, true);
+      const result = await setBookmark(env.DB, user.id, questionId, true, fixturesAllowed);
       if (!result.ok) return Errors.notFound();
       if (result.changed) await audit(env, "question_saved_for_review", user.id, { questionId });
       return json({ ok: true, saved: true });
     }
     if (method === "DELETE") {
-      const result = await setBookmark(env.DB, user.id, questionId, false);
+      const result = await setBookmark(env.DB, user.id, questionId, false, fixturesAllowed);
       if (!result.ok) return Errors.notFound();
       return json({ ok: true, saved: false });
     }
@@ -236,7 +250,7 @@ export async function handlePlayerRequest(request: Request, env: Env, url: URL):
       return json({ error: { code: "validation_error", message: "Comentário inválido.", fields: { comment: commentResult.error } } }, { status: 400 });
     }
     const attemptId = typeof body.attemptId === "string" ? body.attemptId : null;
-    const result = await reportProblem(env.DB, user.id, questionId, attemptId, body.category, commentResult.value ?? null);
+    const result = await reportProblem(env.DB, user.id, questionId, attemptId, body.category, commentResult.value ?? null, fixturesAllowed);
     if (!result.ok) return Errors.notFound();
     // Nunca o comentário livre — só id/categoria/metadado técnico (seção 15).
     await audit(env, "question_problem_reported", user.id, { questionId, category: body.category });

@@ -2,7 +2,21 @@
    testes unitários (worker/testing/*.test.ts) via FakeD1Database, para
    semear questões completas (5 alternativas, DNA completo, padrão
    principal) prontas para exercitar o workflow sem repetir SQL em cada
-   teste. Nunca usado por código de produção. */
+   teste. Nunca usado por código de produção.
+
+   Sprint 16 v1.1 — `isLocalFixture` (default `false`, ou seja
+   `is_local_fixture = 0`) passou a ser explícito. Antes desta sprint a
+   coluna era sempre gravada como 1 aqui, mas nenhuma leitura de produção
+   filtrava por ela — o valor não tinha efeito algum sobre o que os testes
+   exercitavam. Agora que a camada de dados endurece leituras destinadas ao
+   aluno com `is_local_fixture = 0` (ver questionRepository.ts,
+   dailyTrainingRepository.ts, errorNotebookRepository.ts), o padrão deste
+   helper passou a representar "questão real" — o mesmo papel que ele
+   sempre desempenhou nos testes existentes (uma questão de exemplo para o
+   aluno treinar). Testes que precisam especificamente de uma questão
+   marcada como fixture local (para provar que ela NUNCA é servida) passam
+   `isLocalFixture: true` explicitamente — ver
+   worker/testing/questionFixtureIsolation.test.ts. */
 
 interface SqliteLike {
   prepare(sql: string): { run(...params: unknown[]): unknown };
@@ -26,6 +40,10 @@ export interface SeedQuestionOptions {
   withAlternatives?: boolean;
   withDna?: boolean;
   withPrincipalPattern?: boolean;
+  /** Sprint 16 v1.1 — default `false` (`is_local_fixture = 0`, "questão
+   *  real" para efeitos do teste). `true` semeia com `is_local_fixture = 1`
+   *  — só para testes que provam isolamento de fixture (ver header). */
+  isLocalFixture?: boolean;
 }
 
 /** Semeia uma questão "pronta para revisão" por padrão (5 alternativas
@@ -46,7 +64,7 @@ export function seedQuestion(sqlite: SqliteLike, options: SeedQuestionOptions = 
           dificuldade, origem, tempo_estimado_segundos, tipo_calculo, necessita_calculadora,
           editorial_status, autor_id, revisor_id, titular_direitos, base_licenca, texto_atribuicao,
           fingerprint, version, is_local_fixture)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -69,7 +87,8 @@ export function seedQuestion(sqlite: SqliteLike, options: SeedQuestionOptions = 
       options.baseLicenca ?? "Uso interno de desenvolvimento",
       null,
       options.fingerprint ?? `fingerprint-${id}`,
-      version
+      version,
+      options.isLocalFixture ? 1 : 0
     );
 
   if (options.withAlternatives !== false) {

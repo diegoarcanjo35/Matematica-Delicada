@@ -23,6 +23,7 @@ import type {
   QuestionOrigin,
   QuestionPatternInput,
 } from "../lib/questionsValidation";
+import { isLocalEditorialFixturesAllowed, type Env } from "../env";
 
 export interface QuestionRow {
   id: string;
@@ -124,6 +125,43 @@ export async function findQuestionById(db: D1Database, id: string): Promise<Ques
 
 export async function findQuestionByCode(db: D1Database, code: string): Promise<QuestionRow | null> {
   const row = await db.prepare("SELECT * FROM questions WHERE code = ?").bind(code).first<QuestionRow>();
+  return row ?? null;
+}
+
+/** Sprint 16 v1.1 — leitura destinada ao ALUNO (Player, Treino Diário,
+ *  Simulados, Caderno de Erros). Diferente de `findQuestionById` (usado
+ *  pelo fluxo editorial, onde uma questão de fixture local PRECISA
+ *  continuar visível/editável em desenvolvimento local), esta função
+ *  exclui explicitamente `is_local_fixture = 1` na própria consulta — a
+ *  camada de dados, não o gate de rota, é quem decide se conteúdo de
+ *  fixture pode chegar a um aluno. Os quatro serviços voltados ao aluno
+ *  (playerService.ts, dailyTrainingService.ts, simulationsService.ts,
+ *  errorNotebookService.ts) usam esta função em vez de `findQuestionById`
+ *  para TODA leitura de questão — mesmo quando o `questionId` já veio de
+ *  uma consulta de seleção que teoricamente já excluiu fixtures (ver
+ *  `listTrainableQuestionsForPattern`/`selectSimilarQuestion`/
+ *  `findTrainableQuestionForPattern`, também endurecidas nesta sprint) —
+ *  nunca dependendo só da confiança de que o valor upstream já está
+ *  filtrado. Não filtra por `editorial_status`: essa checagem continua
+ *  exatamente onde já estava em cada chamador (nenhum comportamento de
+ *  publicação mudou, só o isolamento de fixture foi endurecido).
+ *
+ *  Sprint 16 v1.4 — correção do achado registrado no relatório da v1.3:
+ *  o filtro de fixture era incondicional, o que também bloqueava fixtures
+ *  em DESENVOLVIMENTO LOCAL com `ENABLE_LOCAL_EDITORIAL_FIXTURES`
+ *  explicitamente habilitado — contradizendo o desenho já adotado para
+ *  Diagnóstico/Cronograma/Padrões (v1.3): "produção nunca serve fixture;
+ *  dev local + flag serve fixture normalmente". `includeFixtures`
+ *  (= `isLocalEditorialFixturesAllowed(env, url)`, calculado pela rota e
+ *  passado explicitamente por todo o caminho de chamada — nunca lido de
+ *  header/query/body) restaura esse comportamento: fora do dev local com
+ *  a flag, o filtro continua exatamente como antes (fixture IMPOSSÍVEL de
+ *  servir); dentro dele, nenhuma condição extra é aplicada. A decisão
+ *  nunca sai da camada de dados — a rota só decide QUAL valor passar,
+ *  nunca se o filtro é aplicado ou não fora daqui. */
+export async function findQuestionForStudent(db: D1Database, id: string, includeFixtures: boolean): Promise<QuestionRow | null> {
+  const fixtureClause = includeFixtures ? "" : " AND is_local_fixture = 0";
+  const row = await db.prepare(`SELECT * FROM questions WHERE id = ?${fixtureClause}`).bind(id).first<QuestionRow>();
   return row ?? null;
 }
 
@@ -890,13 +928,19 @@ export function buildDeleteCollectionMutationReceiptStatement(db: D1Database, id
  *  informado, de forma DETERMINÍSTICA (menor `code`, ordem alfabética) —
  *  nunca um algoritmo pedagógico, nunca chamado de "adaptação" em lugar
  *  nenhum da interface (a ordem exige "seleção técnica inicial"). `null`
- *  quando nenhuma questão publicada está disponível. */
-export async function findTrainableQuestionForPattern(db: D1Database, patternId: string): Promise<string | null> {
+ *  quando nenhuma questão publicada está disponível.
+ *
+ *  Sprint 16 v1.4 — `includeFixtures` (mesmo raciocínio de
+ *  `findQuestionForStudent` acima): fora do dev local com a flag, nunca
+ *  considera uma questão de fixture como "treinável"; dentro dele, volta
+ *  a considerar, exatamente como antes da v1.1. */
+export async function findTrainableQuestionForPattern(db: D1Database, patternId: string, includeFixtures: boolean): Promise<string | null> {
+  const fixtureClause = includeFixtures ? "" : " AND q.is_local_fixture = 0";
   const row = await db
     .prepare(
       `SELECT q.id FROM questions q
        JOIN question_patterns qp ON qp.question_id = q.id
-       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'
+       WHERE qp.pattern_id = ? AND qp.role = 'principal' AND q.editorial_status = 'published'${fixtureClause}
        ORDER BY q.code ASC
        LIMIT 1`
     )
@@ -906,10 +950,41 @@ export async function findTrainableQuestionForPattern(db: D1Database, patternId:
 }
 
 /** Sprint 8 v1.1 (seção 13 da ordem) — dashboard: "existe pelo menos uma
- *  questão publicada (fixture local) disponível para o CTA 'Resolver uma
- *  questão'?" Uma checagem booleana leve, sem nenhuma métrica/sequência —
+ *  questão publicada REAL disponível para o CTA 'Resolver uma questão'?"
+ *  Sprint 16 v1.1 — endurecida com `is_local_fixture = 0` (o comentário
+ *  original desta sprint chamava a fixture local de "publicada" também;
+ *  hoje isso responderia `true` mesmo sem nenhum conteúdo real, o que o
+ *  aluno nunca deve ver). Uma checagem booleana leve, sem nenhuma métrica/sequência —
  *  só um fato real do banco. */
 export async function hasAnyPublishedQuestion(db: D1Database): Promise<boolean> {
-  const row = await db.prepare("SELECT 1 as found FROM questions WHERE editorial_status = 'published' LIMIT 1").first<{ found: number }>();
+  const row = await db
+    .prepare("SELECT 1 as found FROM questions WHERE editorial_status = 'published' AND is_local_fixture = 0 LIMIT 1")
+    .first<{ found: number }>();
   return row !== null;
+}
+
+/** Sprint 16 v1.1 (A2 — decisão do PO, "GATE EDITORIAL") — critério ÚNICO de
+ *  disponibilidade do módulo, usado pelas quatro rotas voltadas ao aluno que
+ *  dependem do Banco de Questões (player.ts, dailyTraining.ts,
+ *  simulations.ts, errorNotebook.ts), substituindo o antigo "só a flag de
+ *  fixture local liga tudo":
+ *
+ *    1) desenvolvimento local com ENABLE_LOCAL_EDITORIAL_FIXTURES
+ *       explicitamente habilitado (isLocalEditorialFixturesAllowed):
+ *       disponível incondicionalmente — comportamento IDÊNTICO ao gate
+ *       antigo, fixtures continuam servidas normalmente em dev local;
+ *    2) qualquer outro caso — incluindo produção real: disponível SOMENTE
+ *       quando existe pelo menos uma questão REAL publicada
+ *       (`hasAnyPublishedQuestion`, já filtrada por `is_local_fixture = 0`
+ *       na própria consulta, nunca confiando só neste gate).
+ *
+ *  Nunca um bypass genérico: produção sem nenhuma questão real publicada
+ *  continua respondendo "em preparação" exatamente como hoje (confirmado
+ *  por leitura direta do D1 de produção nesta sprint — `questions` está
+ *  100% vazia) — o módulo passa a acender sozinho quando conteúdo real
+ *  publicado existir, sem exigir uma nova flag/deploy de código para
+ *  "virar a chave" naquele momento. */
+export async function isQuestionBankAvailable(env: Env, url: URL, db: D1Database): Promise<boolean> {
+  if (isLocalEditorialFixturesAllowed(env, url)) return true;
+  return hasAnyPublishedQuestion(db);
 }

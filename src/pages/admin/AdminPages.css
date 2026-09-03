@@ -225,6 +225,40 @@
 
 /* Utilitário local — só para o cabeçalho de "Ações" das tabelas desta
    área, que precisa de um <th> acessível sem rótulo visual redundante. */
+/* --------------------------------- Pipelines de conteúdo (Sprint 16 v1.2) ---------------------------------- */
+/* Formulário compacto e empilhado, reaproveitado pelas 3 telas de
+   conteúdo (Diagnóstico/Cronograma/Padrões) — mesma disciplina de "UI
+   mínima" da ordem: um grid de campos simples, sem editor visual
+   sofisticado. */
+.admin-page__content-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 720px;
+}
+
+.admin-page__content-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+.admin-page__field textarea,
+.admin-page__field input,
+.admin-page__field select {
+  width: 100%;
+}
+
+.admin-page__option-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.admin-page__option-row input[type="text"] {
+  flex: 1;
+}
+
 .admin-page__sr-only {
   position: absolute;
   width: 1px;

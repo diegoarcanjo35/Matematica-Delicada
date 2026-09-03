@@ -16,6 +16,7 @@ import {
   listHelpOpens,
   listOptionsForQuestions,
   listQuestionsOrdered,
+  listRealQuestionsOrdered,
   listRecognitionOptionsForQuestions,
   listResponses,
   type DiagnosticOptionRow,
@@ -37,12 +38,18 @@ export interface DiagnosticStatusView {
   latestCompletedAttemptId: string | null;
 }
 
+/** Sprint 16 v1.3 — `available` agora reflete `isDiagnosticAvailable`
+ *  (dev local com fixtures explícitas OU conteúdo real suficiente), nunca
+ *  só a flag de dev sozinha (nome do parâmetro atualizado por clareza —
+ *  comportamento idêntico ao antigo `fixturesAllowed` quando o chamador
+ *  ainda só passar a flag, já que `isDiagnosticAvailable` inclui esse
+ *  mesmo caso como um dos dois critérios). */
 export async function getStatus(
   db: D1Database,
   userId: string,
-  fixturesAllowed: boolean
+  available: boolean
 ): Promise<DiagnosticStatusView> {
-  if (!fixturesAllowed) {
+  if (!available) {
     return { available: false, activeAttemptId: null, latestCompletedAttemptId: null };
   }
   const [active, latestCompleted] = await Promise.all([
@@ -89,21 +96,30 @@ function isUniqueActiveAttemptViolation(error: unknown): boolean {
  *  lote inteiro (nada fica parcialmente persistido — nem o abandono da
  *  tentativa vencedora, nem vínculos de questão órfãos) e devolvemos o
  *  mesmo resultado controlado de "já existe uma tentativa ativa", nunca um
- *  erro 500 (correção v1.2, seções 4/5 da ordem). */
+ *  erro 500 (correção v1.2, seções 4/5 da ordem).
+ *
+ *  Sprint 16 v1.3 — o gate de disponibilidade (`isDiagnosticAvailable`)
+ *  agora é checado ANTES desta função ser chamada, na rota
+ *  (worker/src/routes/diagnostic.ts) — nunca mais aqui dentro. `fixturesAllowed`
+ *  passou a controlar SÓ a seleção de conteúdo: dev local com a flag
+ *  explícita usa `listQuestionsOrdered` (TODAS as questões, real+fixture —
+ *  comportamento idêntico ao de sempre, nenhuma regressão para quem testa
+ *  localmente com fixtures); qualquer outro caso (produção real com
+ *  conteúdo real, já garantido pelo gate da rota) usa
+ *  `listRealQuestionsOrdered` (`is_local_fixture = 0`) — nunca mistura uma
+ *  fixture local numa tentativa real. */
 export async function createAttempt(
   db: D1Database,
   userId: string,
   fixturesAllowed: boolean,
   restart: boolean
 ): Promise<CreateAttemptResult> {
-  if (!fixturesAllowed) return { ok: false, reason: "unavailable" };
-
   const active = await findActiveAttemptForUser(db, userId);
   if (active && !restart) {
     return { ok: false, reason: "active_exists", attemptId: active.id };
   }
 
-  const questions = await listQuestionsOrdered(db);
+  const questions = fixturesAllowed ? await listQuestionsOrdered(db) : await listRealQuestionsOrdered(db);
   if (questions.length === 0) return { ok: false, reason: "no_questions" };
 
   const newAttemptId = newId();

@@ -69,8 +69,14 @@ interface SqliteLike {
  *  — mais simples e rápido que passar pelo wrapper D1 para um setup de teste. */
 export function seedDiagnosticFixtures(sqlite: SqliteLike): void {
   for (const question of TEST_QUESTIONS) {
+    // Sprint 16 v1.2 — is_local_fixture = 1 explícito: este helper semeia
+    // exatamente o conteúdo de fixture (mesmo papel de scripts/fixtures/
+    // diagnostic-fixtures.local.sql), nunca conteúdo real de teste — ao
+    // contrário de worker/testing/questionFixtures.ts:seedQuestion (que
+    // serve para semear "uma questão qualquer" em testes variados e por
+    // isso, desde a Sprint 16 v1.1, tem is_local_fixture=0 como default).
     sqlite
-      .prepare("INSERT INTO diagnostic_questions (id, prompt, position) VALUES (?, ?, ?)")
+      .prepare("INSERT INTO diagnostic_questions (id, prompt, position, is_local_fixture) VALUES (?, ?, ?, 1)")
       .run(question.id, question.prompt, question.position);
 
     for (const option of question.options) {

@@ -68,14 +68,28 @@ const FIXTURES_BLOCKED = false;
 
 describe("diagnóstico — status e disponibilidade", () => {
   it("1. indisponível fora do ambiente local autorizado — nenhuma questão é carregada", async () => {
+    // Sprint 16 v1.3 — `getStatus`/o gate de disponibilidade da ROTA
+    // (isDiagnosticAvailable, testado em describe próprio abaixo) são
+    // quem decide "disponível ou não"; `createAttempt` em si só decide
+    // QUAL conjunto de questões usar quando já foi autorizado a rodar
+    // (nunca mais checa disponibilidade internamente — ver comentário em
+    // diagnosticService.ts). Por isso este teste passou a cobrir só a
+    // metade que ainda é responsabilidade de `getStatus`.
     await seedUser("user-1");
     const status = await getStatus(db as never, "user-1", FIXTURES_BLOCKED);
     expect(status.available).toBe(false);
     expect(status.activeAttemptId).toBeNull();
+  });
 
-    const created = await createAttempt(db as never, "user-1", FIXTURES_BLOCKED, false);
+  it("1b. createAttempt chamado diretamente sem conteúdo real (fora do gate de fixtures): 'no_questions', nunca finge sucesso com fixture", async () => {
+    // Só a fixture existe (seedDiagnosticFixtures, is_local_fixture=1) —
+    // com fixturesAllowed=false, createAttempt nunca usa a fixture como
+    // substituta; o motivo correto é "não há conteúdo real", não mais
+    // "indisponível" (essa checagem agora é só da rota).
+    await seedUser("user-1b");
+    const created = await createAttempt(db as never, "user-1b", FIXTURES_BLOCKED, false);
     expect(created.ok).toBe(false);
-    expect(created.reason).toBe("unavailable");
+    expect(created.reason).toBe("no_questions");
   });
 
   it("2. disponível quando o gate está satisfeito", async () => {

@@ -4,6 +4,7 @@ import { Errors, json, readJsonBody } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
 import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepository";
+import { isQuestionBankAvailable } from "../repositories/questionRepository";
 import {
   abandonBlock,
   applyBlock,
@@ -92,12 +93,15 @@ export async function handleSimulationsRequest(request: Request, env: Env, url: 
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  const available = await isQuestionBankAvailable(env, url, env.DB);
+  if (!available) return unavailableResponse();
+  // Sprint 16 v1.4 — corrige o achado da v1.3: com a flag habilitada,
+  // fixtures editoriais voltam a ser servidas normalmente em dev local.
   const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
-  if (!fixturesAllowed) return unavailableResponse();
 
   if (path === "/api/simulations/preview") {
     if (method !== "GET") return Errors.methodNotAllowed();
-    const result = await preview(env.DB, user.id, readPreviewParams(url));
+    const result = await preview(env.DB, user.id, readPreviewParams(url), fixturesAllowed);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       return fieldErrorResponse("Não foi possível montar a prévia do bloco.", result.fieldErrors);
@@ -110,7 +114,12 @@ export async function handleSimulationsRequest(request: Request, env: Env, url: 
     const body = await readJsonBody<{ mutationId?: unknown; blockType?: unknown; patternSlug?: unknown; size?: unknown }>(request);
     const mutationId = readMutationId(body);
     if (!mutationId) return fieldErrorResponse("mutationId é obrigatório.", { mutationId: "mutationId é obrigatório." });
-    const result = await applyBlock(env.DB, user.id, { mutationId, blockType: body?.blockType, patternSlug: body?.patternSlug, size: body?.size });
+    const result = await applyBlock(
+      env.DB,
+      user.id,
+      { mutationId, blockType: body?.blockType, patternSlug: body?.patternSlug, size: body?.size },
+      fixturesAllowed
+    );
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.empty) return json({ ok: true, empty: true });
@@ -123,7 +132,7 @@ export async function handleSimulationsRequest(request: Request, env: Env, url: 
 
   if (path === "/api/simulations/current") {
     if (method !== "GET") return Errors.methodNotAllowed();
-    const block = await getCurrent(env.DB, user.id);
+    const block = await getCurrent(env.DB, user.id, fixturesAllowed);
     return json({ ok: true, block });
   }
 
@@ -177,7 +186,7 @@ export async function handleSimulationsRequest(request: Request, env: Env, url: 
     const body = await readJsonBody<{ mutationId?: unknown }>(request);
     const mutationId = readMutationId(body);
     if (!mutationId) return fieldErrorResponse("mutationId é obrigatório.", { mutationId: "mutationId é obrigatório." });
-    const result = await startItem(env.DB, user.id, blockId, itemId, mutationId);
+    const result = await startItem(env.DB, user.id, blockId, itemId, mutationId, fixturesAllowed);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.conflict) return conflictResponse();
@@ -227,7 +236,7 @@ export async function handleSimulationsRequest(request: Request, env: Env, url: 
   if (blockMatch && !RESERVED_IDS.has(blockMatch[1])) {
     if (method !== "GET") return Errors.methodNotAllowed();
     const blockId = blockMatch[1];
-    const block = await getBlockDetail(env.DB, user.id, blockId);
+    const block = await getBlockDetail(env.DB, user.id, blockId, fixturesAllowed);
     if (!block) return Errors.notFound();
     return json({ ok: true, block });
   }
