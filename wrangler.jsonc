@@ -25,6 +25,15 @@
   "compatibility_date": "2025-01-01",
   "main": "worker/src/index.ts",
   "account_id": "14260841c93b1cb432f3b7b249659816",
+  // EMAIL_FROM_ADDRESS não é secret (worker/src/env.ts) — Sprint 16 v1.4 Fase 2.
+  // `onboarding@resend.dev` é o subdomínio de teste da própria Resend, já
+  // Verified por eles (nenhum registro DNS nosso é necessário) — nenhum
+  // domínio próprio da Matemática Delicada está Verified ainda (docs/
+  // RESEND_PRODUCAO.md, seção 2). Trocar para um domínio próprio quando ele
+  // existir e estiver Verified no painel Resend.
+  "vars": {
+    "EMAIL_FROM_ADDRESS": "Matemática Delicada <onboarding@resend.dev>"
+  },
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application",
