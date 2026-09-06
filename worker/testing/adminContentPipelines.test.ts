@@ -351,7 +351,7 @@ describe("Admin — Padrões (charter emendado)", () => {
     expect(countRows("pattern_attributes", `WHERE pattern_id = '${mutationId}'`)).toBe(2);
   });
 
-  it("código e slug são gerados pelo SISTEMA — qualquer code/slug enviado pelo cliente é ignorado", async () => {
+  it("código é gerado pelo SISTEMA (o próprio id); slug é legível, derivado do NOME — code/slug do cliente são ignorados", async () => {
     const token = await sessionFor(FIXTURE_ADMIN);
     const mutationId = crypto.randomUUID();
     await postJson("/api/admin/patterns", token, { ...legacyFullPayload, code: "CODIGO-ENVIADO-PELO-CLIENTE", slug: "slug-enviado-pelo-cliente", mutationId });
@@ -359,18 +359,90 @@ describe("Admin — Padrões (charter emendado)", () => {
     expect(row.code).not.toBe("CODIGO-ENVIADO-PELO-CLIENTE");
     expect(row.slug).not.toBe("slug-enviado-pelo-cliente");
     expect(row.code).toBe(mutationId);
-    expect(row.slug).toBe(`padrao-${mutationId}`);
+    // legacyFullPayload.name = "Padrão Administrativo 1" — acento removido,
+    // minúsculas, espaço vira hífen (Sprint 17.1, item 2).
+    expect(row.slug).toBe("padrao-administrativo-1");
   });
 
-  it("dois padrões com o MESMO nome: ambos criados sem conflito — code/slug continuam únicos (derivados do id)", async () => {
+  it("slug não muda quando o nome é editado depois (URL/referência preservada)", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { name: "Escala", mutationId });
+    const before = db.sqlite.prepare("SELECT slug FROM patterns WHERE id = ?").get(mutationId) as { slug: string };
+    expect(before.slug).toBe("escala");
+
+    await patchJson(`/api/admin/patterns/${mutationId}`, token, { name: "Escala e Conversão de Grandezas", expectedVersion: 1, mutationId: crypto.randomUUID() });
+    const after = db.sqlite.prepare("SELECT slug, name FROM patterns WHERE id = ?").get(mutationId) as { slug: string; name: string };
+    expect(after.name).toBe("Escala e Conversão de Grandezas");
+    expect(after.slug).toBe("escala"); // slug intacto, só o nome mudou
+  });
+
+  it("dois padrões com nomes DIFERENTES que colidiriam na mesma base de slug: slugs resolvidos deterministicamente", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    // "Padrão A/B" e "Padrão A B" são nomes diferentes (não pegos pelo
+    // guard de duplicidade), mas normalizam para a MESMA base de slug.
+    const idA = crypto.randomUUID();
+    const idB = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { name: "Padrão A/B", mutationId: idA });
+    await postJson("/api/admin/patterns", token, { name: "Padrão A B", mutationId: idB });
+    const rows = db.sqlite.prepare("SELECT id, slug FROM patterns WHERE id IN (?, ?)").all(idA, idB) as Array<{ id: string; slug: string }>;
+    const slugs = rows.map((r) => r.slug);
+    expect(new Set(slugs).size).toBe(2); // nunca colidem
+    expect(slugs.some((s) => s === "padrao-a-b")).toBe(true);
+    expect(slugs.some((s) => s.startsWith(`padrao-a-b-`))).toBe(true); // sufixo determinístico
+  });
+
+  it("REJEITA nome duplicado no CREATE — case/espaço/Unicode-insensitive — mesmo mutationId novo continua bloqueado", async () => {
     const token = await sessionFor(FIXTURE_ADMIN);
     const first = await postJson("/api/admin/patterns", token, { name: "Escala", mutationId: crypto.randomUUID() });
-    const second = await postJson("/api/admin/patterns", token, { name: "Escala", mutationId: crypto.randomUUID() });
     expect(first.status).toBe(201);
-    expect(second.status).toBe(201);
-    expect(countRows("patterns", "WHERE name = 'Escala' AND is_local_fixture = 0")).toBe(2);
-    const codes = db.sqlite.prepare("SELECT DISTINCT code FROM patterns WHERE name = 'Escala'").all() as Array<{ code: string }>;
-    expect(codes.length).toBe(2);
+
+    for (const variant of ["Escala", "ESCALA", "  escala  ", "esCALA"]) {
+      const response = await postJson("/api/admin/patterns", token, { name: variant, mutationId: crypto.randomUUID() });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: { fields: Record<string, string> } };
+      expect(body.error.fields.name).toBeTruthy();
+    }
+    expect(countRows("patterns", "WHERE is_local_fixture = 0")).toBe(1); // nada duplicado foi criado
+  });
+
+  it("retry idempotente (mesmo mutationId) de um CREATE já existente NUNCA é bloqueado como duplicata de si mesmo", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    const first = await postJson("/api/admin/patterns", token, { name: "Notação Científica", mutationId });
+    expect(first.status).toBe(201);
+    const retry = await postJson("/api/admin/patterns", token, { name: "Notação Científica", mutationId });
+    expect(retry.status).toBe(200);
+    const body = (await retry.json()) as { changed: boolean };
+    expect(body.changed).toBe(false);
+    expect(countRows("patterns", "WHERE is_local_fixture = 0")).toBe(1);
+  });
+
+  it("UPDATE: impede renomear um padrão para o nome (normalizado) de OUTRO padrão", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    await postJson("/api/admin/patterns", token, { name: "Juros", mutationId: crypto.randomUUID() });
+    const secondId = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { name: "Sequências", mutationId: secondId });
+
+    const response = await patchJson(`/api/admin/patterns/${secondId}`, token, { name: "  JUROS  ", expectedVersion: 1, mutationId: crypto.randomUUID() });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { fields: Record<string, string> } };
+    expect(body.error.fields.name).toBeTruthy();
+    const row = db.sqlite.prepare("SELECT name FROM patterns WHERE id = ?").get(secondId) as { name: string };
+    expect(row.name).toBe("Sequências"); // nada foi alterado
+  });
+
+  it("UPDATE: renomear um padrão para o MESMO nome que ele já tinha nunca é tratado como duplicata", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { name: "Frações e Proporcionalidade", mutationId });
+    const response = await patchJson(`/api/admin/patterns/${mutationId}`, token, {
+      name: "Frações e Proporcionalidade",
+      mainStrategy: "Novo macete.",
+      expectedVersion: 1,
+      mutationId: crypto.randomUUID(),
+    });
+    expect(response.status).toBe(200);
   });
 
   it("retry idempotente (mesmo mutationId, mesmo conteúdo): changed:false, nenhuma linha duplicada", async () => {

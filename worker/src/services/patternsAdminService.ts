@@ -23,6 +23,8 @@ import { buildAuditEventStatement, type AuditEventType } from "../repositories/a
 import { isValidMutationId } from "../lib/questionsValidation";
 import {
   ATTRIBUTE_FIELD_TO_TYPE,
+  generatePatternSlugFromName,
+  normalizePatternName,
   validateAttributeLists,
   validateExpectedVersion,
   validateOptionalIntroductoryExample,
@@ -123,19 +125,19 @@ export async function listPatternsForEditorial(db: D1Database): Promise<Editoria
 
 /* Sprint 17, seção A da ordem — `code`/`slug` deixam de ser fornecidos pela
    usuária (ela nunca mais vê esses campos) e passam a ser gerados pelo
-   SISTEMA, sempre estáveis e únicos por construção: derivam do próprio
-   `id` do padrão (que já É o `mutationId`, um UUID gerado no cliente e
-   validado por isValidMutationId — unicidade prática garantida sem
-   nenhuma consulta extra). `slug` leva um prefixo só por legibilidade em
-   auditoria; `code` é o `id` puro. Ambos continuam cabendo nas colunas/
-   regras antigas (CODE_RE/SLUG_RE, migration 0007) sem exigir nenhuma
-   migration nova. */
+   SISTEMA. `code` é o próprio `id` do padrão (o `mutationId`, um UUID
+   gerado no cliente e validado por isValidMutationId) — único, estável,
+   nunca depende de edição manual, e nunca aparece na UI.
+
+   Sprint 17.1, item 2 da ordem de auditoria — `slug` deixou de ser só
+   `padrao-<id>` (ilegível) e passou a ser gerado a partir do NOME
+   (generatePatternSlugFromName, patternsAdminValidation.ts), ex.: "Mediana,
+   moda e frequência" -> "mediana-moda-e-frequencia". Continua só no
+   CREATE: o slug nunca é recalculado no UPDATE, mesmo que o nome mude
+   depois — updatePattern abaixo sempre herda `existing.slug`,
+   preservando qualquer URL/referência já publicada. */
 function generatePatternCode(id: string): string {
   return id;
-}
-
-function generatePatternSlug(id: string): string {
-  return `padrao-${id}`;
 }
 
 interface RawPatternInput {
@@ -216,6 +218,18 @@ export type CreateResult =
   | { ok: false; conflict: true }
   | { ok: false; fieldErrors: Record<string, string> };
 
+/* Sprint 17.1, item 1 da ordem de auditoria — dois padrões reais nunca
+   podem coexistir com o mesmo nome pedagógico "por acidente" (maiúscula/
+   minúscula, espaço, forma Unicode). Comparação feita em memória sobre os
+   padrões REAIS já carregados (nunca uma fixture) — nenhuma migration/
+   UNIQUE novo: a proteção vive inteiramente na camada de serviço, como a
+   ordem pediu. `excludeId` permite ao UPDATE ignorar o próprio padrão ao
+   checar (renomear para o MESMO nome que já tinha nunca é duplicidade). */
+function findDuplicateByName(patterns: AdminPatternRow[], name: string, excludeId?: string): AdminPatternRow | null {
+  const normalized = normalizePatternName(name);
+  return patterns.find((p) => p.id !== excludeId && normalizePatternName(p.name) === normalized) ?? null;
+}
+
 export async function createPattern(db: D1Database, adminId: string, input: RawPatternInput & { mutationId: unknown }): Promise<CreateResult> {
   if (!(await requireAdminRole(db, adminId))) return { ok: false, forbidden: true };
   if (!isValidMutationId(input.mutationId)) return { ok: false, fieldErrors: { mutationId: "mutationId é obrigatório e precisa ser um UUID válido." } };
@@ -224,7 +238,27 @@ export async function createPattern(db: D1Database, adminId: string, input: RawP
   const validated = validateCreateInput(input);
   if (!validated.ok) return { ok: false, fieldErrors: validated.fieldErrors };
   const { attributes } = validated;
-  const fields: PatternCoreFields = { ...validated.fields, code: generatePatternCode(mutationId), slug: generatePatternSlug(mutationId) };
+
+  // Retry-por-id ANTES do guard de nome duplicado: uma repetição legítima
+  // do mesmo mutationId nunca pode ser rejeitada como "duplicata de si
+  // mesma" — mesma idempotência de sempre (comparação por coreEqual).
+  const existingById = await findRealPatternById(db, mutationId);
+  if (existingById) {
+    const fieldsForRetry: PatternCoreFields = { ...validated.fields, code: existingById.code, slug: existingById.slug };
+    if (coreEqual(fieldsForRetry, existingById)) return { ok: true, changed: false, patternId: mutationId };
+    return { ok: false, conflict: true };
+  }
+
+  const allPatterns = await listRealPatterns(db);
+  const duplicate = findDuplicateByName(allPatterns, validated.fields.name);
+  if (duplicate) return { ok: false, fieldErrors: { name: "Já existe um padrão com este nome." } };
+
+  const existingSlugs = new Set(allPatterns.map((p) => p.slug));
+  const fields: PatternCoreFields = {
+    ...validated.fields,
+    code: generatePatternCode(mutationId),
+    slug: generatePatternSlugFromName(validated.fields.name, mutationId, existingSlugs),
+  };
 
   try {
     await db.batch([
@@ -233,15 +267,11 @@ export async function createPattern(db: D1Database, adminId: string, input: RawP
       buildAuditEventStatement(db, { id: mutationId, eventType: "admin_pattern_created", userId: adminId, metadata: { patternId: mutationId } }),
     ]);
   } catch (error) {
-    const existing = await findRealPatternById(db, mutationId);
-    if (existing && coreEqual(fields, existing)) return { ok: true, changed: false, patternId: mutationId };
-    if (existing) return { ok: false, conflict: true };
-    // Não foi retry do próprio mutationId — provavelmente `code`/`slug` já
-    // usados por outro padrão (UNIQUE, migration 0007). Nunca uma exceção
-    // crua chegando ao chamador.
+    // A esta altura já verificamos id/nome/slug proativamente — chegar
+    // aqui só é possível por uma corrida real entre duas requisições
+    // concorrentes (janela entre a leitura acima e o INSERT). Nunca uma
+    // exceção crua chegando ao chamador de qualquer forma.
     if (error instanceof Error && /UNIQUE constraint failed/i.test(error.message)) {
-      // Formato real do driver: "UNIQUE constraint failed: patterns.code" /
-      // "patterns.slug" (nome da tabela.coluna, nunca o nome do índice).
       if (error.message.includes("patterns.code")) return { ok: false, fieldErrors: { code: "Já existe um padrão com este código." } };
       if (error.message.includes("patterns.slug")) return { ok: false, fieldErrors: { slug: "Já existe um padrão com este slug." } };
     }
@@ -294,6 +324,15 @@ export async function updatePattern(
   if (!introductoryExample.ok) return { ok: false, fieldErrors: { introductoryExample: introductoryExample.error! } };
   const strategicSummary = validateOptionalStrategicSummary(input.strategicSummary);
   if (!strategicSummary.ok) return { ok: false, fieldErrors: { strategicSummary: strategicSummary.error! } };
+
+  // Sprint 17.1, item 1 da ordem de auditoria — só verifica duplicidade
+  // quando `name` foi REALMENTE enviado (uma renomeação de verdade);
+  // manter o nome atual (campo ausente) nunca é "renomear para duplicata".
+  if (name.value !== undefined) {
+    const allPatterns = await listRealPatterns(db);
+    const duplicate = findDuplicateByName(allPatterns, name.value, patternId);
+    if (duplicate) return { ok: false, fieldErrors: { name: "Já existe um padrão com este nome." } };
+  }
 
   const mergedFields: PatternCoreFields = {
     code: existing.code,

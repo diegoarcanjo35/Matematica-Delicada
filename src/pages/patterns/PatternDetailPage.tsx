@@ -21,7 +21,19 @@ import "./PatternsPage.css";
 
    "Treinar este padrão" é um botão nativo DESABILITADO: o banco de questões
    e o treino real não existem nesta sprint, e nenhum clique pode criar
-   tentativa, atribuição de cronograma ou progresso. */
+   tentativa, atribuição de cronograma ou progresso.
+
+   Sprint 17.1, item 3 da ordem de auditoria — compatibilidade com o novo
+   modelo simplificado de padrões: um padrão publicado pode legitimamente
+   ter recognitionPhrase/description/introductoryExample/strategicSummary
+   vazios (campos legados que a Andreia não preenche mais). Cada uma dessas
+   seções só renderiza quando tem conteúdo real — nunca título vazio, nunca
+   parágrafo vazio. "Estratégia principal" virou "Macete / Como resolver"
+   (mesmo rótulo do Admin) e continua sempre visível: publish já exige
+   mainStrategy não vazio (patternsAdminService.ts), então todo padrão
+   publicado chega aqui com este campo preenchido. O código técnico
+   (`pattern.code`, hoje um UUID puro para padrões novos) saiu do cabeçalho
+   — nunca foi conteúdo pedagógico e não deve aparecer como se fosse. */
 
 interface IndexRowProps {
   label: string;
@@ -144,18 +156,19 @@ export function PatternDetailPage() {
       )}
 
       <header className="patterns__header">
-        <span className="patterns__card-code">{pattern.code}</span>
         <h1>{pattern.name}</h1>
-        <p className="patterns__card-phrase">{pattern.recognitionPhrase}</p>
+        {pattern.recognitionPhrase.trim().length > 0 && <p className="patterns__card-phrase">{pattern.recognitionPhrase}</p>}
       </header>
 
-      <section className="patterns__section" aria-labelledby="secao-descricao">
-        <h2 id="secao-descricao">Descrição</h2>
-        <p>{pattern.description}</p>
-      </section>
+      {pattern.description.trim().length > 0 && (
+        <section className="patterns__section" aria-labelledby="secao-descricao">
+          <h2 id="secao-descricao">Descrição</h2>
+          <p>{pattern.description}</p>
+        </section>
+      )}
 
       <section className="patterns__section" aria-labelledby="secao-estrategia">
-        <h2 id="secao-estrategia">Estratégia principal</h2>
+        <h2 id="secao-estrategia">Macete / Como resolver</h2>
         <p>{pattern.mainStrategy}</p>
       </section>
 
@@ -168,15 +181,19 @@ export function PatternDetailPage() {
       <AttributeList title="Erros e pegadinhas frequentes" items={pattern.commonMistakes} />
       <AttributeList title="Tags" items={pattern.tags} />
 
-      <section className="patterns__section" aria-labelledby="secao-exemplo">
-        <h2 id="secao-exemplo">Exemplo introdutório</h2>
-        <p>{pattern.introductoryExample}</p>
-      </section>
+      {pattern.introductoryExample.trim().length > 0 && (
+        <section className="patterns__section" aria-labelledby="secao-exemplo">
+          <h2 id="secao-exemplo">Exemplo introdutório</h2>
+          <p>{pattern.introductoryExample}</p>
+        </section>
+      )}
 
-      <section className="patterns__section" aria-labelledby="secao-resumo">
-        <h2 id="secao-resumo">Resumo estratégico</h2>
-        <p>{pattern.strategicSummary}</p>
-      </section>
+      {pattern.strategicSummary.trim().length > 0 && (
+        <section className="patterns__section" aria-labelledby="secao-resumo">
+          <h2 id="secao-resumo">Resumo estratégico</h2>
+          <p>{pattern.strategicSummary}</p>
+        </section>
+      )}
 
       <section className="patterns__section" aria-labelledby="secao-relacoes">
         <h2 id="secao-relacoes">Relações com outros padrões</h2>

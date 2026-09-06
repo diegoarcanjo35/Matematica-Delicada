@@ -185,3 +185,52 @@ export function validateOptionalIntroductoryExample(value: unknown): FieldValida
 export function validateOptionalStrategicSummary(value: unknown): FieldValidationResult<string | undefined> {
   return validateOptionalText(value, "Resumo estratégico", PATTERN_LONG_TEXT_MAX_LENGTH);
 }
+
+/* Sprint 17.1, item 1 da ordem de auditoria — dois padrões não podem
+   coexistir "por acidente" com o mesmo nome pedagógico. Normalização:
+   NFKC (formas Unicode equivalentes — ex.: acento pré-composto vs.
+   combinado — viram a MESMA string), trim, espaços internos colapsados e
+   minúsculas. Comparar SEMPRE por este valor, nunca pelo texto bruto.
+   Deliberadamente NÃO remove acentos: "Média" e "Media" continuam sendo
+   nomes diferentes — a ordem pediu maiúscula/minúscula/espaço/Unicode,
+   não insensibilidade a acento. */
+export function normalizePatternName(name: string): string {
+  return name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/* Sprint 17.1, item 2 da ordem de auditoria — slug legível gerado a partir
+   do NOME na criação (nunca mais recalculado depois, mesmo se o nome for
+   editado — quem preserva isso é o chamador em patternsAdminService.ts,
+   que só invoca este gerador no CREATE). Base: remove acentos (NFD +
+   descarte de marcas combinantes) só AQUI, só para fins de URL — a
+   comparação de nome duplicado acima continua sensível a acento. */
+const SLUG_BASE_MAX_LENGTH = 60;
+
+const COMBINING_DIACRITICAL_MARKS_RE = new RegExp("[\\u0300-\\u036f]", "g");
+
+function slugifyBase(name: string): string {
+  const base = name
+    .normalize("NFD")
+    .replace(COMBINING_DIACRITICAL_MARKS_RE, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const truncated = base.slice(0, SLUG_BASE_MAX_LENGTH).replace(/-+$/g, "");
+  return truncated || "padrao";
+}
+
+/** Resolve colisão de slug de forma determinística e estável: nomes
+ *  DIFERENTES (já aprovados pelo guard de nome duplicado acima) que por
+ *  coincidência produzam a mesma base de slug ganham um sufixo derivado do
+ *  próprio `id` do padrão — nunca aleatório/baseado em horário, então o
+ *  mesmo padrão sempre geraria o mesmo slug se o processo fosse repetido.
+ *  `existingSlugs` deve conter todos os slugs reais já cadastrados. */
+export function generatePatternSlugFromName(name: string, id: string, existingSlugs: ReadonlySet<string>): string {
+  const base = slugifyBase(name);
+  if (!existingSlugs.has(base)) return base;
+  const withShortSuffix = `${base}-${id.slice(0, 8)}`.slice(0, PATTERN_SLUG_MAX_LENGTH);
+  if (!existingSlugs.has(withShortSuffix)) return withShortSuffix;
+  // Colisão dupla, praticamente impossível (base + 8 chars do id também já
+  // usados) — cai para o id inteiro, garantido único pela própria PK.
+  return `${base}-${id}`.slice(0, PATTERN_SLUG_MAX_LENGTH);
+}
