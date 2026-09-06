@@ -300,7 +300,10 @@ describe("Admin — Cronograma", () => {
 /* ---------------------------------------------------------------------- */
 
 describe("Admin — Padrões (charter emendado)", () => {
-  const validPayload = {
+  // Sprint 17, seção A da ordem — payload de teste "legado completo"
+  // continua existindo (prova de compatibilidade retroativa), mas `code`/
+  // `slug` NUNCA são mais respeitados: o servidor sempre gera os dois.
+  const legacyFullPayload = {
     code: "PAD-ADMIN-01",
     slug: "padrao-admin-01",
     name: "Padrão Administrativo 1",
@@ -313,62 +316,121 @@ describe("Admin — Padrões (charter emendado)", () => {
   };
 
   it("sem sessão: 401; sem papel admin: 403", async () => {
-    const unauth = await postJson("/api/admin/patterns", null, { ...validPayload, mutationId: crypto.randomUUID() });
+    const unauth = await postJson("/api/admin/patterns", null, { ...legacyFullPayload, mutationId: crypto.randomUUID() });
     expect(unauth.status).toBe(401);
     const token = await sessionFor(FIXTURE_PLAIN_USER);
-    const forbidden = await postJson("/api/admin/patterns", token, { ...validPayload, mutationId: crypto.randomUUID() });
+    const forbidden = await postJson("/api/admin/patterns", token, { ...legacyFullPayload, mutationId: crypto.randomUUID() });
     expect(forbidden.status).toBe(403);
   });
 
-  it("admin: cria como draft, is_local_fixture = 0, atributos gravados, audita", async () => {
+  it("admin: cria como draft só com Padrão (nome) — nenhum campo legado exigido", async () => {
     const token = await sessionFor(FIXTURE_ADMIN);
     const mutationId = crypto.randomUUID();
-    const response = await postJson("/api/admin/patterns", token, { ...validPayload, mutationId });
+    const response = await postJson("/api/admin/patterns", token, { name: "Mediana, moda e frequência", mutationId });
     expect(response.status).toBe(201);
-    const row = db.sqlite.prepare("SELECT editorial_status, is_local_fixture, version FROM patterns WHERE id = ?").get(mutationId) as {
+    const row = db.sqlite.prepare("SELECT name, main_strategy, editorial_status, is_local_fixture, version FROM patterns WHERE id = ?").get(mutationId) as {
+      name: string;
+      main_strategy: string;
       editorial_status: string;
       is_local_fixture: number;
       version: number;
     };
+    expect(row.name).toBe("Mediana, moda e frequência");
+    expect(row.main_strategy).toBe("");
     expect(row.editorial_status).toBe("draft");
     expect(row.is_local_fixture).toBe(0);
     expect(row.version).toBe(1);
-    expect(countRows("pattern_attributes", `WHERE pattern_id = '${mutationId}'`)).toBe(2);
     expect(countRows("audit_log", "WHERE event_type = 'admin_pattern_created'")).toBe(1);
   });
 
-  it("code/slug duplicados (de outro padrão real): 409 com fieldError, nunca uma exceção crua", async () => {
-    const token = await sessionFor(FIXTURE_ADMIN);
-    await postJson("/api/admin/patterns", token, { ...validPayload, mutationId: crypto.randomUUID() });
-    const response = await postJson("/api/admin/patterns", token, { ...validPayload, mutationId: crypto.randomUUID() });
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: { fields: Record<string, string> } };
-    // Ambos code e slug colidem neste teste (payload idêntico) — qual dos
-    // dois o SQLite reporta primeiro é um detalhe de implementação; o que
-    // importa é que a resposta seja um fieldError controlado (nunca uma
-    // exceção crua/500) apontando para um dos dois campos duplicados.
-    expect(body.error.fields.code || body.error.fields.slug).toBeTruthy();
-  });
-
-  it("PATCH edita dados essenciais com expectedVersion correta; versão errada -> 409", async () => {
+  it("admin: cria com Padrão + Macete (payload legado completo ainda aceito, atributos gravados)", async () => {
     const token = await sessionFor(FIXTURE_ADMIN);
     const mutationId = crypto.randomUUID();
-    await postJson("/api/admin/patterns", token, { ...validPayload, mutationId });
+    const response = await postJson("/api/admin/patterns", token, { ...legacyFullPayload, mutationId });
+    expect(response.status).toBe(201);
+    expect(countRows("pattern_attributes", `WHERE pattern_id = '${mutationId}'`)).toBe(2);
+  });
 
-    const wrongVersion = await patchJson(`/api/admin/patterns/${mutationId}`, token, { ...validPayload, name: "Novo Nome", expectedVersion: 99, mutationId: crypto.randomUUID() });
+  it("código e slug são gerados pelo SISTEMA — qualquer code/slug enviado pelo cliente é ignorado", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { ...legacyFullPayload, code: "CODIGO-ENVIADO-PELO-CLIENTE", slug: "slug-enviado-pelo-cliente", mutationId });
+    const row = db.sqlite.prepare("SELECT code, slug FROM patterns WHERE id = ?").get(mutationId) as { code: string; slug: string };
+    expect(row.code).not.toBe("CODIGO-ENVIADO-PELO-CLIENTE");
+    expect(row.slug).not.toBe("slug-enviado-pelo-cliente");
+    expect(row.code).toBe(mutationId);
+    expect(row.slug).toBe(`padrao-${mutationId}`);
+  });
+
+  it("dois padrões com o MESMO nome: ambos criados sem conflito — code/slug continuam únicos (derivados do id)", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const first = await postJson("/api/admin/patterns", token, { name: "Escala", mutationId: crypto.randomUUID() });
+    const second = await postJson("/api/admin/patterns", token, { name: "Escala", mutationId: crypto.randomUUID() });
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(countRows("patterns", "WHERE name = 'Escala' AND is_local_fixture = 0")).toBe(2);
+    const codes = db.sqlite.prepare("SELECT DISTINCT code FROM patterns WHERE name = 'Escala'").all() as Array<{ code: string }>;
+    expect(codes.length).toBe(2);
+  });
+
+  it("retry idempotente (mesmo mutationId, mesmo conteúdo): changed:false, nenhuma linha duplicada", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    const first = await postJson("/api/admin/patterns", token, { name: "Juros", mutationId });
+    expect(first.status).toBe(201);
+    const second = await postJson("/api/admin/patterns", token, { name: "Juros", mutationId });
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as { changed: boolean };
+    expect(secondBody.changed).toBe(false);
+    expect(countRows("patterns", `WHERE id = '${mutationId}'`)).toBe(1);
+  });
+
+  it("PATCH parcial {name, mainStrategy} preserva campos legados existentes; versão errada -> 409", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { ...legacyFullPayload, mutationId });
+
+    const wrongVersion = await patchJson(`/api/admin/patterns/${mutationId}`, token, { name: "Novo Nome", expectedVersion: 99, mutationId: crypto.randomUUID() });
     expect(wrongVersion.status).toBe(409);
 
-    const correct = await patchJson(`/api/admin/patterns/${mutationId}`, token, { ...validPayload, name: "Novo Nome", expectedVersion: 1, mutationId: crypto.randomUUID() });
+    const correct = await patchJson(`/api/admin/patterns/${mutationId}`, token, { name: "Novo Nome", mainStrategy: "Novo macete.", expectedVersion: 1, mutationId: crypto.randomUUID() });
     expect(correct.status).toBe(200);
-    const row = db.sqlite.prepare("SELECT name, version FROM patterns WHERE id = ?").get(mutationId) as { name: string; version: number };
+    const row = db.sqlite
+      .prepare("SELECT name, main_strategy, recognition_phrase, description, introductory_example, strategic_summary, code, slug, version FROM patterns WHERE id = ?")
+      .get(mutationId) as Record<string, unknown>;
     expect(row.name).toBe("Novo Nome");
+    expect(row.main_strategy).toBe("Novo macete.");
+    // Campos legados NÃO enviados neste PATCH continuam intactos.
+    expect(row.recognition_phrase).toBe(legacyFullPayload.recognitionPhrase);
+    expect(row.description).toBe(legacyFullPayload.description);
+    expect(row.introductory_example).toBe(legacyFullPayload.introductoryExample);
+    expect(row.strategic_summary).toBe(legacyFullPayload.strategicSummary);
+    expect(row.code).toBe(mutationId); // nunca reescrito por update
     expect(row.version).toBe(2);
+    expect(countRows("pattern_attributes", `WHERE pattern_id = '${mutationId}'`)).toBe(2); // atributos preservados (attributes não foi enviado)
+  });
+
+  it("publicar falha (400) com Macete vazio; sucede depois de preenchido", async () => {
+    const token = await sessionFor(FIXTURE_ADMIN);
+    const mutationId = crypto.randomUUID();
+    await postJson("/api/admin/patterns", token, { name: "Sequências", mutationId });
+
+    const blocked = await patchJson(`/api/admin/patterns/${mutationId}/status`, token, { action: "publish", expectedVersion: 1, mutationId: crypto.randomUUID() });
+    expect(blocked.status).toBe(400);
+    let row = db.sqlite.prepare("SELECT editorial_status FROM patterns WHERE id = ?").get(mutationId) as { editorial_status: string };
+    expect(row.editorial_status).toBe("draft");
+
+    await patchJson(`/api/admin/patterns/${mutationId}`, token, { mainStrategy: "Identifique o padrão de recorrência.", expectedVersion: 1, mutationId: crypto.randomUUID() });
+    const publish = await patchJson(`/api/admin/patterns/${mutationId}/status`, token, { action: "publish", expectedVersion: 2, mutationId: crypto.randomUUID() });
+    expect(publish.status).toBe(200);
+    row = db.sqlite.prepare("SELECT editorial_status FROM patterns WHERE id = ?").get(mutationId) as { editorial_status: string };
+    expect(row.editorial_status).toBe("published");
   });
 
   it("publicar/inativar (status): transições guardadas por versão, auditadas", async () => {
     const token = await sessionFor(FIXTURE_ADMIN);
     const mutationId = crypto.randomUUID();
-    await postJson("/api/admin/patterns", token, { ...validPayload, mutationId });
+    await postJson("/api/admin/patterns", token, { ...legacyFullPayload, mutationId });
 
     const publish = await patchJson(`/api/admin/patterns/${mutationId}/status`, token, { action: "publish", expectedVersion: 1, mutationId: crypto.randomUUID() });
     expect(publish.status).toBe(200);
@@ -388,7 +450,7 @@ describe("Admin — Padrões (charter emendado)", () => {
   it("PATCH numa fixture local: 404 (charter emendado nunca alcança fixture)", async () => {
     seedFixturePattern();
     const token = await sessionFor(FIXTURE_ADMIN);
-    const response = await patchJson("/api/admin/patterns/fix-pat-1", token, { ...validPayload, expectedVersion: 1, mutationId: crypto.randomUUID() });
+    const response = await patchJson("/api/admin/patterns/fix-pat-1", token, { name: "X", expectedVersion: 1, mutationId: crypto.randomUUID() });
     expect(response.status).toBe(404);
   });
 
@@ -396,7 +458,7 @@ describe("Admin — Padrões (charter emendado)", () => {
     seedFixturePattern();
     const token = await sessionFor(FIXTURE_ADMIN);
     const mutationId = crypto.randomUUID();
-    await postJson("/api/admin/patterns", token, { ...validPayload, mutationId });
+    await postJson("/api/admin/patterns", token, { ...legacyFullPayload, mutationId });
 
     const response = await callAdminRoute("/api/admin/patterns", token);
     const body = (await response.json()) as { patterns: Array<{ id: string }> };
@@ -406,7 +468,7 @@ describe("Admin — Padrões (charter emendado)", () => {
   it("sem score/TRI/domínio: DTO nunca inclui nenhum campo de índice pedagógico", async () => {
     const token = await sessionFor(FIXTURE_ADMIN);
     const mutationId = crypto.randomUUID();
-    await postJson("/api/admin/patterns", token, { ...validPayload, mutationId });
+    await postJson("/api/admin/patterns", token, { ...legacyFullPayload, mutationId });
     const response = await callAdminRoute("/api/admin/patterns", token);
     const body = (await response.json()) as { patterns: Array<Record<string, unknown>> };
     const keys = Object.keys(body.patterns[0]);

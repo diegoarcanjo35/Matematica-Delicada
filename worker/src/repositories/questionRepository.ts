@@ -243,6 +243,11 @@ export interface QuestionListFilters {
   revisorId: string | null;
   ano: number | null;
   hasImage: boolean | null;
+  /** Sprint 17, seção C da ordem — filtra por padrão PRINCIPAL
+   *  (question_patterns.role = 'principal'); `null` = nenhum filtro ("Todas",
+   *  inclusive questões sem padrão nenhum). Uma questão com este padrão
+   *  apenas como SECUNDÁRIO nunca aparece — só o vínculo `principal` conta. */
+  padraoPrincipalId: string | null;
 }
 
 function likeTerm(term: string): string {
@@ -290,6 +295,15 @@ function buildFilterClause(filters: QuestionListFilters): { sql: string; params:
     conditions.push("EXISTS (SELECT 1 FROM question_images qi WHERE qi.question_id = q.id)");
   } else if (filters.hasImage === false) {
     conditions.push("NOT EXISTS (SELECT 1 FROM question_images qi WHERE qi.question_id = q.id)");
+  }
+  if (filters.padraoPrincipalId !== null) {
+    // Mesmo idioma de dailyTrainingRepository.ts/errorNotebookRepository.ts/
+    // questionRepository.ts (busca por padrão): EXISTS parametrizado, sem
+    // JOIN (evita duplicar linhas de `questions` caso uma questão tivesse,
+    // por engano, mais de um vínculo `principal` — a unicidade já é
+    // garantida por índice, migration 0008, mas EXISTS nunca depende disso).
+    conditions.push("EXISTS (SELECT 1 FROM question_patterns qp WHERE qp.question_id = q.id AND qp.role = 'principal' AND qp.pattern_id = ?)");
+    params.push(filters.padraoPrincipalId);
   }
 
   return { sql: conditions.join(" AND "), params };

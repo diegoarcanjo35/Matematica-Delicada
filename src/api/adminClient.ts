@@ -309,29 +309,34 @@ export interface PatternAdmin {
   updatedAt: string;
 }
 
-export interface PatternCoreInput {
-  code: string;
-  slug: string;
+/* Sprint 17, seção A da ordem — a tela /admin/padroes só edita Padrão
+   (`name`) e Macete/Como resolver (`mainStrategy`); `code`/`slug` são
+   gerados pelo servidor e nunca aparecem em nenhum payload daqui. Os
+   demais campos legados (recognitionPhrase, description, etc.) continuam
+   existindo no backend/DTO de leitura (`PatternAdmin` abaixo, inalterado)
+   mas não fazem mais parte do contrato de escrita desta interface — o
+   backend preserva qualquer valor legado que não seja reenviado. */
+export interface PatternCreateInput {
   name: string;
-  recognitionPhrase: string;
-  description: string;
-  mainStrategy: string;
-  introductoryExample: string;
-  strategicSummary: string;
-  attributes?: Partial<PatternAttributeLists>;
+  mainStrategy?: string;
+}
+
+export interface PatternUpdateInput {
+  name?: string;
+  mainStrategy?: string;
 }
 
 export function fetchAdminPatterns(): Promise<{ ok: true; patterns: PatternAdmin[] }> {
   return request("/api/admin/patterns");
 }
 
-export function createAdminPattern(input: PatternCoreInput & { mutationId: string }): Promise<{ ok: true; changed: boolean; patternId: string }> {
+export function createAdminPattern(input: PatternCreateInput & { mutationId: string }): Promise<{ ok: true; changed: boolean; patternId: string }> {
   return request("/api/admin/patterns", jsonInit("POST", input));
 }
 
 export function updateAdminPattern(
   patternId: string,
-  input: PatternCoreInput & { expectedVersion: number; mutationId: string }
+  input: PatternUpdateInput & { expectedVersion: number; mutationId: string }
 ): Promise<{ ok: true; changed: boolean }> {
   return request(`/api/admin/patterns/${encodeURIComponent(patternId)}`, jsonInit("PATCH", input));
 }

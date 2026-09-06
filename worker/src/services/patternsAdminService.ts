@@ -25,14 +25,13 @@ import {
   ATTRIBUTE_FIELD_TO_TYPE,
   validateAttributeLists,
   validateExpectedVersion,
-  validateIntroductoryExample,
-  validateMainStrategy,
-  validatePatternCode,
-  validatePatternDescription,
+  validateOptionalIntroductoryExample,
+  validateOptionalMainStrategy,
+  validateOptionalName,
+  validateOptionalPatternDescription,
+  validateOptionalRecognitionPhrase,
+  validateOptionalStrategicSummary,
   validatePatternName,
-  validatePatternSlugInput,
-  validateRecognitionPhrase,
-  validateStrategicSummary,
   type PatternAttributeLists,
 } from "../lib/patternsAdminValidation";
 
@@ -99,34 +98,77 @@ export async function listPatterns(db: D1Database, adminId: string): Promise<Lis
   return { ok: true, patterns: dtos };
 }
 
-interface RawCoreInput {
-  code: unknown;
-  slug: unknown;
-  name: unknown;
-  recognitionPhrase: unknown;
-  description: unknown;
-  mainStrategy: unknown;
-  introductoryExample: unknown;
-  strategicSummary: unknown;
-  attributes: unknown;
+/* Sprint 17, seção B da ordem — leitura mínima para o Banco de Questões
+   (editor/admin) montar os chips de "padrão principal". Sem guarda de
+   `requireAdminRole` aqui de propósito: quem chama (rota
+   /api/editorial/patterns) já validou `editor`/`admin` via
+   requireEditorialActor/resolveEditorialRole ANTES de chegar aqui — este
+   pipeline nunca depende de /api/admin/patterns nem do papel `admin`
+   isoladamente (ordem: "não faça a página depender de
+   /api/admin/patterns, pois isso quebraria usuários com papel editor").
+   Devolve só o essencial (id/nome/situação) — nunca a complexidade
+   administrativa completa (código/slug/atributos/etc.). */
+export interface EditorialPatternSummary {
+  id: string;
+  name: string;
+  editorialStatus: string;
 }
 
-function validateCore(input: RawCoreInput): { ok: true; fields: PatternCoreFields; attributes: PatternAttributeLists } | { ok: false; fieldErrors: Record<string, string> } {
-  const code = validatePatternCode(input.code);
-  if (!code.ok) return { ok: false, fieldErrors: { code: code.error! } };
-  const slug = validatePatternSlugInput(input.slug);
-  if (!slug.ok) return { ok: false, fieldErrors: { slug: slug.error! } };
+export async function listPatternsForEditorial(db: D1Database): Promise<EditorialPatternSummary[]> {
+  const rows = await listRealPatterns(db);
+  return rows
+    .map((row) => ({ id: row.id, name: row.name, editorialStatus: row.editorial_status }))
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+}
+
+/* Sprint 17, seção A da ordem — `code`/`slug` deixam de ser fornecidos pela
+   usuária (ela nunca mais vê esses campos) e passam a ser gerados pelo
+   SISTEMA, sempre estáveis e únicos por construção: derivam do próprio
+   `id` do padrão (que já É o `mutationId`, um UUID gerado no cliente e
+   validado por isValidMutationId — unicidade prática garantida sem
+   nenhuma consulta extra). `slug` leva um prefixo só por legibilidade em
+   auditoria; `code` é o `id` puro. Ambos continuam cabendo nas colunas/
+   regras antigas (CODE_RE/SLUG_RE, migration 0007) sem exigir nenhuma
+   migration nova. */
+function generatePatternCode(id: string): string {
+  return id;
+}
+
+function generatePatternSlug(id: string): string {
+  return `padrao-${id}`;
+}
+
+interface RawPatternInput {
+  name?: unknown;
+  mainStrategy?: unknown;
+  recognitionPhrase?: unknown;
+  description?: unknown;
+  introductoryExample?: unknown;
+  strategicSummary?: unknown;
+  attributes?: unknown;
+}
+
+/* CREATE: só `name` é obrigatório (seção A: "um rascunho pode existir
+   apenas com o nome"). Todo o resto — inclusive os campos legados que a
+   UI nova nunca envia — é opcional e vira string vazia quando ausente
+   (colunas TEXT NOT NULL aceitam '' sem violar o schema; nunca fabricamos
+   conteúdo pedagógico para preenchê-las). Quem ainda envia o payload
+   legado completo (compatibilidade) continua funcionando normalmente —
+   os valores só não são mais exigidos. */
+function validateCreateInput(
+  input: RawPatternInput
+): { ok: true; fields: Omit<PatternCoreFields, "code" | "slug">; attributes: PatternAttributeLists } | { ok: false; fieldErrors: Record<string, string> } {
   const name = validatePatternName(input.name);
   if (!name.ok) return { ok: false, fieldErrors: { name: name.error! } };
-  const recognitionPhrase = validateRecognitionPhrase(input.recognitionPhrase);
-  if (!recognitionPhrase.ok) return { ok: false, fieldErrors: { recognitionPhrase: recognitionPhrase.error! } };
-  const description = validatePatternDescription(input.description);
-  if (!description.ok) return { ok: false, fieldErrors: { description: description.error! } };
-  const mainStrategy = validateMainStrategy(input.mainStrategy);
+  const mainStrategy = validateOptionalMainStrategy(input.mainStrategy);
   if (!mainStrategy.ok) return { ok: false, fieldErrors: { mainStrategy: mainStrategy.error! } };
-  const introductoryExample = validateIntroductoryExample(input.introductoryExample);
+  const recognitionPhrase = validateOptionalRecognitionPhrase(input.recognitionPhrase);
+  if (!recognitionPhrase.ok) return { ok: false, fieldErrors: { recognitionPhrase: recognitionPhrase.error! } };
+  const description = validateOptionalPatternDescription(input.description);
+  if (!description.ok) return { ok: false, fieldErrors: { description: description.error! } };
+  const introductoryExample = validateOptionalIntroductoryExample(input.introductoryExample);
   if (!introductoryExample.ok) return { ok: false, fieldErrors: { introductoryExample: introductoryExample.error! } };
-  const strategicSummary = validateStrategicSummary(input.strategicSummary);
+  const strategicSummary = validateOptionalStrategicSummary(input.strategicSummary);
   if (!strategicSummary.ok) return { ok: false, fieldErrors: { strategicSummary: strategicSummary.error! } };
   const attributes = validateAttributeLists(input.attributes);
   if (!attributes.ok) return { ok: false, fieldErrors: { attributes: attributes.error! } };
@@ -134,14 +176,12 @@ function validateCore(input: RawCoreInput): { ok: true; fields: PatternCoreField
   return {
     ok: true,
     fields: {
-      code: code.value!,
-      slug: slug.value!,
       name: name.value!,
-      recognitionPhrase: recognitionPhrase.value!,
-      description: description.value!,
-      mainStrategy: mainStrategy.value!,
-      introductoryExample: introductoryExample.value!,
-      strategicSummary: strategicSummary.value!,
+      recognitionPhrase: recognitionPhrase.value ?? "",
+      description: description.value ?? "",
+      mainStrategy: mainStrategy.value ?? "",
+      introductoryExample: introductoryExample.value ?? "",
+      strategicSummary: strategicSummary.value ?? "",
     },
     attributes: attributes.value!,
   };
@@ -176,14 +216,15 @@ export type CreateResult =
   | { ok: false; conflict: true }
   | { ok: false; fieldErrors: Record<string, string> };
 
-export async function createPattern(db: D1Database, adminId: string, input: RawCoreInput & { mutationId: unknown }): Promise<CreateResult> {
+export async function createPattern(db: D1Database, adminId: string, input: RawPatternInput & { mutationId: unknown }): Promise<CreateResult> {
   if (!(await requireAdminRole(db, adminId))) return { ok: false, forbidden: true };
   if (!isValidMutationId(input.mutationId)) return { ok: false, fieldErrors: { mutationId: "mutationId é obrigatório e precisa ser um UUID válido." } };
   const mutationId = input.mutationId;
 
-  const validated = validateCore(input);
+  const validated = validateCreateInput(input);
   if (!validated.ok) return { ok: false, fieldErrors: validated.fieldErrors };
-  const { fields, attributes } = validated;
+  const { attributes } = validated;
+  const fields: PatternCoreFields = { ...validated.fields, code: generatePatternCode(mutationId), slug: generatePatternSlug(mutationId) };
 
   try {
     await db.batch([
@@ -217,11 +258,20 @@ export type UpdateResult =
   | { ok: false; conflict: true }
   | { ok: false; fieldErrors: Record<string, string> };
 
+/* Sprint 17, seção A da ordem — UPDATE passa a ser PARCIAL: só os campos
+   efetivamente enviados no corpo são alterados; qualquer campo AUSENTE
+   (`undefined`, nunca enviado) preserva o valor legado existente
+   intacto — inclusive `code`/`slug` (nunca reescritos por update, sempre
+   herdados de `existing`) e `attributes` (só é tocado/substituído quando a
+   chave `attributes` está presente no corpo; ausente = pattern_attributes
+   não é sequer lido para escrita, preservando 100% do conteúdo legado). A
+   UI nova só envia `{name, mainStrategy}` — o restante do contrato
+   continua aceito para quem envia o payload legado completo. */
 export async function updatePattern(
   db: D1Database,
   adminId: string,
   patternId: string,
-  input: RawCoreInput & { mutationId: unknown; expectedVersion: unknown }
+  input: RawPatternInput & { mutationId: unknown; expectedVersion: unknown }
 ): Promise<UpdateResult> {
   if (!(await requireAdminRole(db, adminId))) return { ok: false, forbidden: true };
   if (!isValidMutationId(input.mutationId)) return { ok: false, fieldErrors: { mutationId: "mutationId é obrigatório e precisa ser um UUID válido." } };
@@ -232,35 +282,63 @@ export async function updatePattern(
   const existing = await findRealPatternById(db, patternId);
   if (!existing) return { ok: false, notFound: true };
 
-  const validated = validateCore(input);
-  if (!validated.ok) return { ok: false, fieldErrors: validated.fieldErrors };
-  const { fields, attributes } = validated;
+  const name = validateOptionalName(input.name);
+  if (!name.ok) return { ok: false, fieldErrors: { name: name.error! } };
+  const mainStrategy = validateOptionalMainStrategy(input.mainStrategy);
+  if (!mainStrategy.ok) return { ok: false, fieldErrors: { mainStrategy: mainStrategy.error! } };
+  const recognitionPhrase = validateOptionalRecognitionPhrase(input.recognitionPhrase);
+  if (!recognitionPhrase.ok) return { ok: false, fieldErrors: { recognitionPhrase: recognitionPhrase.error! } };
+  const description = validateOptionalPatternDescription(input.description);
+  if (!description.ok) return { ok: false, fieldErrors: { description: description.error! } };
+  const introductoryExample = validateOptionalIntroductoryExample(input.introductoryExample);
+  if (!introductoryExample.ok) return { ok: false, fieldErrors: { introductoryExample: introductoryExample.error! } };
+  const strategicSummary = validateOptionalStrategicSummary(input.strategicSummary);
+  if (!strategicSummary.ok) return { ok: false, fieldErrors: { strategicSummary: strategicSummary.error! } };
 
-  const existingAttributeRows = await listAttributesForPattern(db, patternId);
-  const attributesUnchanged = JSON.stringify(attributesToDto(existingAttributeRows)) === JSON.stringify(attributes);
-  if (coreEqual(fields, existing) && attributesUnchanged) return { ok: true, changed: false };
+  const mergedFields: PatternCoreFields = {
+    code: existing.code,
+    slug: existing.slug,
+    name: name.value ?? existing.name,
+    recognitionPhrase: recognitionPhrase.value ?? existing.recognition_phrase,
+    description: description.value ?? existing.description,
+    mainStrategy: mainStrategy.value ?? existing.main_strategy,
+    introductoryExample: introductoryExample.value ?? existing.introductory_example,
+    strategicSummary: strategicSummary.value ?? existing.strategic_summary,
+  };
+
+  const attributesProvided = input.attributes !== undefined;
+  let attributes: PatternAttributeLists | null = null;
+  if (attributesProvided) {
+    const validatedAttributes = validateAttributeLists(input.attributes);
+    if (!validatedAttributes.ok) return { ok: false, fieldErrors: { attributes: validatedAttributes.error! } };
+    attributes = validatedAttributes.value!;
+  }
+
+  let attributesUnchanged = true;
+  if (attributesProvided) {
+    const existingAttributeRows = await listAttributesForPattern(db, patternId);
+    attributesUnchanged = JSON.stringify(attributesToDto(existingAttributeRows)) === JSON.stringify(attributes);
+  }
+  if (coreEqual(mergedFields, existing) && attributesUnchanged) return { ok: true, changed: false };
 
   if (existing.version !== expectedVersion.value) return { ok: false, conflict: true };
 
+  const statements: D1PreparedStatement[] = [buildUpdatePatternCoreStatement(db, patternId, expectedVersion.value!, mergedFields)];
+  if (attributesProvided) {
+    statements.push(buildDeleteAttributesStatement(db, patternId), ...attributeStatements(db, patternId, attributes!));
+  }
+  statements.push(buildAuditEventStatement(db, { id: mutationId, eventType: "admin_pattern_updated", userId: adminId, metadata: { patternId } }));
+
   try {
-    const result = await db.batch([
-      buildUpdatePatternCoreStatement(db, patternId, expectedVersion.value!, fields),
-      buildDeleteAttributesStatement(db, patternId),
-      ...attributeStatements(db, patternId, attributes),
-      buildAuditEventStatement(db, { id: mutationId, eventType: "admin_pattern_updated", userId: adminId, metadata: { patternId } }),
-    ]);
+    const result = await db.batch(statements);
     if (result[0].meta.changes !== 1) {
       const after = await findRealPatternById(db, patternId);
       if (!after) return { ok: false, notFound: true };
       return { ok: false, conflict: true };
     }
   } catch (error) {
-    if (error instanceof Error && /UNIQUE constraint failed/i.test(error.message)) {
-      // Formato real do driver: "UNIQUE constraint failed: patterns.code" /
-      // "patterns.slug" (nome da tabela.coluna, nunca o nome do índice).
-      if (error.message.includes("patterns.code")) return { ok: false, fieldErrors: { code: "Já existe um padrão com este código." } };
-      if (error.message.includes("patterns.slug")) return { ok: false, fieldErrors: { slug: "Já existe um padrão com este slug." } };
-      if (error.message.includes("audit_log")) return { ok: false, conflict: true };
+    if (error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("audit_log")) {
+      return { ok: false, conflict: true };
     }
     throw error;
   }
@@ -292,6 +370,12 @@ export async function transitionStatus(
   const existing = await findRealPatternById(db, patternId);
   if (!existing) return { ok: false, notFound: true };
   if (existing.version !== expectedVersion.value) return { ok: false, conflict: true };
+
+  // Sprint 17, seção A da ordem — regra editorial: publicar exige nome e
+  // macete/mainStrategy não vazios; nenhum campo legado é exigido.
+  if (input.action === "publish" && (!existing.name.trim() || !existing.main_strategy.trim())) {
+    return { ok: false, fieldErrors: { mainStrategy: "Para publicar, preencha Padrão e Macete / Como resolver." } };
+  }
 
   const eventType: AuditEventType = input.action === "publish" ? "admin_pattern_published" : "admin_pattern_inactivated";
 

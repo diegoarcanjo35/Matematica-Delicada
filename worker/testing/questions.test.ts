@@ -1806,3 +1806,110 @@ describe("Sprint 7 v1.6 — reprodução: conflito de versão real vira exceçã
     expect(receiptsCount()).toBe(0); // transições nunca tocam coleções
   });
 });
+
+/* ---------------------------------------------------------------------- */
+/* Sprint 17, seção B — GET /api/editorial/patterns (leitura mínima para   */
+/* editor/admin montarem os chips de padrão principal, sem depender de     */
+/* /api/admin/patterns).                                                  */
+/* ---------------------------------------------------------------------- */
+
+describe("Sprint 17 — GET /api/editorial/patterns", () => {
+  it("sem sessão: 401", async () => {
+    const response = await callRoute("/api/editorial/patterns", null);
+    expect(response.status).toBe(401);
+  });
+
+  it("sessão autenticada sem papel editorial: 403", async () => {
+    const token = await seedUserWithSession("no-role-user");
+    const response = await callRoute("/api/editorial/patterns", token);
+    expect(response.status).toBe(403);
+  });
+
+  it("editor: lista os padrões reais — só id/nome/situação, nunca código/slug/atributos", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const response = await callRoute("/api/editorial/patterns", token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; patterns: Array<Record<string, unknown>> };
+    expect(body.patterns.map((p) => p.name).sort()).toEqual(["Padrão 1", "Padrão 2"]);
+    expect(Object.keys(body.patterns[0]).sort()).toEqual(["editorialStatus", "id", "name"]);
+  });
+
+  it("admin: também recebe a lista (admin herda tudo que editor pode)", async () => {
+    const token = await seedUserWithSession("admin1");
+    grantRole("admin1", "admin");
+    const response = await callRoute("/api/editorial/patterns", token);
+    expect(response.status).toBe(200);
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* Sprint 17, seção C — GET /api/editorial/questions?padraoPrincipalId=    */
+/* filtro server-side por padrão PRINCIPAL (question_patterns.role).       */
+/* ---------------------------------------------------------------------- */
+
+describe("Sprint 17 — filtro por padrão principal em GET /api/editorial/questions", () => {
+  it("retorna somente questões cujo padrão PRINCIPAL é o filtrado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const q1 = seedQuestion(db.sqlite, { patternId: "pat-1" });
+    const q2 = seedQuestion(db.sqlite, { patternId: "pat-2" });
+
+    const response = await callRoute("/api/editorial/questions?padraoPrincipalId=pat-1", token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { questions: Array<{ id: string }>; total: number };
+    expect(body.questions.map((q) => q.id)).toEqual([q1]);
+    expect(body.total).toBe(1);
+    expect(body.questions.map((q) => q.id)).not.toContain(q2);
+  });
+
+  it("padrão vinculado apenas como SECUNDÁRIO não faz a questão entrar na aba do padrão", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const q1 = seedQuestion(db.sqlite, { patternId: "pat-2", secondaryPatternIds: ["pat-1"] });
+
+    const response = await callRoute("/api/editorial/questions?padraoPrincipalId=pat-1", token);
+    const body = (await response.json()) as { questions: Array<{ id: string }>; total: number };
+    expect(body.questions.map((q) => q.id)).not.toContain(q1);
+    expect(body.total).toBe(0);
+  });
+
+  it("count e paginação respeitam exatamente o mesmo filtro da listagem", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    seedQuestion(db.sqlite, { patternId: "pat-1" });
+    seedQuestion(db.sqlite, { patternId: "pat-1" });
+    seedQuestion(db.sqlite, { patternId: "pat-1" });
+    seedQuestion(db.sqlite, { patternId: "pat-2" });
+
+    const response = await callRoute("/api/editorial/questions?padraoPrincipalId=pat-1&limite=2&pagina=1", token);
+    const body = (await response.json()) as { total: number; totalPages: number; questions: unknown[] };
+    expect(body.total).toBe(3);
+    expect(body.totalPages).toBe(2);
+    expect(body.questions.length).toBe(2);
+  });
+
+  it("combina com busca + status ao mesmo tempo", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const published = seedQuestion(db.sqlite, { patternId: "pat-1", status: "published", code: "FILTRO-01" });
+    seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", code: "FILTRO-02" });
+
+    const response = await callRoute("/api/editorial/questions?padraoPrincipalId=pat-1&status=published&busca=FILTRO", token);
+    const body = (await response.json()) as { questions: Array<{ id: string }> };
+    expect(body.questions.map((q) => q.id)).toEqual([published]);
+  });
+
+  it("'Todas' (sem padraoPrincipalId): questão sem padrão nenhum continua acessível", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const withoutPattern = seedQuestion(db.sqlite, { withPrincipalPattern: false });
+    const withPattern = seedQuestion(db.sqlite, { patternId: "pat-1" });
+
+    const response = await callRoute("/api/editorial/questions", token);
+    const body = (await response.json()) as { questions: Array<{ id: string }> };
+    const ids = body.questions.map((q) => q.id);
+    expect(ids).toContain(withoutPattern);
+    expect(ids).toContain(withPattern);
+  });
+});

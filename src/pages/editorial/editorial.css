@@ -162,9 +162,44 @@
   align-items: flex-start;
 }
 
+/* Sprint 17, seção D da ordem — chips de padrão principal. Catálogo é
+   dinâmico (12 hoje, pode chegar a 40+): rolagem horizontal própria em vez
+   de deixar a faixa quebrar o layout da página; `flex-wrap` cobre telas
+   largas o suficiente para não precisar rolar. Nenhuma rolagem horizontal
+   vaza para o body — só esta faixa. */
+.editorial__pattern-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+  -webkit-overflow-scrolling: touch;
+}
+
+.editorial__pattern-tab {
+  flex: 0 0 auto;
+  padding: 0.375rem 0.875rem;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.editorial__pattern-tab--active {
+  background: #1f2937;
+  border-color: #1f2937;
+  color: #fff;
+}
+
 @media (max-width: 480px) {
   .editorial__header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .editorial__pattern-tabs {
+    flex-wrap: nowrap;
   }
 }

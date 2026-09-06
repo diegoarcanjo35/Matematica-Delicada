@@ -142,3 +142,46 @@ export function validateExpectedVersion(value: unknown): FieldValidationResult<n
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return fail("expectedVersion é obrigatória.");
   return ok(value);
 }
+
+/* Sprint 17 — simplificação da tela /admin/padroes para a Andreia (seção A
+   da ordem). A UI nova só edita `name` ("Padrão") e `main_strategy`
+   ("Macete / Como resolver"); os campos legados abaixo (recognitionPhrase,
+   description, introductoryExample, strategicSummary) deixam de ser
+   OBRIGATÓRIOS no CREATE (draft pode existir só com nome) e passam a ser
+   OPCIONAIS-preservando no UPDATE (`undefined` = "não enviado, não toca";
+   string, mesmo vazia, = "valor explícito"). Os validadores acima
+   (validatePatternName, validateRecognitionPhrase, etc.) continuam
+   existindo e são reaproveitados por quem ainda envia o payload legado
+   completo — nenhum contrato antigo foi removido, só deixou de ser exigido. */
+
+function validateOptionalText(value: unknown, fieldLabel: string, maxLength: number): FieldValidationResult<string | undefined> {
+  if (value === undefined) return ok(undefined);
+  if (typeof value !== "string") return fail(`${fieldLabel} inválido.`);
+  if (value.length > maxLength) return fail(`${fieldLabel} não pode passar de ${maxLength} caracteres.`);
+  return ok(value);
+}
+
+export function validateOptionalName(value: unknown): FieldValidationResult<string | undefined> {
+  if (value === undefined) return ok(undefined);
+  return validatePatternName(value);
+}
+
+export function validateOptionalMainStrategy(value: unknown): FieldValidationResult<string | undefined> {
+  return validateOptionalText(value, "Macete / Como resolver", PATTERN_LONG_TEXT_MAX_LENGTH);
+}
+
+export function validateOptionalRecognitionPhrase(value: unknown): FieldValidationResult<string | undefined> {
+  return validateOptionalText(value, "Frase de reconhecimento", PATTERN_SHORT_TEXT_MAX_LENGTH);
+}
+
+export function validateOptionalPatternDescription(value: unknown): FieldValidationResult<string | undefined> {
+  return validateOptionalText(value, "Descrição", PATTERN_LONG_TEXT_MAX_LENGTH);
+}
+
+export function validateOptionalIntroductoryExample(value: unknown): FieldValidationResult<string | undefined> {
+  return validateOptionalText(value, "Exemplo introdutório", PATTERN_LONG_TEXT_MAX_LENGTH);
+}
+
+export function validateOptionalStrategicSummary(value: unknown): FieldValidationResult<string | undefined> {
+  return validateOptionalText(value, "Resumo estratégico", PATTERN_LONG_TEXT_MAX_LENGTH);
+}

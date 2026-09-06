@@ -42,6 +42,21 @@ export function fetchEditorialRole(): Promise<{ ok: true; role: EditorialRole }>
   return request("/api/editorial/me");
 }
 
+/* Sprint 17, seção B da ordem — leitura mínima de padrões para montar os
+   chips do Banco de Questões por padrão principal. Endpoint próprio
+   (/api/editorial/patterns), acessível a editor/admin — nunca depende de
+   /api/admin/patterns. Catálogo dinâmico: nenhum nome de padrão é
+   hardcoded aqui nem no componente que consome isto. */
+export interface EditorialPatternSummary {
+  id: string;
+  name: string;
+  editorialStatus: string;
+}
+
+export function fetchEditorialPatterns(): Promise<{ ok: true; patterns: EditorialPatternSummary[] }> {
+  return request("/api/editorial/patterns");
+}
+
 export interface AlternativeDto {
   letter: string;
   text: string;
@@ -102,6 +117,8 @@ export interface QuestionListParams {
   status?: string | null;
   origem?: string | null;
   dificuldade?: string | null;
+  /** Sprint 17, seção C/D da ordem — filtro por padrão principal; ausente/null = "Todas". */
+  padraoPrincipalId?: string | null;
   pagina?: number;
   limite?: number;
 }
@@ -121,6 +138,7 @@ function toQuery(params: QuestionListParams): string {
   if (params.status) search.set("status", params.status);
   if (params.origem) search.set("origem", params.origem);
   if (params.dificuldade) search.set("dificuldade", params.dificuldade);
+  if (params.padraoPrincipalId) search.set("padraoPrincipalId", params.padraoPrincipalId);
   if (params.pagina && params.pagina > 1) search.set("pagina", String(params.pagina));
   if (params.limite) search.set("limite", String(params.limite));
   return search.toString();

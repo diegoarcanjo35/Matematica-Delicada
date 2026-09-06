@@ -5,7 +5,7 @@ import { Card } from "../../components/Card";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState } from "../../components/ErrorState";
 import { LoadingState } from "../../components/LoadingState";
-import { fetchQuestions, type QuestionSummary } from "../../api/editorialClient";
+import { fetchEditorialPatterns, fetchQuestions, type EditorialPatternSummary, type QuestionSummary } from "../../api/editorialClient";
 import "./editorial.css";
 
 /* Catálogo editorial /editorial/questoes — Sprint 7 v1.0, seção 9 da
@@ -13,7 +13,15 @@ import "./editorial.css";
    src/pages/patterns/PatternsPage.tsx. NÃO é acessível pelo menu do aluno
    (seção 9: "Não adicionar ao menu do aluno") — só chega aqui quem navega
    diretamente para /editorial/questoes, e mesmo assim RequireEditorialRole
-   bloqueia sem papel. */
+   bloqueia sem papel.
+
+   Sprint 17, seção B/C/D da ordem — navegação por PADRÃO PRINCIPAL via
+   chips dinâmicos (nenhum nome hardcoded: vem de GET
+   /api/editorial/patterns, catálogo real). "Todas" é a ausência do
+   parâmetro `padraoPrincipalId` — garante que questão incompleta/sem
+   padrão nunca fica inacessível. Chips ficam numa faixa com rolagem
+   horizontal (.editorial__pattern-tabs) para não quebrar o layout com
+   qualquer quantidade de padrões (12 hoje, 20 amanhã, sem limite fixo). */
 
 const STATUS_OPTIONS = [
   { value: "", label: "Todos os status" },
@@ -46,6 +54,7 @@ export function EditorialQuestionsPage() {
   const busca = searchParams.get("busca") ?? "";
   const status = searchParams.get("status") ?? "";
   const origem = searchParams.get("origem") ?? "";
+  const padraoPrincipalId = searchParams.get("padraoPrincipalId") ?? "";
   const rawPagina = Number(searchParams.get("pagina") ?? "1");
   const pagina = Number.isInteger(rawPagina) && rawPagina >= 1 ? rawPagina : 1;
 
@@ -54,11 +63,19 @@ export function EditorialQuestionsPage() {
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const [searchDraft, setSearchDraft] = useState(busca);
+  const [patterns, setPatterns] = useState<EditorialPatternSummary[]>([]);
 
   const load = useCallback(async () => {
     setPhase("loading");
     try {
-      const result = await fetchQuestions({ busca: busca || null, status: status || null, origem: origem || null, pagina, limite: PAGE_SIZE });
+      const result = await fetchQuestions({
+        busca: busca || null,
+        status: status || null,
+        origem: origem || null,
+        padraoPrincipalId: padraoPrincipalId || null,
+        pagina,
+        limite: PAGE_SIZE,
+      });
       setQuestions(result.questions);
       setTotal(result.total);
       setTotalPages(result.totalPages);
@@ -66,12 +83,20 @@ export function EditorialQuestionsPage() {
     } catch {
       setPhase("error");
     }
-  }, [busca, status, origem, pagina]);
+  }, [busca, status, origem, padraoPrincipalId, pagina]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
+
+  useEffect(() => {
+    // Catálogo de padrões independe dos filtros de questão — carrega uma
+    // vez só, ao montar a página (chips não mudam durante a navegação).
+    fetchEditorialPatterns()
+      .then((result) => setPatterns(result.patterns))
+      .catch(() => setPatterns([]));
+  }, []);
 
   function updateParams(changes: Record<string, string | null>) {
     const next = new URLSearchParams(searchParams);
@@ -117,6 +142,26 @@ export function EditorialQuestionsPage() {
         </div>
         <Button type="submit">Buscar</Button>
       </form>
+
+      <nav className="editorial__pattern-tabs" aria-label="Filtrar por padrão principal" data-testid="pattern-tabs">
+        <button
+          type="button"
+          className={`editorial__pattern-tab${padraoPrincipalId === "" ? " editorial__pattern-tab--active" : ""}`}
+          onClick={() => updateParams({ padraoPrincipalId: null })}
+        >
+          Todas
+        </button>
+        {patterns.map((pattern) => (
+          <button
+            key={pattern.id}
+            type="button"
+            className={`editorial__pattern-tab${padraoPrincipalId === pattern.id ? " editorial__pattern-tab--active" : ""}`}
+            onClick={() => updateParams({ padraoPrincipalId: pattern.id })}
+          >
+            {pattern.name}
+          </button>
+        ))}
+      </nav>
 
       <div className="editorial__filters" data-testid="editorial-filters">
         <div className="editorial__field">

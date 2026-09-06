@@ -27,6 +27,7 @@ import {
   updateQuestion,
   type QuestionInput,
 } from "../services/questionService";
+import { listPatternsForEditorial } from "../services/patternsAdminService";
 
 /* Rotas do Banco de Questões — Sprint 7 v1.0, seção 7 da ordem.
 
@@ -77,6 +78,21 @@ export async function handleEditorialQuestionsRequest(request: Request, env: Env
     return json({ ok: true, role });
   }
 
+  /* Sprint 17, seção B da ordem — leitura mínima de padrões para o Banco de
+     Questões (chips por padrão principal). Mesmo guard de RBAC editorial
+     das demais rotas deste arquivo (editor OU admin) — NUNCA
+     /api/admin/patterns, que quebraria o papel `editor`. */
+  if (path === "/api/editorial/patterns" && request.method === "GET") {
+    const actor = await requireEditorialActor(request, env);
+    if (!actor) {
+      const token = readSessionToken(request);
+      if (!token) return Errors.unauthorized();
+      return Errors.forbidden("Sem permissão editorial.");
+    }
+    const patterns = await listPatternsForEditorial(env.DB);
+    return json({ ok: true, patterns });
+  }
+
   if (path !== "/api/editorial/questions" && !path.startsWith("/api/editorial/questions/")) return null;
 
   const actor = await requireEditorialActor(request, env);
@@ -118,6 +134,12 @@ export async function handleEditorialQuestionsRequest(request: Request, env: Env
           revisorId: url.searchParams.get("revisorId") || null,
           ano: ano && Number.isInteger(ano) ? ano : null,
           hasImage,
+          // Sprint 17, seção C da ordem — filtro por padrão PRINCIPAL
+          // (question_patterns.role = 'principal'); ausente = "Todas", nunca
+          // filtra e nunca esconde questão incompleta/sem padrão. Mesmo
+          // padrão de conteudo/autorId/revisorId acima: string crua, sem
+          // enum fechado (o catálogo de padrões é dinâmico).
+          padraoPrincipalId: url.searchParams.get("padraoPrincipalId") || null,
         },
         pageResult.value!,
         limitResult.value!
