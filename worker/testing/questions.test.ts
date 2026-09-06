@@ -230,6 +230,75 @@ describe("CRUD de questões", () => {
     expect(result.fieldErrors?.code).toBeDefined();
   });
 
+  /* Sprint 18, seção 3/19 da ordem — itens 10/11 da política de testes. */
+  function codeOf(id: string): string {
+    return (db.sqlite.prepare("SELECT code FROM questions WHERE id = ?").get(id) as { code: string }).code;
+  }
+
+  it("item 10 — questão nova SEM `code` recebe código técnico gerado pelo servidor (Q-<uuid>)", async () => {
+    const result = await createQuestion(db as never, "autor1", {
+      enunciado: "Enunciado sem código explícito, gerado pelo servidor.",
+      dificuldade: "media",
+      origem: "autoral",
+      alternativas: validAlternatives as never,
+      dna: validDna,
+      padroes: [{ patternId: "pat-1", role: "principal" }],
+      tags: [],
+      imagens: [],
+    } as never);
+    expect(result.ok).toBe(true);
+    expect(codeOf(result.value!.id)).toMatch(/^Q-[0-9a-f-]{36}$/i);
+  });
+
+  it("item 11 — create/import com `code` explícito continua funcionando normalmente", async () => {
+    const result = await createQuestion(db as never, "autor1", {
+      code: "IMPORT-EXPLICITO-1",
+      enunciado: "Enunciado com código explícito, vindo de um importador.",
+      dificuldade: "media",
+      origem: "autoral",
+      alternativas: validAlternatives as never,
+      dna: validDna,
+      padroes: [{ patternId: "pat-1", role: "principal" }],
+      tags: [],
+      imagens: [],
+    } as never);
+    expect(result.ok).toBe(true);
+    expect(codeOf(result.value!.id)).toBe("IMPORT-EXPLICITO-1");
+  });
+
+  it("dois creates sem `code` geram códigos DIFERENTES e únicos (nunca colidem)", async () => {
+    const first = await createQuestion(db as never, "autor1", {
+      enunciado: "Primeira questão sem código explícito.",
+      dificuldade: "media",
+      origem: "autoral",
+      alternativas: validAlternatives as never,
+      dna: validDna,
+      padroes: [{ patternId: "pat-1", role: "principal" }],
+      tags: [],
+      imagens: [],
+    } as never);
+    const second = await createQuestion(db as never, "autor1", {
+      enunciado: "Segunda questão sem código explícito, enunciado bem diferente da primeira.",
+      dificuldade: "facil",
+      origem: "autoral",
+      alternativas: validAlternatives as never,
+      dna: validDna,
+      padroes: [{ patternId: "pat-1", role: "principal" }],
+      tags: [],
+      imagens: [],
+    } as never);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(codeOf(first.value!.id)).not.toBe(codeOf(second.value!.id));
+  });
+
+  it("código antigo de questão existente NUNCA é alterado por um PATCH (imutável)", async () => {
+    const qId = seedQuestion(db.sqlite, { code: "CODIGO-ANTIGO-IMUTAVEL", patternId: "pat-1", status: "draft", version: 1 });
+    const result = await updateQuestion(db as never, "autor1", qId, 1, crypto.randomUUID(), { enunciado: "Novo enunciado, código deve continuar igual." } as never);
+    expect(result.ok).toBe(true);
+    expect(codeOf(qId)).toBe("CODIGO-ANTIGO-IMUTAVEL");
+  });
+
   it("rejeita fingerprint duplicada (enunciado equivalente)", async () => {
     const enunciado = "Enunciado idêntico para teste de fingerprint.";
     const first = await createQuestion(db as never, "autor1", {
@@ -814,12 +883,40 @@ describe("Workflow editorial", () => {
     expect(questionRow(qId).version).toBe(2);
   });
 
-  it("aprovação exige DNA completo", async () => {
-    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "in_review", version: 2, withDna: false });
-    db.sqlite.exec(`INSERT INTO question_dna (question_id, pista) VALUES ('${qId}', '')`);
+  /* Sprint 18, seção 7 da ordem — o gate de aprovação/publicação deixou de
+     exigir os SEIS campos legados do DNA completos (isDnaComplete,
+     removida) e passou a exigir só resolução comentada + Macete/Como
+     resolver (dna.estrategia) — ver hasMinimumPedagogicalContentForApproval
+     em worker/src/lib/questionsValidation.ts. Os demais campos legados
+     (pista/pegadinha/conteudoApoio/resolucao/aprendizadoErro/atalho) NUNCA
+     são exigidos por este gate, mesmo vazios. */
+  it("item 12 (Sprint 18) — aprovação BLOQUEIA com resolução comentada vazia, mesmo com DNA legado completo", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "in_review", version: 2, withDna: true });
+    db.sqlite.exec(`UPDATE questions SET resolucao_comentada = '' WHERE id = '${qId}'`);
     const result = await approveQuestion(db as never, "admin1", "admin", qId, 2);
     expect(result.ok).toBe(false);
-    expect(result.fieldErrors?.readiness).toMatch(/DNA/i);
+    expect(result.fieldErrors?.readiness).toMatch(/resolução|macete/i);
+  });
+
+  it("item 12 (Sprint 18) — aprovação BLOQUEIA com Macete (dna.estrategia) vazio, mesmo com resolução comentada preenchida", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "in_review", version: 2, withDna: false });
+    db.sqlite.exec(
+      `INSERT INTO question_dna (question_id, pista, estrategia, pegadinha, conteudo_apoio, resolucao, aprendizado_erro) VALUES ('${qId}', '', '', '', '', '', '')`
+    );
+    const result = await approveQuestion(db as never, "admin1", "admin", qId, 2);
+    expect(result.ok).toBe(false);
+    expect(result.fieldErrors?.readiness).toMatch(/resolução|macete/i);
+  });
+
+  it("item 12 (Sprint 18) — aprovação SUCEDE com só resolução comentada + Macete preenchidos, DNA legado inteiramente vazio", async () => {
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "in_review", version: 2, withDna: false });
+    db.sqlite.exec(
+      `INSERT INTO question_dna (question_id, pista, estrategia, pegadinha, conteudo_apoio, resolucao, aprendizado_erro) VALUES ('${qId}', '', 'Some o dobro e divida por dois.', '', '', '', '')`
+    );
+    const result = await approveQuestion(db as never, "admin1", "admin", qId, 2);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(questionRow(qId).editorial_status).toBe("approved");
   });
 
   it("publicação exige direitos completos (titular, licença, autor, revisor)", async () => {

@@ -3,6 +3,22 @@ import { isHttpProtocol, isRecognizedLocalHostname } from "./lib/localHost";
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
+  /** Sprint 18, seção 9 da ordem — storage de imagens do Banco de Questões
+   *  (enunciado/alternativas). Bucket privado (NUNCA público) — toda leitura
+   *  passa por worker/src/routes/questionMedia.ts, que aplica a mesma
+   *  autorização do player/editorial antes de servir qualquer objeto.
+   *  Declarado aqui e em wrangler.jsonc/wrangler.local.jsonc nesta sprint,
+   *  mas o bucket REMOTO (matematica-delicada-question-media) NÃO foi
+   *  criado — esta sprint para antes de qualquer provisionamento remoto
+   *  (`wrangler r2 bucket create` nunca executado). Localmente, o Wrangler
+   *  simula R2 em `.wrangler/state` (mesmo mecanismo já usado para o D1
+   *  local) — nenhum bucket real é necessário para `wrangler dev`.
+   *  Opcional (ao contrário de DB/ASSETS) de propósito: só as rotas NOVAS de
+   *  mídia (worker/src/routes/questionMedia.ts, e os endpoints de upload/
+   *  delete em editorialQuestions.ts) o exigem — nenhum teste/rota
+   *  pré-existente precisa passar a fornecer um R2Bucket fake só para
+   *  continuar compilando. */
+  QUESTION_MEDIA?: R2Bucket;
   ENVIRONMENT?: string;
   /** Exclusiva de wrangler.local.jsonc — nunca presente em config implantável. */
   DEV_OUTBOX_ENABLED?: string;

@@ -435,10 +435,35 @@ CREATE TABLE question_images (
   titular_direitos TEXT,
   base_licenca TEXT,
   version_stamp INTEGER,
+  -- Sprint 18 (migration 0022) - placement/alternative_letter/storage_kind/mime_type/size_bytes.
+  placement TEXT NOT NULL DEFAULT 'enunciado' CHECK (placement IN ('enunciado', 'alternativa')),
+  alternative_letter TEXT CHECK (alternative_letter IS NULL OR alternative_letter IN ('A', 'B', 'C', 'D', 'E')),
+  storage_kind TEXT NOT NULL DEFAULT 'local' CHECK (storage_kind IN ('local', 'r2')),
+  mime_type TEXT,
+  size_bytes INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_question_images_question ON question_images (question_id, position);
+CREATE INDEX idx_question_images_placement ON question_images (question_id, placement, alternative_letter, position);
+
+CREATE TRIGGER trg_question_images_placement_coherence_insert
+BEFORE INSERT ON question_images
+FOR EACH ROW
+WHEN (NEW.placement = 'alternativa' AND NEW.alternative_letter IS NULL)
+  OR (NEW.placement = 'enunciado' AND NEW.alternative_letter IS NOT NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'invariante violada: placement e alternative_letter incoerentes em question_images');
+END;
+
+CREATE TRIGGER trg_question_images_placement_coherence_update
+BEFORE UPDATE ON question_images
+FOR EACH ROW
+WHEN (NEW.placement = 'alternativa' AND NEW.alternative_letter IS NULL)
+  OR (NEW.placement = 'enunciado' AND NEW.alternative_letter IS NOT NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'invariante violada: placement e alternative_letter incoerentes em question_images');
+END;
 
 CREATE TABLE question_patterns (
   id TEXT PRIMARY KEY,

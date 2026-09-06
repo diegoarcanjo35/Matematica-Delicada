@@ -12,9 +12,10 @@ import { validateBatchResults, type ExpectedBatchStatement } from "../lib/batchV
 import { recordAuditEvent } from "../repositories/auditRepository";
 import {
   allImagesHaveAlt,
+  generateQuestionCode,
+  hasMinimumPedagogicalContentForApproval,
   hasPrincipalPattern,
   hasRequiredRightsForPublication,
-  isDnaComplete,
   QUESTION_TRANSITIONS,
   TRANSITION_MIN_ROLE,
   transitionKey,
@@ -156,7 +157,15 @@ export async function createQuestion(
 ): Promise<MutationResult<{ id: string }>> {
   const fieldErrors: Record<string, string> = {};
 
-  if (!input.code || typeof input.code !== "string") fieldErrors.code = "Código editorial é obrigatório.";
+  // Sprint 18, seção 3 da ordem — a Andreia nunca mais digita um código
+  // editorial: quando ausente (questão manual nova pela UI simplificada),
+  // o servidor gera um identificador técnico único e estável
+  // (generateQuestionCode). Quem já envia `code` explicitamente (CSV/
+  // importador, ou qualquer chamador que ainda o forneça) continua
+  // funcionando sem nenhuma mudança — só um `code` presente e INVÁLIDO
+  // (tipo errado) continua sendo 400.
+  const code = input.code === undefined || input.code === null ? generateQuestionCode() : input.code;
+  if (typeof code !== "string" || code.trim().length === 0) fieldErrors.code = "Código editorial inválido.";
   if (!input.enunciado || typeof input.enunciado !== "string" || input.enunciado.trim().length === 0) {
     fieldErrors.enunciado = "Enunciado é obrigatório.";
   }
@@ -188,7 +197,7 @@ export async function createQuestion(
     if (!patternsExist) return { ok: false, fieldErrors: { padroes: "Um ou mais padrões informados não existem." } };
   }
 
-  const existingCode = await findQuestionByCode(db, input.code!);
+  const existingCode = await findQuestionByCode(db, code);
   if (existingCode) return { ok: false, fieldErrors: { code: "Já existe uma questão com este código." } };
 
   const fingerprint = await computeFingerprint(input.enunciado!, altResult.value!);
@@ -201,7 +210,7 @@ export async function createQuestion(
   const statements = [
     buildInsertQuestionStatement(db, {
       id,
-      code: input.code!,
+      code,
       enunciado: input.enunciado!,
       resolucaoComentada: input.resolucaoComentada ?? "",
       conteudo: input.conteudo ?? "",
@@ -864,7 +873,15 @@ export interface QuestionDetailDto extends QuestionSummaryDto {
   textoAtribuicao: string | null;
   fingerprint: string;
   alternativas: Array<{ letter: string; text: string; isCorrect: boolean; distractorExplanation: string | null }>;
-  imagens: Array<{ id: string; assetRef: string; altText: string; caption: string | null; position: number }>;
+  imagens: Array<{
+    id: string;
+    assetRef: string;
+    altText: string;
+    caption: string | null;
+    position: number;
+    placement: string;
+    alternativeLetter: string | null;
+  }>;
   padroes: Array<{ patternId: string; role: string }>;
   tags: string[];
   dna: {
@@ -948,7 +965,15 @@ function toDetailDto(
       isCorrect: a.is_correct === 1,
       distractorExplanation: a.distractor_explanation,
     })),
-    imagens: images.map((i) => ({ id: i.id, assetRef: i.asset_ref, altText: i.alt_text, caption: i.caption, position: i.position })),
+    imagens: images.map((i) => ({
+      id: i.id,
+      assetRef: i.asset_ref,
+      altText: i.alt_text,
+      caption: i.caption,
+      position: i.position,
+      placement: i.placement,
+      alternativeLetter: i.alternative_letter,
+    })),
     padroes: patterns.map((p) => ({ patternId: p.pattern_id, role: p.role })),
     tags: tags.map((t) => t.content),
     dna: dna
@@ -1012,22 +1037,21 @@ async function readinessForReview(db: D1Database, questionId: string): Promise<s
   return null;
 }
 
+/** Sprint 18, seção 7 da ordem — gate revisado: só os dados pedagógicos
+ *  REALMENTE necessários (resolução comentada + Macete/Como resolver,
+ *  `dna.estrategia`) são exigidos antes de aprovação/publicação. Os demais
+ *  campos legados do DNA (pista/pegadinha/conteudoApoio/resolucao/
+ *  aprendizadoErro/atalho) NUNCA são exigidos por este gate — continuam
+ *  existindo e preservados, mas uma questão nova pode avançar sem eles. */
 async function readinessForApproval(db: D1Database, questionId: string): Promise<string | null> {
   const reviewError = await readinessForReview(db, questionId);
   if (reviewError) return reviewError;
-  const dna = await findDna(db, questionId);
-  const dnaInput = dna
-    ? {
-        pista: dna.pista,
-        estrategia: dna.estrategia,
-        pegadinha: dna.pegadinha,
-        conteudoApoio: dna.conteudo_apoio,
-        resolucao: dna.resolucao,
-        atalho: dna.atalho,
-        aprendizadoErro: dna.aprendizado_erro,
-      }
-    : null;
-  if (!isDnaComplete(dnaInput)) return "DNA da questão incompleto — obrigatório antes de aprovação/publicação.";
+  const [question, dna] = await Promise.all([findQuestionById(db, questionId), findDna(db, questionId)]);
+  const resolucaoComentada = question?.resolucao_comentada ?? "";
+  const estrategia = dna?.estrategia ?? "";
+  if (!hasMinimumPedagogicalContentForApproval(resolucaoComentada, estrategia)) {
+    return "Resolução comentada e Macete / Como resolver são obrigatórios antes de aprovação/publicação.";
+  }
   return null;
 }
 

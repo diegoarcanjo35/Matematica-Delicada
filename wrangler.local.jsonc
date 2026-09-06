@@ -89,5 +89,16 @@
       "database_id": "local-only-sqlite-not-a-cloudflare-id",
       "migrations_dir": "migrations"
     }
+  ],
+  // Sprint 18 — mesmo binding QUESTION_MEDIA de wrangler.jsonc, mas o
+  // Wrangler SIMULA este bucket localmente em .wrangler/state (mesmo
+  // mecanismo já usado para o D1 local acima) — nenhum bucket remoto é
+  // necessário para `wrangler dev`. Nome sufixado "-local" só por
+  // convenção (o simulador local não valida contra nenhum bucket real).
+  "r2_buckets": [
+    {
+      "binding": "QUESTION_MEDIA",
+      "bucket_name": "matematica-delicada-question-media-local"
+    }
   ]
 }

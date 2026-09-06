@@ -6,6 +6,7 @@ import { resolveEditorialRole, roleSatisfies } from "../lib/rbac";
 import {
   isValidMutationId,
   isValidQuestionId,
+  MAX_IMAGE_UPLOAD_BYTES,
   pickAllowedFields,
   QUESTION_CREATE_ALLOWED_FIELDS,
   validateDifficultyFilter,
@@ -27,6 +28,7 @@ import {
   updateQuestion,
   type QuestionInput,
 } from "../services/questionService";
+import { addQuestionImage, deleteQuestionImage } from "../services/questionMediaService";
 import { listPatternsForEditorial } from "../services/patternsAdminService";
 
 /* Rotas do Banco de Questões — Sprint 7 v1.0, seção 7 da ordem.
@@ -59,6 +61,12 @@ function validationError(field: string, message: string): Response {
 
 const QUESTION_ID_RE = /^\/api\/editorial\/questions\/([^/]+)$/;
 const QUESTION_ACTION_RE = /^\/api\/editorial\/questions\/([^/]+)\/(submit-review|request-changes|approve|publish|archive)$/;
+// Sprint 18, seções 11/12 da ordem — endpoints dedicados de imagem, FORA da
+// coleção `imagens` do PATCH geral (worker/src/services/questionMediaService.ts
+// documenta por que este pipeline nunca participa do versionamento de
+// `questions`).
+const QUESTION_IMAGES_RE = /^\/api\/editorial\/questions\/([^/]+)\/images$/;
+const QUESTION_IMAGE_DETAIL_RE = /^\/api\/editorial\/questions\/([^/]+)\/images\/([^/]+)$/;
 
 export async function handleEditorialQuestionsRequest(request: Request, env: Env, url: URL): Promise<Response | null> {
   const path = url.pathname;
@@ -248,6 +256,80 @@ export async function handleEditorialQuestionsRequest(request: Request, env: Env
     }
 
     return Errors.methodNotAllowed();
+  }
+
+  const imagesMatch = path.match(QUESTION_IMAGES_RE);
+  if (imagesMatch) {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+    const questionId = decodeURIComponent(imagesMatch[1]);
+    if (!isValidQuestionId(questionId)) return Errors.notFound();
+    if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
+
+    // Content-Length primeiro (rejeita cedo, sem ler o corpo inteiro — mesmo
+    // padrão de worker/src/routes/editorialImports.ts para o preview de
+    // importação CSV); o tamanho REAL do arquivo é conferido de novo depois
+    // de extrair do multipart, nunca só confiado ao cabeçalho.
+    const contentLength = request.headers.get("content-length");
+    if (contentLength && Number(contentLength) > MAX_IMAGE_UPLOAD_BYTES * 2) {
+      // *2: o multipart adiciona overhead de boundary/campos de texto ao
+      // redor do arquivo — a checagem exata do ARQUIVO acontece abaixo,
+      // depois do parse; este só descarta cedo um corpo claramente
+      // desproporcional, sem gastar CPU fazendo parse de multipart nele.
+      return Errors.payloadTooLarge(`Corpo da requisição excede o limite permitido.`);
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return Errors.badRequest("Corpo multipart/form-data inválido.");
+    }
+
+    const file = form.get("arquivo");
+    if (!(file instanceof File)) return Errors.badRequest("Campo 'arquivo' é obrigatório.");
+    const mutationIdRaw = form.get("mutationId");
+    if (!isValidMutationId(mutationIdRaw)) return validationError("mutationId", "Informe um mutationId (UUID) válido.");
+
+    const fileBytes = new Uint8Array(await file.arrayBuffer());
+    if (fileBytes.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
+      return Errors.payloadTooLarge(`Arquivo excede o limite de ${MAX_IMAGE_UPLOAD_BYTES} bytes.`);
+    }
+
+    const result = await addQuestionImage(env.DB, env.QUESTION_MEDIA, questionId, {
+      mutationId: mutationIdRaw,
+      placement: form.get("placement"),
+      alternativeLetter: form.get("alternativeLetter"),
+      altText: form.get("altText"),
+      caption: form.get("caption"),
+      fileBytes,
+      declaredMimeType: typeof file.type === "string" && file.type.length > 0 ? file.type : null,
+    });
+
+    if (!result.ok) {
+      if (result.notFound) return Errors.notFound();
+      if (result.forbidden) return Errors.forbidden();
+      if (result.conflict) return Errors.conflict("Este mutationId já foi usado para outra imagem/questão.");
+      const fieldErrors = result.fieldErrors ?? {};
+      return json({ error: { code: "validation_error", message: Object.values(fieldErrors)[0] ?? "Não foi possível enviar a imagem.", fields: fieldErrors } }, { status: 400 });
+    }
+    return json({ ok: true, changed: result.changed, image: result.value }, { status: result.changed ? 201 : 200 });
+  }
+
+  const imageDetailMatch = path.match(QUESTION_IMAGE_DETAIL_RE);
+  if (imageDetailMatch) {
+    if (request.method !== "DELETE") return Errors.methodNotAllowed();
+    const questionId = decodeURIComponent(imageDetailMatch[1]);
+    const imageId = decodeURIComponent(imageDetailMatch[2]);
+    if (!isValidQuestionId(questionId)) return Errors.notFound();
+    if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
+
+    const result = await deleteQuestionImage(env.DB, env.QUESTION_MEDIA, questionId, imageId);
+    if (!result.ok) {
+      if (result.notFound) return Errors.notFound();
+      const fieldErrors = result.fieldErrors ?? {};
+      return json({ error: { code: "validation_error", message: Object.values(fieldErrors)[0] ?? "Não foi possível remover a imagem.", fields: fieldErrors } }, { status: 400 });
+    }
+    return json({ ok: true, changed: result.changed });
   }
 
   return Errors.notFound();

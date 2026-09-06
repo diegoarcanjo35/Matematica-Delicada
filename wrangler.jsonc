@@ -45,5 +45,18 @@
       "database_name": "matematica-delicada",
       "database_id": "04c9d44c-70e2-4156-b129-075dcf8e4c03"
     }
+  ],
+  // Sprint 18 — storage de imagens do Banco de Questões (worker/src/env.ts,
+  // QUESTION_MEDIA). Declarado aqui só para a CONFIGURAÇÃO existir — o
+  // bucket "matematica-delicada-question-media" NÃO foi criado na
+  // Cloudflare (nenhum `wrangler r2 bucket create` foi executado; a ordem
+  // desta sprint proíbe explicitamente qualquer provisionamento remoto).
+  // NÃO fazer deploy com este binding antes de o bucket existir de verdade
+  // e de uma ordem separada do PO autorizar o provisionamento.
+  "r2_buckets": [
+    {
+      "binding": "QUESTION_MEDIA",
+      "bucket_name": "matematica-delicada-question-media"
+    }
   ]
 }

@@ -73,6 +73,12 @@ export interface QuestionImageRow {
   position: number;
   titular_direitos: string | null;
   base_licenca: string | null;
+  /** Sprint 18 (migration 0022) — ver worker/src/lib/questionsValidation.ts. */
+  placement: "enunciado" | "alternativa";
+  alternative_letter: string | null;
+  storage_kind: "local" | "r2";
+  mime_type: string | null;
+  size_bytes: number | null;
 }
 
 export interface QuestionPatternRow {
@@ -187,6 +193,84 @@ export async function listImages(db: D1Database, questionId: string): Promise<Qu
     .bind(questionId)
     .all<QuestionImageRow>();
   return result.results ?? [];
+}
+
+/* --------------------- Imagens via upload dedicado (Sprint 18) -------------
+   Deliberadamente FORA da máquina transacional de coleções do PATCH geral
+   (nunca bumpam questions.version, nunca tocam question_history/
+   editorial_mutation_checks/question_collection_mutation_receipts) — ver
+   nota extensa em worker/src/services/questionMediaService.ts sobre por que
+   isso é seguro (nenhum trigger de 0009/0010/0011/0012 reage a um INSERT/
+   DELETE isolado em question_images; todos reagem a INSERT em
+   editorial_mutation_checks ou a UPDATE em questions com version alterada,
+   nenhum dos dois acontece aqui). */
+
+export async function findImageById(db: D1Database, imageId: string): Promise<QuestionImageRow | null> {
+  const row = await db.prepare("SELECT * FROM question_images WHERE id = ?").bind(imageId).first<QuestionImageRow>();
+  return row ?? null;
+}
+
+export async function countImagesForQuestion(db: D1Database, questionId: string): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) as total FROM question_images WHERE question_id = ?").bind(questionId).first<{ total: number }>();
+  return row?.total ?? 0;
+}
+
+export interface StandaloneImageInsertParams {
+  id: string;
+  questionId: string;
+  assetRef: string;
+  altText: string;
+  caption: string | null;
+  position: number;
+  placement: "enunciado" | "alternativa";
+  alternativeLetter: string | null;
+  storageKind: "local" | "r2";
+  mimeType: string | null;
+  sizeBytes: number | null;
+}
+
+/** INSERT guardado só por status editável (nunca por versão — este
+ *  pipeline não participa do versionamento de `questions`, ver nota acima).
+ *  `id` é sempre o `mutationId` do cliente (mesmo idioma de patterns/
+ *  diagnostic — mutationId = id): um retry com o mesmo id colide na PK,
+ *  reconhecido e tratado no serviço sem tocar R2 de novo. */
+export function buildStandaloneInsertImageStatement(db: D1Database, params: StandaloneImageInsertParams): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO question_images
+         (id, question_id, asset_ref, alt_text, caption, position, placement, alternative_letter, storage_kind, mime_type, size_bytes)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND editorial_status IN ('draft', 'changes_requested'))`
+    )
+    .bind(
+      params.id,
+      params.questionId,
+      params.assetRef,
+      params.altText,
+      params.caption,
+      params.position,
+      params.placement,
+      params.alternativeLetter,
+      params.storageKind,
+      params.mimeType,
+      params.sizeBytes,
+      params.questionId
+    );
+}
+
+/** DELETE guardado só por status editável — mesma razão de não depender de
+ *  versão do INSERT acima. Filtra por `id AND question_id` juntos (nunca só
+ *  `id`) para que um imageId nunca possa ser usado para apagar a imagem de
+ *  OUTRA questão por engano/malícia — sempre confirma o par certo antes de
+ *  qualquer efeito. */
+export function buildStandaloneDeleteImageStatement(db: D1Database, imageId: string, questionId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `DELETE FROM question_images
+       WHERE id = ? AND question_id = ?
+       AND EXISTS (SELECT 1 FROM questions WHERE id = ? AND editorial_status IN ('draft', 'changes_requested'))`
+    )
+    .bind(imageId, questionId, questionId);
 }
 
 export async function listPatternsForQuestion(db: D1Database, questionId: string): Promise<QuestionPatternRow[]> {

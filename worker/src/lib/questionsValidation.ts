@@ -106,6 +106,23 @@ export function isValidQuestionCode(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= QUESTION_CODE_MAX_LENGTH && CODE_RE.test(value);
 }
 
+/* Sprint 18, seção 3 da ordem — "código editorial técnico" sai da interface
+   operacional da Andreia. Quando o cliente não fornece `code` (questão
+   manual nova), o SERVIDOR gera um identificador técnico único e estável:
+   "Q-" + UUID (39 chars, dentro do limite de QUESTION_CODE_MAX_LENGTH=40 e
+   compatível com CODE_RE — hífen no meio é permitido, começa/termina em
+   caractere alfanumérico). Unicidade prática garantida pelo próprio UUID
+   (mesmo raciocínio já usado para `code`/`slug` de padrões na Sprint 17 —
+   patternsAdminService.ts) — nenhuma consulta extra de existência
+   necessária antes do INSERT (o índice UNIQUE em questions.code continua
+   como defesa de banco em profundidade). NUNCA usado para uma questão já
+   existente (código antigo é sempre preservado) nem quando o cliente/
+   importador CSV já envia um `code` explícito (seção 3: "não quebrar o
+   fluxo existente que envia códigos editoriais explícitos"). */
+export function generateQuestionCode(): string {
+  return `Q-${crypto.randomUUID()}`;
+}
+
 export function isValidQuestionId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 100;
 }
@@ -281,15 +298,6 @@ export interface QuestionDnaInput {
   aprendizadoErro: string;
 }
 
-const DNA_REQUIRED_FIELDS: Array<keyof Omit<QuestionDnaInput, "atalho">> = [
-  "pista",
-  "estrategia",
-  "pegadinha",
-  "conteudoApoio",
-  "resolucao",
-  "aprendizadoErro",
-];
-
 export function validateQuestionDna(value: unknown): FieldValidationResult<QuestionDnaInput> {
   if (typeof value !== "object" || value === null) return fail("DNA da questão inválido.");
   const item = value as Record<string, unknown>;
@@ -315,11 +323,25 @@ export function validateQuestionDna(value: unknown): FieldValidationResult<Quest
   return ok(parsed);
 }
 
-/** Componentes obrigatórios do DNA completos (seção 5.5) — checado antes de
- *  aprovação/publicação, nunca na criação/edição em rascunho. */
-export function isDnaComplete(dna: QuestionDnaInput | null): boolean {
-  if (!dna) return false;
-  return DNA_REQUIRED_FIELDS.every((field) => dna[field].trim().length > 0);
+/** Sprint 18, seção 6/7 da ordem — substitui `isDnaComplete` (Sprint 7),
+ *  que exigia os SEIS campos legados do DNA (pista, estrategia, pegadinha,
+ *  conteudoApoio, resolucao, aprendizadoErro) inteiros. A Andreia aprovou
+ *  um modelo simplificado onde ela só edita "Macete / Como resolver"
+ *  (`dna.estrategia`); manter uma função chamada `isDnaComplete` checando
+ *  os seis campos legados ficaria com um NOME ENGANOSO (o produto não exige
+ *  mais isso) — por isso ela foi removida, não apenas alterada por dentro.
+ *  Esta função tem o nome e o escopo corretos para o gate atual: só os dois
+ *  dados pedagógicos mínimos que a ordem lista como "realmente necessários"
+ *  para aprovação/publicação, um deles nem sequer é campo de DNA
+ *  (`resolucaoComentada` é coluna de `questions`, não de `question_dna`).
+ *  Os demais campos legados do DNA (pista/pegadinha/conteudoApoio/
+ *  resolucao/aprendizadoErro/atalho) NUNCA são exigidos por este gate —
+ *  continuam podendo ficar vazios indefinidamente numa questão nova, e
+ *  continuam preservados tal como estavam numa questão legada (ver
+ *  updateQuestion, questionService.ts — este gate não altera nada sobre
+ *  como esses campos são lidos/gravados). */
+export function hasMinimumPedagogicalContentForApproval(resolucaoComentada: string, estrategia: string): boolean {
+  return resolucaoComentada.trim().length > 0 && estrategia.trim().length > 0;
 }
 
 /* --------------------------- Padrões (5.4) -------------------------------- */
@@ -411,6 +433,93 @@ export function validateQuestionImages(value: unknown): FieldValidationResult<Qu
 /** Imagem sem alt não pode avançar para revisão (seção 5.3). */
 export function allImagesHaveAlt(images: QuestionImageInput[]): boolean {
   return images.every((image) => image.altText.trim().length > 0);
+}
+
+/* ------------------- Imagens via upload dedicado (Sprint 18) ---------------
+   Seções 8-13 da ordem — endpoints PRÓPRIOS de imagem (upload/delete/serve),
+   deliberadamente FORA da coleção `imagens` do PATCH geral acima (que
+   permanece intocada, para quem ainda a usa — ex.: importação futura). Um
+   upload novo nunca passa por `validateQuestionImages`/`isValidLocalAssetRef`
+   (essas continuam existindo só para assets locais legados). */
+
+export const QUESTION_IMAGE_PLACEMENTS = ["enunciado", "alternativa"] as const;
+export type QuestionImagePlacement = (typeof QUESTION_IMAGE_PLACEMENTS)[number];
+
+/** MIME real (sniffado pelo byte de assinatura no serviço, nunca só a
+ *  extensão do arquivo) — seção 11 da ordem: PNG/JPEG/WebP; SVG NUNCA aceito
+ *  em upload novo (risco de XSS via SVG inline — <script>/onload etc.). */
+export const ALLOWED_IMAGE_UPLOAD_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+export type AllowedImageUploadMimeType = (typeof ALLOWED_IMAGE_UPLOAD_MIME_TYPES)[number];
+
+export const MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024; // 8 MB, seção 11 da ordem.
+export const MAX_IMAGES_PER_QUESTION = 15; // seção 11 da ordem.
+
+const MIME_TO_EXTENSION: Record<AllowedImageUploadMimeType, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+};
+
+export function extensionForImageMimeType(mimeType: AllowedImageUploadMimeType): string {
+  return MIME_TO_EXTENSION[mimeType];
+}
+
+export function isAllowedImageUploadMimeType(value: unknown): value is AllowedImageUploadMimeType {
+  return typeof value === "string" && (ALLOWED_IMAGE_UPLOAD_MIME_TYPES as readonly string[]).includes(value);
+}
+
+/** Object key R2 controlada — SEMPRE gerada pelo servidor
+ *  (`questions/<questionId>/<imageId>.<ext>`), NUNCA aceita/derivada de
+ *  entrada do cliente (seção 10 da ordem). Esta função existe para validar
+ *  a própria chave que o servidor construiu antes de usá-la (defesa em
+ *  profundidade — nunca confiar cegamente até numa string que "nós mesmos"
+ *  montamos), e para reconhecer chaves já gravadas ao servir/apagar. Nunca
+ *  aceita esquema (http/https), nunca ".." — mesmo espírito de
+ *  isValidLocalAssetRef, namespace diferente. */
+const R2_ASSET_KEY_RE = /^questions\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\.(png|jpg|webp)$/;
+
+export function isValidR2AssetKey(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 200 && !value.includes("..") && !/^[a-z]+:\/\//i.test(value) && R2_ASSET_KEY_RE.test(value);
+}
+
+export function buildR2AssetKey(questionId: string, imageId: string, mimeType: AllowedImageUploadMimeType): string {
+  return `questions/${questionId}/${imageId}.${extensionForImageMimeType(mimeType)}`;
+}
+
+export interface ImagePlacementInput {
+  placement: QuestionImagePlacement;
+  alternativeLetter: QuestionAlternativeLetter | null;
+}
+
+/** Coerência placement/alternativeLetter no SERVIÇO (primeira linha de
+ *  defesa, erro 400 controlado) — o banco também impõe isto via trigger
+ *  aditivo (migrations/0022_question_images_placement_r2.sql), nunca só
+ *  aqui (seção 8 da ordem: "validar... no serviço E, se tecnicamente
+ *  adequado, com trigger/check aditivo" — as duas camadas, não uma OU
+ *  outra). */
+export function validateImagePlacement(rawPlacement: unknown, rawAlternativeLetter: unknown): FieldValidationResult<ImagePlacementInput> {
+  if (typeof rawPlacement !== "string" || !(QUESTION_IMAGE_PLACEMENTS as readonly string[]).includes(rawPlacement)) {
+    return fail("Posicionamento da imagem inválido — use 'enunciado' ou 'alternativa'.");
+  }
+  const placement = rawPlacement as QuestionImagePlacement;
+  if (placement === "alternativa") {
+    if (typeof rawAlternativeLetter !== "string" || !(QUESTION_ALTERNATIVE_LETTERS as readonly string[]).includes(rawAlternativeLetter)) {
+      return fail("Informe a letra da alternativa (A-E) para uma imagem de alternativa.");
+    }
+    return ok({ placement, alternativeLetter: rawAlternativeLetter as QuestionAlternativeLetter });
+  }
+  if (rawAlternativeLetter !== undefined && rawAlternativeLetter !== null) {
+    return fail("Imagem de enunciado não pode informar letra de alternativa.");
+  }
+  return ok({ placement, alternativeLetter: null });
+}
+
+export function validateImageAltText(value: unknown): FieldValidationResult<string> {
+  return validateNonEmptyText(value, "Texto alternativo da imagem", QUESTION_SHORT_FIELD_MAX_LENGTH);
+}
+
+export function validateImageCaption(value: unknown): FieldValidationResult<string | null> {
+  return validateOptionalText(value, "Legenda da imagem", QUESTION_SHORT_FIELD_MAX_LENGTH);
 }
 
 /* ------------------------------- Tags -------------------------------------- */

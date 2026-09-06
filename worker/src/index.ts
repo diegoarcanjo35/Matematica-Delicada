@@ -9,6 +9,7 @@ import { handleScheduleRequest } from "./routes/schedule";
 import { handlePatternsRequest } from "./routes/patterns";
 import { handleEditorialQuestionsRequest } from "./routes/editorialQuestions";
 import { handleEditorialImportsRequest } from "./routes/editorialImports";
+import { handleQuestionMediaRequest } from "./routes/questionMedia";
 import { handlePlayerRequest } from "./routes/player";
 import { handleErrorNotebookRequest } from "./routes/errorNotebook";
 import { handleStudentMetricsRequest } from "./routes/studentMetrics";
@@ -53,6 +54,9 @@ export default {
 
         const editorialImportsResponse = await handleEditorialImportsRequest(request, env, url);
         if (editorialImportsResponse) return editorialImportsResponse;
+
+        const questionMediaResponse = await handleQuestionMediaRequest(request, env, url);
+        if (questionMediaResponse) return questionMediaResponse;
 
         const playerResponse = await handlePlayerRequest(request, env, url);
         if (playerResponse) return playerResponse;
