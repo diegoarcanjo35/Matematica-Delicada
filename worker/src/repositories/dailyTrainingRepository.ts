@@ -130,6 +130,37 @@ export async function findItemByAttemptId(db: D1Database, attemptId: string): Pr
   return row ?? null;
 }
 
+export interface DailyTrainingItemAttemptOwnerRow {
+  id: string;
+  user_id: string;
+  list_id: string;
+  status: DailyTrainingItemRow["status"];
+  version: number;
+  list_status: DailyTrainingListRow["status"];
+}
+
+/** Hotfix pós-Sprint 20 (reuso seguro de tentativa após abandon) — quem hoje
+ *  é o "dono" (item) de uma `question_attempt_id`, já com o status da LISTA
+ *  dona junto (uma única consulta, nunca N+1) — `idx_daily_training_items_
+ *  attempt_unique` (migrations/0016) garante que existe no máximo UM.
+ *  Sempre escopado por `user_id` no próprio SQL — mesmo que `attemptId`
+ *  venha de uma fonte confiável (sempre é, por construção de
+ *  `planStartOrResumeAttempt`), nunca confia nisso sozinho (seção 9 do
+ *  hotfix: "mesmo que IDs sejam fornecidos maliciosamente"). `null` quando
+ *  nenhum item possui esta tentativa (tentativa "livre"). */
+export async function findAttemptOwnerWithListStatus(db: D1Database, attemptId: string, userId: string): Promise<DailyTrainingItemAttemptOwnerRow | null> {
+  const row = await db
+    .prepare(
+      `SELECT i.id, i.user_id, i.list_id, i.status, i.version, l.status as list_status
+       FROM daily_training_items i
+       JOIN daily_training_lists l ON l.id = i.list_id
+       WHERE i.question_attempt_id = ? AND i.user_id = ?`
+    )
+    .bind(attemptId, userId)
+    .first<DailyTrainingItemAttemptOwnerRow>();
+  return row ?? null;
+}
+
 /** PO v1.1 (seção 4) — `daily_training_events.id` é uma PRIMARY KEY GLOBAL
  *  (nunca escopada por item/lista): reaproveitar um `mutationId` já
  *  consumido por outra mutação REAL — inclusive de OUTRO item/lista deste
@@ -496,4 +527,48 @@ export function buildAbandonListStatement(
        WHERE ${listGuard()} AND status = 'active'`
     )
     .bind(params.mutationId, params.listId, params.userId, params.guardVersion);
+}
+
+/** Hotfix pós-Sprint 20 (reuso seguro de tentativa após abandon) — dentro do
+ *  MESMO batch que abandona a lista (seção 4 do hotfix): libera a posse
+ *  exclusiva de `question_attempt_id` de qualquer item desta lista que
+ *  ainda NÃO está `completed` e cuja tentativa do Player ainda está
+ *  REALMENTE `in_progress` (nunca toca em item `completed` — preserva o
+ *  vínculo histórico; nunca toca numa tentativa já `completed`/`abandoned`
+ *  — não há nada a liberar, ninguém mais vai tentar retomá-la). A tentativa
+ *  em si NUNCA é apagada nem tem seu status alterado aqui — só deixa de
+ *  estar presa a um item de uma lista morta, ficando livre para
+ *  `startItem` reassociar a um item de uma lista FUTURA. Idempotente por
+ *  construção (a condição `question_attempt_id IS NOT NULL` já exclui
+ *  linhas já liberadas). */
+export function buildReleaseAbandonedItemAttemptsStatement(db: D1Database, params: { listId: string; userId: string }): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE daily_training_items
+       SET question_attempt_id = NULL, updated_at = datetime('now')
+       WHERE list_id = ? AND user_id = ? AND status != 'completed' AND question_attempt_id IS NOT NULL
+         AND question_attempt_id IN (SELECT id FROM question_attempts WHERE status = 'in_progress')`
+    )
+    .bind(params.listId, params.userId);
+}
+
+/** Hotfix pós-Sprint 20 — libera a posse de UM item específico já
+ *  identificado como dono legado (lista dele já `abandoned`, seção 5 do
+ *  hotfix), guardado por identidade (id+user+attempt exato) — nunca por
+ *  version, porque este é um efeito colateral de `startItem` num item
+ *  DIFERENTE do que está sendo mutado (que já tem seu próprio guard de
+ *  version). Se este UPDATE afetar 0 linhas (corrida real: outra chamada já
+ *  liberou/reassociou esta mesma tentativa entre a leitura do "dono" e este
+ *  batch), o statement seguinte (associar ao item atual) que tenta o MESMO
+ *  `question_attempt_id` colide no índice único parcial
+ *  `idx_daily_training_items_attempt_unique` e lança — o `db.batch()`
+ *  reverte a transação INTEIRA (seção 6 do hotfix: "a constraint UNIQUE
+ *  permanece como defesa final"), nunca uma transferência parcial. */
+export function buildReleaseSpecificItemAttemptStatement(
+  db: D1Database,
+  params: { itemId: string; userId: string; questionAttemptId: string }
+): D1PreparedStatement {
+  return db
+    .prepare(`UPDATE daily_training_items SET question_attempt_id = NULL, updated_at = datetime('now') WHERE id = ? AND user_id = ? AND question_attempt_id = ?`)
+    .bind(params.itemId, params.userId, params.questionAttemptId);
 }

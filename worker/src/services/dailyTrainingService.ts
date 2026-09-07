@@ -26,10 +26,13 @@ import {
   buildInsertListStatement,
   buildItemEventInsertStatement,
   buildListEventInsertStatement,
+  buildReleaseAbandonedItemAttemptsStatement,
+  buildReleaseSpecificItemAttemptStatement,
   buildSkipItemStatement,
   buildStartItemStatement,
   dailyTrainingEventIdInUse,
   findActiveListForUserDate,
+  findAttemptOwnerWithListStatus,
   findItemForListAndUser,
   findLatestListForUserDate,
   findListForUser,
@@ -392,6 +395,20 @@ function isUniqueActiveListViolation(error: unknown): boolean {
  *  (atômico) já reverteu tudo, decide quem vence de verdade. */
 function isUniqueEventIdViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("daily_training_events");
+}
+
+/** Hotfix pós-Sprint 20 (reuso seguro de tentativa após abandon) — mesmo
+ *  padrão de `isUniqueActiveAttemptViolation`/`isUniqueEventIdViolation`: a
+ *  garantia real de que uma `question_attempt_id` tem no máximo UM item
+ *  dono é `idx_daily_training_items_attempt_unique` (migrations/0016).
+ *  Esta é a causa raiz do bug original que este hotfix corrige — o `catch`
+ *  de `startItem` nunca reconhecia esta constraint específica, deixando o
+ *  D1_ERROR bruto escapar como 500. Detectada aqui para virar sempre um 409
+ *  controlado e retentável, nunca uma exceção crua — cobre tanto a corrida
+ *  real na transferência de posse (seção 6 do hotfix) quanto qualquer outra
+ *  colisão futura na mesma constraint. */
+function isUniqueItemAttemptViolation(error: unknown): boolean {
+  return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("daily_training_items.question_attempt_id");
 }
 
 /** Sprint 20, seção 15 da ordem — "identificar foco sem migration": só
@@ -893,8 +910,34 @@ export async function startItem(
     rereadWinnerAttemptId = async () => (await findActiveAttempt(db, userId, questionId, playerMode))?.id ?? null;
   }
 
+  // Hotfix pós-Sprint 20, seções 5/6/9 — quando a tentativa JÁ existe
+  // (`plan.alreadyActive`), ela pode já estar presa a OUTRO item
+  // (idx_daily_training_items_attempt_unique permite só um dono por vez —
+  // causa raiz do bug original). Detecta ANTES de tentar associar:
+  //   - dono numa lista já ABANDONED e ainda não completed → transferência
+  //     segura, atômica, no MESMO batch (caso C);
+  //   - dono numa lista ATIVA diferente, ou já COMPLETED → nunca rouba,
+  //     fail-closed com conflito controlado (casos D/E). `owner` já vem
+  //     escopado por user_id no próprio SQL (nunca confia só no attemptId).
+  let transferStatement: D1PreparedStatement | null = null;
+  if (plan.alreadyActive) {
+    const owner = await findAttemptOwnerWithListStatus(db, plan.attemptId, userId);
+    if (owner && owner.id !== item.id) {
+      if (owner.list_status === "abandoned" && owner.status !== "completed") {
+        transferStatement = buildReleaseSpecificItemAttemptStatement(db, {
+          itemId: owner.id,
+          userId,
+          questionAttemptId: plan.attemptId,
+        });
+      } else {
+        return { ok: false, conflict: true };
+      }
+    }
+  }
+
   function buildAssociationStatements(attemptId: string) {
     return [
+      ...(transferStatement ? [transferStatement] : []),
       buildStartItemStatement(db, { itemId: item!.id, listId, userId, guardVersion: item!.version, mutationId, questionAttemptId: attemptId }),
       buildItemEventInsertStatement(db, { id: mutationId, listId, itemId: item!.id, userId, eventType: "item_started" }),
     ];
@@ -921,6 +964,15 @@ export async function startItem(
       // tentativa) já reverteu — D1 batches são atômicos — então nunca há
       // escrita parcial da perdedora. Sempre um 409 controlado, nunca a
       // exceção crua da constraint.
+      return { ok: false, conflict: true };
+    }
+    if (isUniqueItemAttemptViolation(error)) {
+      // Hotfix pós-Sprint 20 — corrida real na TRANSFERÊNCIA de posse (ou
+      // qualquer outra colisão na mesma constraint): outra chamada
+      // concorrente já reassociou esta tentativa a um item diferente entre
+      // nossa leitura do "dono" e este batch. O lote inteiro já reverteu
+      // (D1 batches são atômicos) — nunca uma transferência parcial, nunca
+      // dois itens apontando para a mesma tentativa. 409 controlado.
       return { ok: false, conflict: true };
     }
     if (after.version === item!.version) throw error; // falha genuína, não conflito.
@@ -1170,6 +1222,13 @@ export async function abandonList(db: D1Database, userId: string, listId: string
 
   const result = await db.batch([
     buildAbandonListStatement(db, { listId, userId, guardVersion: list.version, mutationId }),
+    // Hotfix pós-Sprint 20, seção 4 — libera, no MESMO batch atômico, a
+    // posse de itens não-completed cuja tentativa do Player segue
+    // in_progress: sem isso, um treino futuro com a MESMA questão nunca
+    // consegue retomar essa tentativa (idx_daily_training_items_attempt_
+    // unique bloqueia dois donos). Nunca toca em item completed nem na
+    // tentativa em si (não apaga, não muda status).
+    buildReleaseAbandonedItemAttemptsStatement(db, { listId, userId }),
     buildListEventInsertStatement(db, { id: mutationId, listId, userId, eventType: "list_abandoned" }),
   ]);
 

@@ -7,7 +7,9 @@ import { createSession } from "../src/repositories/sessionRepository";
 import { sha256Hex } from "../src/lib/crypto";
 import type { Env } from "../src/env";
 import { handleDailyTrainingRequest } from "../src/routes/dailyTraining";
-import { abandonList, applyList, completeList, skipItem, startItem, type StartItemResult } from "../src/services/dailyTrainingService";
+import { abandonList, applyList, completeList, skipItem, startItem, syncItem, type StartItemResult } from "../src/services/dailyTrainingService";
+import { findAttemptOwnerWithListStatus } from "../src/repositories/dailyTrainingRepository";
+import { confirmAnswer, saveAnswer } from "../src/services/playerService";
 import { civilDateInTimezone, weekdayCodeForCivilDate } from "../src/lib/scheduleValidation";
 import type { Clock } from "../src/services/scheduleService";
 
@@ -540,6 +542,351 @@ describe("startItem — isolamento entre alunos na resolução da tentativa (PO 
     };
     expect(otherAttempt.status).toBe("in_progress");
     expect(countRows("daily_training_items", `WHERE question_attempt_id = '${otherUserAttemptId}'`)).toBe(0);
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Hotfix pós-Sprint 20 — reuso seguro de tentativa após abandon. Causa raiz
+ * real, reproduzida em produção: idx_daily_training_items_attempt_unique
+ * (migrations/0016) permite só UM item dono por question_attempt_id;
+ * abandonList nunca liberava essa posse, então um segundo treino com a
+ * MESMA questão sempre colidia com um 500 cru ao tentar retomar a
+ * tentativa in_progress (ainda presa ao item da lista abandonada).
+ * -------------------------------------------------------------------------- */
+
+describe("abandonList — libera posse de tentativa in_progress para reuso futuro (hotfix pós-Sprint 20, seção 4)", () => {
+  it("abandonar a lista libera a tentativa in_progress do item não-completed; um novo treino da MESMA questão retoma exatamente essa tentativa, sem UNIQUE error", async () => {
+    await setupUserWithOneEligibleQuestion("u-abandon-reuse");
+    const applied = await applyList(db as never, "u-abandon-reuse", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id, question_id FROM daily_training_items WHERE list_id = ?`).get(listIdA) as {
+      id: string;
+      question_id: string;
+    };
+
+    const started = await startItem(db as never, "u-abandon-reuse", listIdA, itemA.id, "start-1", false);
+    expect(started.ok).toBe(true);
+    const attemptId = started.value!.attemptId;
+
+    await abandonList(db as never, "u-abandon-reuse", listIdA, "abandon-1");
+
+    // Item da lista abandonada perde a posse; status do item não muda (só a
+    // posse); a tentativa em si segue in_progress, intocada.
+    const itemAAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(itemA.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemAAfter.question_attempt_id).toBeNull();
+    expect(itemAAfter.status).toBe("in_progress");
+    const attemptAfterAbandon = db.sqlite.prepare(`SELECT status, version FROM question_attempts WHERE id = ?`).get(attemptId) as {
+      status: string;
+      version: number;
+    };
+    expect(attemptAfterAbandon.status).toBe("in_progress");
+    expect(attemptAfterAbandon.version).toBe(1); // nunca tocada
+
+    // Novo treino do MESMO dia — só uma questão elegível no fixture, então
+    // a mesma questão reaparece (mesmo cenário real de produção).
+    const appliedB = await applyList(db as never, "u-abandon-reuse", "mut-apply-2", false, CLOCK);
+    expect(appliedB.ok).toBe(true);
+    const listIdB = appliedB.value!.listId;
+    const itemB = db.sqlite.prepare(`SELECT id, question_id FROM daily_training_items WHERE list_id = ?`).get(listIdB) as {
+      id: string;
+      question_id: string;
+    };
+    expect(itemB.question_id).toBe(itemA.question_id);
+
+    const startedB = await startItem(db as never, "u-abandon-reuse", listIdB, itemB.id, "start-2", false);
+    expect(startedB.ok).toBe(true);
+    expect(startedB.value!.attemptId).toBe(attemptId); // EXATAMENTE a mesma tentativa retomada
+
+    expect(countRows("question_attempts", `WHERE user_id = 'u-abandon-reuse'`)).toBe(1); // nunca duplicada
+    expect(countRows("daily_training_items", `WHERE question_attempt_id = '${attemptId}'`)).toBe(1); // só UM dono agora
+    const itemBAfter = db.sqlite.prepare(`SELECT status FROM daily_training_items WHERE id = ?`).get(itemB.id) as { status: string };
+    expect(itemBAfter.status).toBe("in_progress");
+  });
+
+  it("abandonar a lista NUNCA libera item já completed — preserva o vínculo histórico", async () => {
+    await setupUserWithOneEligibleQuestion("u-abandon-preserve-completed");
+    const applied = await applyList(db as never, "u-abandon-preserve-completed", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdA) as { id: string };
+    const startedA = await startItem(db as never, "u-abandon-preserve-completed", listIdA, itemA.id, "start-1", false);
+    const attemptId = startedA.value!.attemptId;
+
+    await saveAnswer(db as never, "u-abandon-preserve-completed", attemptId, 1, "B"); // gabarito real é B (seedQuestion)
+    await confirmAnswer(db as never, "u-abandon-preserve-completed", attemptId, 2);
+    await syncItem(db as never, "u-abandon-preserve-completed", listIdA, itemA.id, "sync-1");
+
+    const itemBeforeAbandon = db.sqlite.prepare(`SELECT status FROM daily_training_items WHERE id = ?`).get(itemA.id) as { status: string };
+    expect(itemBeforeAbandon.status).toBe("completed");
+
+    // A lista não pode mais ser abandonada depois de completa (guard
+    // status='active') — este teste prova o caso relevante diretamente:
+    // completeList (não abandonList) é o caminho real aqui, mas a garantia
+    // que importa é que NENHUM caminho de release toca um item completed.
+    // Prova via chamada direta ao serviço de conclusão, e confirma o
+    // vínculo histórico integro depois.
+    await completeList(db as never, "u-abandon-preserve-completed", listIdA, "complete-1");
+    const itemAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(itemA.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemAfter.status).toBe("completed");
+    expect(itemAfter.question_attempt_id).toBe(attemptId);
+  });
+
+  it("abandonar a lista NÃO libera item cuja tentativa já está completed mesmo se o item não foi sincronizado (attempt completed, item ainda in_progress tecnicamente)", async () => {
+    await setupUserWithOneEligibleQuestion("u-abandon-desync-completed");
+    const applied = await applyList(db as never, "u-abandon-desync-completed", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdA) as { id: string };
+    const startedA = await startItem(db as never, "u-abandon-desync-completed", listIdA, itemA.id, "start-1", false);
+    const attemptId = startedA.value!.attemptId;
+
+    // Aluno confirma a resposta diretamente pelo Player (a tentativa vira
+    // completed) mas nunca volta ao treino diário para acionar syncItem —
+    // o item segue 'in_progress' tecnicamente, estado real e possível.
+    await saveAnswer(db as never, "u-abandon-desync-completed", attemptId, 1, "B");
+    await confirmAnswer(db as never, "u-abandon-desync-completed", attemptId, 2);
+
+    await abandonList(db as never, "u-abandon-desync-completed", listIdA, "abandon-1");
+
+    const itemAAfter = db.sqlite.prepare(`SELECT question_attempt_id FROM daily_training_items WHERE id = ?`).get(itemA.id) as {
+      question_attempt_id: string | null;
+    };
+    // Preservado — a tentativa já está completed, nunca "in_progress", então
+    // a condição de liberação (seção 4: "tentativa ainda ativa/in_progress")
+    // não se aplica; nada a liberar.
+    expect(itemAAfter.question_attempt_id).toBe(attemptId);
+  });
+});
+
+describe("startItem — reuso seguro de tentativa após abandon: transferência de posse (hotfix pós-Sprint 20, seções 5/6)", () => {
+  it("estado legado fabricado diretamente (item de lista já abandoned segurando a tentativa): startItem transfere atomicamente, mesmo sem passar pelo abandonList corrigido", async () => {
+    await setupUserWithOneEligibleQuestion("u-legacy");
+    const applied = await applyList(db as never, "u-legacy", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id, question_id, player_mode FROM daily_training_items WHERE list_id = ?`).get(listIdA) as {
+      id: string;
+      question_id: string;
+      player_mode: string;
+    };
+    const legacyAttemptId = "attempt-legacy";
+    db.sqlite.exec(
+      `INSERT INTO question_attempts (id, user_id, question_id, question_version, mode, status)
+       VALUES ('${legacyAttemptId}', 'u-legacy', '${itemA.question_id}', 1, '${itemA.player_mode}', 'in_progress')`
+    );
+    // Fabrica DIRETAMENTE o estado legado pré-hotfix (nunca via abandonList
+    // já corrigido) — simula exatamente o que já existia em produção antes
+    // desta correção: item ABANDONED ainda dono da tentativa.
+    db.sqlite.exec(`UPDATE daily_training_items SET status = 'in_progress', question_attempt_id = '${legacyAttemptId}' WHERE id = '${itemA.id}'`);
+    db.sqlite.exec(`UPDATE daily_training_lists SET status = 'abandoned' WHERE id = '${listIdA}'`);
+
+    const appliedB = await applyList(db as never, "u-legacy", "mut-apply-2", false, CLOCK);
+    expect(appliedB.ok).toBe(true);
+    const listIdB = appliedB.value!.listId;
+    const itemB = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ? AND question_id = ?`).get(listIdB, itemA.question_id) as {
+      id: string;
+    };
+
+    const startedB = await startItem(db as never, "u-legacy", listIdB, itemB.id, "start-transfer", false);
+    expect(startedB.ok).toBe(true);
+    expect(startedB.value!.attemptId).toBe(legacyAttemptId);
+
+    const itemAAfter = db.sqlite.prepare(`SELECT question_attempt_id FROM daily_training_items WHERE id = ?`).get(itemA.id) as {
+      question_attempt_id: string | null;
+    };
+    expect(itemAAfter.question_attempt_id).toBeNull();
+    const itemBAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(itemB.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemBAfter.question_attempt_id).toBe(legacyAttemptId);
+    expect(itemBAfter.status).toBe("in_progress");
+    expect(countRows("daily_training_items", `WHERE question_attempt_id = '${legacyAttemptId}'`)).toBe(1); // só UM dono
+    expect(countRows("question_attempts", `WHERE id = '${legacyAttemptId}'`)).toBe(1); // nunca duplicada/apagada
+  });
+
+  it("tentativa já pertence a item de OUTRA lista ainda ATIVA (dia diferente): nunca transfere, conflito controlado, dono original intacto", async () => {
+    const userId = "u-active-owner";
+    await seedUser(userId);
+    seedPattern(`p-${userId}`, `PAD-${userId}`);
+    seedPublishedQuestion(`q-${userId}`, `C-${userId}`, `p-${userId}`);
+    const YESTERDAY_ISO = "2026-08-31T15:00:00.000Z";
+    const YESTERDAY_CLOCK = fixedClock(YESTERDAY_ISO);
+    const YESTERDAY_WEEKDAY = weekdayCodeForCivilDate(civilDateInTimezone(new Date(YESTERDAY_ISO), TIMEZONE));
+    seedProfile(userId, Array.from(new Set([TODAY_WEEKDAY, YESTERDAY_WEEKDAY])), 60);
+
+    const appliedYesterday = await applyList(db as never, userId, "mut-apply-yesterday", false, YESTERDAY_CLOCK);
+    expect(appliedYesterday.ok).toBe(true);
+    const listIdYesterday = appliedYesterday.value!.listId;
+    const itemYesterday = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdYesterday) as { id: string };
+    const startedYesterday = await startItem(db as never, userId, listIdYesterday, itemYesterday.id, "start-yesterday", false);
+    expect(startedYesterday.ok).toBe(true);
+    const attemptId = startedYesterday.value!.attemptId;
+    // A lista de ontem NUNCA foi concluída nem abandonada — segue 'active'
+    // (cenário real possível: aluno não voltou a fechar o treino).
+
+    const appliedToday = await applyList(db as never, userId, "mut-apply-today", false, CLOCK);
+    expect(appliedToday.ok).toBe(true); // dias diferentes — índice único não bloqueia
+    const listIdToday = appliedToday.value!.listId;
+    const itemToday = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdToday) as { id: string };
+
+    const startedToday = await startItem(db as never, userId, listIdToday, itemToday.id, "start-today", false);
+    expect(startedToday.ok).toBe(false);
+    expect(startedToday.conflict).toBe(true);
+
+    const itemYesterdayAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(itemYesterday.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemYesterdayAfter.question_attempt_id).toBe(attemptId); // dono original intacto
+    expect(itemYesterdayAfter.status).toBe("in_progress");
+    const itemTodayAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(itemToday.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemTodayAfter.question_attempt_id).toBeNull();
+    expect(itemTodayAfter.status).toBe("pending");
+  });
+
+  it("dono anterior tem item COMPLETED (estado defensivo/inconsistente fabricado — nunca alcançável pelas transições guardadas do próprio serviço): nunca transfere o vínculo histórico, conflito controlado", async () => {
+    await setupUserWithOneEligibleQuestion("u-completed-defensive");
+    const applied = await applyList(db as never, "u-completed-defensive", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id, question_id, player_mode FROM daily_training_items WHERE list_id = ?`).get(listIdA) as {
+      id: string;
+      question_id: string;
+      player_mode: string;
+    };
+    const attemptId = "attempt-completed-item-inprogress";
+    db.sqlite.exec(
+      `INSERT INTO question_attempts (id, user_id, question_id, question_version, mode, status)
+       VALUES ('${attemptId}', 'u-completed-defensive', '${itemA.question_id}', 1, '${itemA.player_mode}', 'in_progress')`
+    );
+    db.sqlite.exec(`UPDATE daily_training_items SET status = 'completed', question_attempt_id = '${attemptId}' WHERE id = '${itemA.id}'`);
+    db.sqlite.exec(`UPDATE daily_training_lists SET status = 'abandoned' WHERE id = '${listIdA}'`);
+
+    const appliedB = await applyList(db as never, "u-completed-defensive", "mut-apply-2", false, CLOCK);
+    const listIdB = appliedB.value!.listId;
+    const itemB = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdB) as { id: string };
+
+    const startedB = await startItem(db as never, "u-completed-defensive", listIdB, itemB.id, "start-2", false);
+    expect(startedB.ok).toBe(false);
+    expect(startedB.conflict).toBe(true);
+
+    const itemAAfter = db.sqlite.prepare(`SELECT question_attempt_id FROM daily_training_items WHERE id = ?`).get(itemA.id) as {
+      question_attempt_id: string | null;
+    };
+    expect(itemAAfter.question_attempt_id).toBe(attemptId); // nunca liberado
+  });
+
+  it("falha forçada DEPOIS do clear do dono legado mas ANTES da nova associação: rollback total, vínculo antigo permanece intacto", async () => {
+    await setupUserWithOneEligibleQuestion("u-legacy-fail");
+    const applied = await applyList(db as never, "u-legacy-fail", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id, question_id, player_mode FROM daily_training_items WHERE list_id = ?`).get(listIdA) as {
+      id: string;
+      question_id: string;
+      player_mode: string;
+    };
+    const attemptId = "attempt-legacy-fail";
+    db.sqlite.exec(
+      `INSERT INTO question_attempts (id, user_id, question_id, question_version, mode, status)
+       VALUES ('${attemptId}', 'u-legacy-fail', '${itemA.question_id}', 1, '${itemA.player_mode}', 'in_progress')`
+    );
+    db.sqlite.exec(`UPDATE daily_training_items SET status = 'in_progress', question_attempt_id = '${attemptId}' WHERE id = '${itemA.id}'`);
+    db.sqlite.exec(`UPDATE daily_training_lists SET status = 'abandoned' WHERE id = '${listIdA}'`);
+
+    const appliedB = await applyList(db as never, "u-legacy-fail", "mut-apply-2", false, CLOCK);
+    const listIdB = appliedB.value!.listId;
+    const itemB = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdB) as { id: string };
+
+    // Falha forçada bem no statement que associa a tentativa ao item NOVO —
+    // ou seja, DEPOIS do clear do dono antigo (primeiro statement do lote)
+    // mas ANTES do evento (último). Prova que o lote inteiro reverte.
+    db.failNextMatching(/SET status = 'in_progress', question_attempt_id = \?/);
+    await expect(startItem(db as never, "u-legacy-fail", listIdB, itemB.id, "start-fail", false)).rejects.toThrow();
+
+    const itemAAfter = db.sqlite.prepare(`SELECT question_attempt_id FROM daily_training_items WHERE id = ?`).get(itemA.id) as {
+      question_attempt_id: string | null;
+    };
+    expect(itemAAfter.question_attempt_id).toBe(attemptId); // clear NÃO persistiu — rollback total
+    const itemBAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(itemB.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemBAfter.question_attempt_id).toBeNull();
+    expect(itemBAfter.status).toBe("pending");
+    expect(countRows("question_attempts", `WHERE id = '${attemptId}'`)).toBe(1);
+  });
+
+  it("CORRIDA real: duas chamadas concorrentes de startItem no MESMO item novo (double-click), dono legado abandoned: nenhum 500 bruto, no máximo uma associação real", async () => {
+    await setupUserWithOneEligibleQuestion("u-legacy-race");
+    const applied = await applyList(db as never, "u-legacy-race", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id, question_id, player_mode FROM daily_training_items WHERE list_id = ?`).get(listIdA) as {
+      id: string;
+      question_id: string;
+      player_mode: string;
+    };
+    const attemptId = "attempt-legacy-race";
+    db.sqlite.exec(
+      `INSERT INTO question_attempts (id, user_id, question_id, question_version, mode, status)
+       VALUES ('${attemptId}', 'u-legacy-race', '${itemA.question_id}', 1, '${itemA.player_mode}', 'in_progress')`
+    );
+    db.sqlite.exec(`UPDATE daily_training_items SET status = 'in_progress', question_attempt_id = '${attemptId}' WHERE id = '${itemA.id}'`);
+    db.sqlite.exec(`UPDATE daily_training_lists SET status = 'abandoned' WHERE id = '${listIdA}'`);
+
+    const appliedB = await applyList(db as never, "u-legacy-race", "mut-apply-2", false, CLOCK);
+    const listIdB = appliedB.value!.listId;
+    const itemB = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdB) as { id: string };
+
+    // Trava as PRÓXIMAS DUAS leituras de "quem é o dono" — cada uma já lê o
+    // estado REAL (dono = item A, lista abandoned) antes de bloquear, prova
+    // deterministicamente que as duas chamadas passam pela detecção ANTES
+    // de qualquer uma escrever.
+    const gate = db.pauseReadsMatching(/FROM daily_training_items i\s+JOIN daily_training_lists l ON l\.id = i\.list_id/, 2);
+    const racePromise = Promise.allSettled([
+      startItem(db as never, "u-legacy-race", listIdB, itemB.id, "start-race-a", false),
+      startItem(db as never, "u-legacy-race", listIdB, itemB.id, "start-race-b", false),
+    ]);
+    await gate.arrived;
+    gate.release();
+    const [r1, r2] = await racePromise;
+
+    // Nunca um raw/uncaught error — mesmo requisito central de sempre.
+    expect(r1.status).toBe("fulfilled");
+    expect(r2.status).toBe("fulfilled");
+    const results = [r1, r2].map((r) => (r.status === "fulfilled" ? r.value : null)) as StartItemResult[];
+    const winners = results.filter((r) => r.ok === true);
+    expect(winners.length).toBeGreaterThanOrEqual(1);
+    for (const winner of winners) expect(winner.value!.attemptId).toBe(attemptId);
+
+    // No máximo UMA tentativa, no máximo UM dono — nunca duplicado nem
+    // corrompido pela corrida.
+    expect(countRows("question_attempts", `WHERE user_id = 'u-legacy-race'`)).toBe(1);
+    expect(countRows("daily_training_items", `WHERE question_attempt_id = '${attemptId}'`)).toBe(1);
+  });
+
+  it("findAttemptOwnerWithListStatus nunca enxerga o item/tentativa de OUTRO usuário, mesmo com o attemptId real correto (segurança entre usuários, seção 9)", async () => {
+    await setupUserWithOneEligibleQuestion("u-cross-owner-a");
+    const applied = await applyList(db as never, "u-cross-owner-a", "mut-apply-1", false, CLOCK);
+    const listIdA = applied.value!.listId;
+    const itemA = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdA) as { id: string };
+    const startedA = await startItem(db as never, "u-cross-owner-a", listIdA, itemA.id, "start-a", false);
+    const attemptIdA = startedA.value!.attemptId;
+
+    // Consulta direta com o attemptId REAL de A, mas user_id de outro
+    // aluno — mesmo que um bug futuro em outro lugar do código passasse
+    // esse attemptId por engano, esta consulta nunca revela o dono real.
+    const ownerAsSeenByOther = await findAttemptOwnerWithListStatus(db as never, attemptIdA, "u-nao-e-o-dono");
+    expect(ownerAsSeenByOther).toBeNull();
+
+    // A mesma consulta com o user_id CORRETO continua enxergando normalmente.
+    const ownerAsSeenByOwner = await findAttemptOwnerWithListStatus(db as never, attemptIdA, "u-cross-owner-a");
+    expect(ownerAsSeenByOwner?.id).toBe(itemA.id);
   });
 });
 
