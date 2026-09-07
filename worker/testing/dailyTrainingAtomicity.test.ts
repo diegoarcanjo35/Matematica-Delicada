@@ -8,7 +8,11 @@ import { sha256Hex } from "../src/lib/crypto";
 import type { Env } from "../src/env";
 import { handleDailyTrainingRequest } from "../src/routes/dailyTraining";
 import { abandonList, applyList, completeList, skipItem, startItem, syncItem, type StartItemResult } from "../src/services/dailyTrainingService";
-import { findAttemptOwnerWithListStatus } from "../src/repositories/dailyTrainingRepository";
+import {
+  buildAbandonListStatement,
+  buildReleaseAbandonedItemAttemptsStatement,
+  findAttemptOwnerWithListStatus,
+} from "../src/repositories/dailyTrainingRepository";
 import { confirmAnswer, saveAnswer } from "../src/services/playerService";
 import { civilDateInTimezone, weekdayCodeForCivilDate } from "../src/lib/scheduleValidation";
 import type { Clock } from "../src/services/scheduleService";
@@ -887,6 +891,217 @@ describe("startItem — reuso seguro de tentativa após abandon: transferência 
     // A mesma consulta com o user_id CORRETO continua enxergando normalmente.
     const ownerAsSeenByOwner = await findAttemptOwnerWithListStatus(db as never, attemptIdA, "u-cross-owner-a");
     expect(ownerAsSeenByOwner?.id).toBe(itemA.id);
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Correção de auditoria (mesmo hotfix pós-Sprint 20) — Gap 1: o release do
+ * abandon rodava no mesmo db.batch() do UPDATE que abandona a lista, mas
+ * sem exigir, no PRÓPRIO SQL, que a lista REALMENTE tivesse ficado
+ * abandoned dentro da mesma transação — um guard de versão stale no
+ * primeiro UPDATE (0 linhas afetadas, sem lançar exceção) ainda deixava o
+ * release rodar contra uma lista que continuava active. Corrigido com um
+ * EXISTS correlato ao estado real de daily_training_lists.status no
+ * momento do commit.
+ * -------------------------------------------------------------------------- */
+
+describe("abandonList — Gap 1 (auditoria): release acoplado ao estado real da lista", () => {
+  it("se o guard de buildAbandonListStatement falha (versão stale) e a lista permanece ACTIVE, o release acoplado NUNCA libera ownership", async () => {
+    await setupUserWithOneEligibleQuestion("u-abandon-guard-fail");
+    const applied = await applyList(db as never, "u-abandon-guard-fail", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    const started = await startItem(db as never, "u-abandon-guard-fail", listId, item.id, "start-1", false);
+    const attemptId = started.value!.attemptId;
+
+    // Guard version PROPOSITALMENTE errado — simula uma corrida em que
+    // outra mutação já avançou a versão da lista antes deste batch (0
+    // linhas afetadas no UPDATE de abandono, sem lançar exceção).
+    await db.batch([
+      buildAbandonListStatement(db as never, { listId, userId: "u-abandon-guard-fail", guardVersion: 999, mutationId: "abandon-stale" }),
+      buildReleaseAbandonedItemAttemptsStatement(db as never, { listId, userId: "u-abandon-guard-fail" }),
+    ]);
+
+    const listAfter = db.sqlite.prepare(`SELECT status FROM daily_training_lists WHERE id = ?`).get(listId) as { status: string };
+    expect(listAfter.status).toBe("active"); // guard falhou, lista NUNCA mudou
+
+    const itemAfter = db.sqlite.prepare(`SELECT question_attempt_id, status FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      question_attempt_id: string | null;
+      status: string;
+    };
+    expect(itemAfter.question_attempt_id).toBe(attemptId); // NUNCA liberado
+    expect(itemAfter.status).toBe("in_progress");
+  });
+
+  it("abandon normal continua liberando ownership corretamente (regressão)", async () => {
+    await setupUserWithOneEligibleQuestion("u-abandon-guard-ok");
+    const applied = await applyList(db as never, "u-abandon-guard-ok", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    const started = await startItem(db as never, "u-abandon-guard-ok", listId, item.id, "start-1", false);
+    const attemptId = started.value!.attemptId;
+
+    const result = await abandonList(db as never, "u-abandon-guard-ok", listId, "abandon-1");
+    expect(result.ok).toBe(true);
+
+    const listAfter = db.sqlite.prepare(`SELECT status FROM daily_training_lists WHERE id = ?`).get(listId) as { status: string };
+    expect(listAfter.status).toBe("abandoned");
+    const itemAfter = db.sqlite.prepare(`SELECT question_attempt_id FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      question_attempt_id: string | null;
+    };
+    expect(itemAfter.question_attempt_id).toBeNull();
+    void attemptId;
+  });
+
+  it("concorrência onde outra chamada JÁ abandonou a lista: release idempotente, sem dano", async () => {
+    await setupUserWithOneEligibleQuestion("u-abandon-idempotent-release");
+    const applied = await applyList(db as never, "u-abandon-idempotent-release", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    await startItem(db as never, "u-abandon-idempotent-release", listId, item.id, "start-1", false);
+
+    await abandonList(db as never, "u-abandon-idempotent-release", listId, "abandon-1"); // abandon real, já libera
+
+    // "Outra chamada" roda o MESMO release isoladamente de novo — idempotente
+    // por construção (EXISTS já vê a lista abandoned, mas não há mais nada
+    // com question_attempt_id NOT NULL para liberar).
+    await db.batch([buildReleaseAbandonedItemAttemptsStatement(db as never, { listId, userId: "u-abandon-idempotent-release" })]);
+
+    const itemAfter = db.sqlite.prepare(`SELECT question_attempt_id FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      question_attempt_id: string | null;
+    };
+    expect(itemAfter.question_attempt_id).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Correção de auditoria (mesmo hotfix pós-Sprint 20) — Gap 2: o mesmo
+ * bloqueio de ownership reaparecia pelo fluxo "pular". Um item in_progress
+ * podia ser pulado sem liberar question_attempt_id; como skipped é
+ * terminal, a lista podia ser concluída com o item ainda "dono" da
+ * tentativa — um treino futuro da MESMA questão nunca conseguia retomá-la
+ * (presa a um item de lista já completed, e startItem corretamente se
+ * recusa a roubar ownership de lista completed). Corrigido em
+ * buildSkipItemStatement: um único UPDATE guardado libera
+ * question_attempt_id somente quando a tentativa subjacente ainda está
+ * REALMENTE in_progress no momento do commit.
+ * -------------------------------------------------------------------------- */
+
+describe("skipItem — Gap 2 (auditoria): pular item in_progress também libera a tentativa ativa", () => {
+  it("pular um item in_progress libera a tentativa in_progress — item skipped, question_attempt_id NULL, tentativa preservada", async () => {
+    await setupUserWithOneEligibleQuestion("u-skip-release");
+    const applied = await applyList(db as never, "u-skip-release", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    const started = await startItem(db as never, "u-skip-release", listId, item.id, "start-1", false);
+    const attemptId = started.value!.attemptId;
+
+    const skipped = await skipItem(db as never, "u-skip-release", listId, item.id, "skip-1", "too_hard");
+    expect(skipped.ok).toBe(true);
+
+    const itemAfter = db.sqlite.prepare(`SELECT status, question_attempt_id FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      status: string;
+      question_attempt_id: string | null;
+    };
+    expect(itemAfter.status).toBe("skipped");
+    expect(itemAfter.question_attempt_id).toBeNull();
+
+    const attemptAfter = db.sqlite.prepare(`SELECT status FROM question_attempts WHERE id = ?`).get(attemptId) as { status: string };
+    expect(attemptAfter.status).toBe("in_progress"); // preservada, nunca tocada
+  });
+
+  it("start → skip → complete list → novo treino da MESMA questão → start retoma o MESMO attemptId, sem UNIQUE error", async () => {
+    await setupUserWithOneEligibleQuestion("u-skip-complete-reuse");
+    const applied = await applyList(db as never, "u-skip-complete-reuse", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    const started = await startItem(db as never, "u-skip-complete-reuse", listId, item.id, "start-1", false);
+    const attemptId = started.value!.attemptId;
+
+    const skipped = await skipItem(db as never, "u-skip-complete-reuse", listId, item.id, "skip-1", "too_hard");
+    expect(skipped.ok).toBe(true);
+    const completed = await completeList(db as never, "u-skip-complete-reuse", listId, "complete-1");
+    expect(completed.ok).toBe(true);
+    expect(countRows("daily_training_lists", `WHERE id = '${listId}' AND status = 'completed'`)).toBe(1);
+
+    const appliedB = await applyList(db as never, "u-skip-complete-reuse", "mut-apply-2", false, CLOCK);
+    expect(appliedB.ok).toBe(true);
+    const listIdB = appliedB.value!.listId;
+    const itemB = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listIdB) as { id: string };
+
+    const startedB = await startItem(db as never, "u-skip-complete-reuse", listIdB, itemB.id, "start-2", false);
+    expect(startedB.ok).toBe(true);
+    expect(startedB.value!.attemptId).toBe(attemptId); // EXATAMENTE a mesma tentativa
+
+    expect(countRows("question_attempts", `WHERE user_id = 'u-skip-complete-reuse'`)).toBe(1); // nunca duplicada
+    expect(countRows("daily_training_items", `WHERE question_attempt_id = '${attemptId}'`)).toBe(1); // só UM dono
+  });
+
+  it("tentativa já completed (item ainda in_progress tecnicamente): pular NUNCA libera o vínculo histórico silenciosamente", async () => {
+    await setupUserWithOneEligibleQuestion("u-skip-preserve-completed");
+    const applied = await applyList(db as never, "u-skip-preserve-completed", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    const started = await startItem(db as never, "u-skip-preserve-completed", listId, item.id, "start-1", false);
+    const attemptId = started.value!.attemptId;
+
+    // Aluno confirma a resposta diretamente pelo Player (tentativa vira
+    // completed) mas o item do treino diário segue 'in_progress'
+    // tecnicamente — nunca sincronizado (mesmo cenário real do abandon).
+    await saveAnswer(db as never, "u-skip-preserve-completed", attemptId, 1, "B"); // gabarito real é B (seedQuestion)
+    await confirmAnswer(db as never, "u-skip-preserve-completed", attemptId, 2);
+
+    const skipped = await skipItem(db as never, "u-skip-preserve-completed", listId, item.id, "skip-1", "too_hard");
+    expect(skipped.ok).toBe(true); // pular ainda funciona normalmente
+
+    const itemAfter = db.sqlite.prepare(`SELECT status, question_attempt_id FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      status: string;
+      question_attempt_id: string | null;
+    };
+    expect(itemAfter.status).toBe("skipped");
+    expect(itemAfter.question_attempt_id).toBe(attemptId); // preservado — nunca liberado silenciosamente
+  });
+
+  it("skip de item pending (sem tentativa) continua normal — nenhuma mudança de comportamento", async () => {
+    await setupUserWithOneEligibleQuestion("u-skip-pending-normal");
+    const applied = await applyList(db as never, "u-skip-pending-normal", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id, status, question_attempt_id FROM daily_training_items WHERE list_id = ?`).get(listId) as {
+      id: string;
+      status: string;
+      question_attempt_id: string | null;
+    };
+    expect(item.status).toBe("pending");
+    expect(item.question_attempt_id).toBeNull();
+
+    const skipped = await skipItem(db as never, "u-skip-pending-normal", listId, item.id, "skip-1", "too_hard");
+    expect(skipped.ok).toBe(true);
+
+    const itemAfter = db.sqlite.prepare(`SELECT status, question_attempt_id FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      status: string;
+      question_attempt_id: string | null;
+    };
+    expect(itemAfter.status).toBe("skipped");
+    expect(itemAfter.question_attempt_id).toBeNull();
+  });
+
+  it("falha forçada no evento de skip reverte TUDO — release e mudança de status não persistem", async () => {
+    await setupUserWithOneEligibleQuestion("u-skip-fail-rollback");
+    const applied = await applyList(db as never, "u-skip-fail-rollback", "mut-apply-1", false, CLOCK);
+    const listId = applied.value!.listId;
+    const item = db.sqlite.prepare(`SELECT id FROM daily_training_items WHERE list_id = ?`).get(listId) as { id: string };
+    const started = await startItem(db as never, "u-skip-fail-rollback", listId, item.id, "start-1", false);
+    const attemptId = started.value!.attemptId;
+
+    db.failNextMatching(/INSERT INTO daily_training_events/);
+    await expect(skipItem(db as never, "u-skip-fail-rollback", listId, item.id, "skip-fail", "too_hard")).rejects.toThrow();
+
+    const itemAfter = db.sqlite.prepare(`SELECT status, question_attempt_id FROM daily_training_items WHERE id = ?`).get(item.id) as {
+      status: string;
+      question_attempt_id: string | null;
+    };
+    expect(itemAfter.status).toBe("in_progress"); // rollback total — nunca virou skipped
+    expect(itemAfter.question_attempt_id).toBe(attemptId); // release não persistiu
   });
 });
 

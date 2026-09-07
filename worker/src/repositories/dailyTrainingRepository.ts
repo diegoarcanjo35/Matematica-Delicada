@@ -479,6 +479,25 @@ export function buildCompleteItemStatement(
     .bind(params.mutationId, params.itemId, params.listId, params.userId, params.guardVersion);
 }
 
+/** Hotfix pós-Sprint 20 (correção de auditoria — Gap 2) — pular um item que
+ *  está `in_progress` e cuja tentativa segue REALMENTE `in_progress` também
+ *  libera `question_attempt_id`, no MESMO UPDATE que move o item para
+ *  `skipped` (um único statement guardado, nunca um SELECT+UPDATE
+ *  separado). Sem isso, `skipped` é terminal — a lista pode ser concluída
+ *  com o item ainda "dono" da tentativa, e um treino futuro com a MESMA
+ *  questão nunca consegue retomá-la (presa a um item de uma lista já
+ *  `completed`; `startItem` corretamente se recusa a roubar ownership de
+ *  lista completed — o mesmo bloqueio do abandon reapareceria por este
+ *  caminho). A condição `question_attempt_id IN (SELECT id FROM
+ *  question_attempts WHERE status = 'in_progress')` é resolvida DENTRO da
+ *  mesma transação, no momento do commit — nunca confia num pre-read
+ *  isolado (TOCTOU): se a tentativa virou `completed` entre uma leitura
+ *  anterior e este batch (corrida real com o Player, ex.: o aluno confirma
+ *  a resposta direto pelo Player enquanto outra aba pula o item), a
+ *  condição é falsa e o vínculo histórico é preservado — nunca liberado
+ *  silenciosamente. Para um item `pending` (nunca teve `question_attempt_id`
+ *  setado), `NULL IN (...)` é `NULL`/falso em SQL — o `CASE` cai no `ELSE`,
+ *  mantendo `NULL`, sem mudança de comportamento. */
 export function buildSkipItemStatement(
   db: D1Database,
   params: { itemId: string; listId: string; userId: string; guardVersion: number; mutationId: string; skipReason: string }
@@ -486,7 +505,11 @@ export function buildSkipItemStatement(
   return db
     .prepare(
       `UPDATE daily_training_items
-       SET status = 'skipped', skip_reason = ?, version = version + 1, last_mutation_id = ?, updated_at = datetime('now')
+       SET status = 'skipped', skip_reason = ?, version = version + 1, last_mutation_id = ?, updated_at = datetime('now'),
+           question_attempt_id = CASE
+             WHEN question_attempt_id IN (SELECT id FROM question_attempts WHERE status = 'in_progress') THEN NULL
+             ELSE question_attempt_id
+           END
        WHERE ${itemGuard()} AND status IN ('pending', 'in_progress')`
     )
     .bind(params.skipReason, params.mutationId, params.itemId, params.listId, params.userId, params.guardVersion);
@@ -540,16 +563,33 @@ export function buildAbandonListStatement(
  *  estar presa a um item de uma lista morta, ficando livre para
  *  `startItem` reassociar a um item de uma lista FUTURA. Idempotente por
  *  construção (a condição `question_attempt_id IS NOT NULL` já exclui
- *  linhas já liberadas). */
+ *  linhas já liberadas).
+ *
+ *  Correção de auditoria (mesmo hotfix) — o próprio SQL agora EXIGE, via
+ *  `EXISTS`, que `daily_training_lists.status` já seja `abandoned` NO
+ *  MOMENTO em que este UPDATE roda dentro da MESMA transação — nunca
+ *  confia só no guard do statement anterior (`buildAbandonListStatement`)
+ *  ter afetado 1 linha, checado apenas DEPOIS que o `db.batch()` inteiro já
+ *  commitou. Se o guard de versão desse statement anterior falhar (0
+ *  linhas, lista continua `active`), este `EXISTS` também é falso — o
+ *  release afeta 0 linhas, nunca libera ownership de uma lista que
+ *  permanece ativa. Se outra chamada concorrente já abandonou a MESMA
+ *  lista antes desta transação começar, o `EXISTS` já enxerga isso e o
+ *  release aqui é idempotente (0 linhas adicionais, pois a outra chamada
+ *  já liberou). */
 export function buildReleaseAbandonedItemAttemptsStatement(db: D1Database, params: { listId: string; userId: string }): D1PreparedStatement {
   return db
     .prepare(
       `UPDATE daily_training_items
        SET question_attempt_id = NULL, updated_at = datetime('now')
        WHERE list_id = ? AND user_id = ? AND status != 'completed' AND question_attempt_id IS NOT NULL
-         AND question_attempt_id IN (SELECT id FROM question_attempts WHERE status = 'in_progress')`
+         AND question_attempt_id IN (SELECT id FROM question_attempts WHERE status = 'in_progress')
+         AND EXISTS (
+           SELECT 1 FROM daily_training_lists l
+           WHERE l.id = ? AND l.user_id = ? AND l.status = 'abandoned'
+         )`
     )
-    .bind(params.listId, params.userId);
+    .bind(params.listId, params.userId, params.listId, params.userId);
 }
 
 /** Hotfix pós-Sprint 20 — libera a posse de UM item específico já
