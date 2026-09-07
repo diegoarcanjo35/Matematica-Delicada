@@ -32,7 +32,8 @@ import {
   buildR2AssetKey,
   type AllowedImageUploadMimeType,
 } from "../lib/questionsValidation";
-import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE } from "../lib/importBatchLimits";
+import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE, IMPORT_BATCH_MAX_D1_STATEMENTS, plannedD1StatementCountForRows } from "../lib/importBatchLimits";
+import { buildImportValidationContext, computeRowFingerprint, loadApplyRevalidationSets } from "../lib/importValidationContext";
 import { recordAuditEvent } from "../repositories/auditRepository";
 import { insertImportBatch, findImportBatch, buildInsertImportItemStatement, buildMarkBatchAppliedStatement, listImportItems } from "../repositories/questionImportRepository";
 import {
@@ -43,8 +44,6 @@ import {
   buildInsertTagStatement,
   buildStandaloneInsertImageStatement,
   buildUpsertDnaStatement,
-  findQuestionByCode,
-  findQuestionsByFingerprint,
 } from "../repositories/questionRepository";
 import type { ParsedImportRow } from "./questionImportService";
 
@@ -59,51 +58,23 @@ const ALLOWED_ROOT_ENTRIES = new Set(["questoes.csv", "manifest.json"]);
 /* Sprint 19.1, correção 4 da ordem — teto de QUANTIDADE de statements no
  * `db.batch()` do apply, calculado ANTES de qualquer upload R2.
  *
- * O que sabemos com segurança, consultando a documentação oficial de
- * limites do D1 (developers.cloudflare.com/d1/platform/limits/) nesta
- * correção: a Cloudflare NÃO documenta um teto explícito de "N statements
- * por chamada `batch()`" — só limites POR STATEMENT individual (100.000
- * bytes de SQL, 100 parâmetros vinculados, 2.000.000 bytes por linha/
- * string) e um timeout de 30s para o batch INTEIRO. Não foi possível
- * determinar de forma seggura e READ-ONLY um teto específico do
- * plano/conta atual: a sessão do `wrangler` disponível nesta correção está
- * autenticada numa conta DIFERENTE da usada para o deploy da Sprint 18
- * (confirmado via `wrangler d1 info` — aviso de "account_id não bate com
- * nenhuma conta autenticada"), então reconsultar o plano real do projeto
- * exigiria trocar de sessão/conta, fora do escopo desta correção (que
- * também proíbe qualquer acesso remoto). Optamos pelo caminho seguro que a
- * própria ordem prevê para este caso: reportar a limitação e adotar o
- * teto mais conservador.
- *
- * A própria Cloudflare recomenda, como boa prática (não como limite
- * rígido), processar migrações em lote "cerca de 1000 linhas por vez".
- * Adotamos a METADE disso — 500 — como margem de segurança adicional,
- * porque nosso batch não é uma sequência uniforme de INSERTs simples: боa
- * parte dos statements (o INSERT de cada questão, os DELETEs implícitos
- * de undo, etc.) inclui subqueries de guarda (`EXISTS`) mais caras em CPU
- * por statement do que um INSERT puro — o mesmo NÚMERO de statements pode
- * custar mais tempo de execução real neste pipeline do que numa migração
- * de linhas simples. */
-export const IMPORT_BATCH_MAX_D1_STATEMENTS = 500;
+ * Sprint 19.2, seção 9/13 da ordem — a CONSTANTE e a FÓRMULA em si foram
+ * generalizadas e movidas para worker/src/lib/importBatchLimits.ts (única
+ * fonte, compartilhada por ZIP/CSV V2/CSV V1 — ver o comentário extenso lá
+ * sobre a distinção entre o teto documentado de "queries por invocation"
+ * da Cloudflare e este teto, que é uma regra CONSERVADORA DA APLICAÇÃO,
+ * nunca um limite oficial). Reexportado aqui com os MESMOS nomes por
+ * compatibilidade com os testes/chamadores já existentes desta sprint. */
+export { IMPORT_BATCH_MAX_D1_STATEMENTS };
 
 /** Conta EXATAMENTE o que `applyPackage` vai enviar a `db.batch()` — 1
  *  statement de marcação do lote + por questão (question, dna,
  *  alternativas, padrões, tags, history, item de importação) + 1 por
  *  imagem. Nunca uma estimativa — o mesmo cálculo usado no preview (para
- *  dar o erro cedo) e no apply (como gate final antes do R2). */
+ *  dar o erro cedo) e no apply (como gate final antes do R2). Fina camada
+ *  sobre `plannedD1StatementCountForRows` (compartilhada com o CSV). */
 export function plannedD1StatementCount(payload: PackageBatchPayload): number {
-  let count = 1; // buildMarkBatchAppliedStatement
-  for (const row of payload.rows) {
-    count += 1; // question
-    count += 1; // dna
-    count += row.alternativas.length;
-    count += row.padroes.length;
-    count += row.tags.length;
-    count += 1; // history
-    count += 1; // import item
-  }
-  count += payload.images.length; // question_images
-  return count;
+  return plannedD1StatementCountForRows(payload.rows, payload.images.length);
 }
 
 export interface PackageError {
@@ -215,6 +186,20 @@ export async function previewPackage(db: D1Database, actorUserId: string, zipByt
     return { ok: false, errors: [{ file: "questoes.csv", message: `Pacote excede o limite de ${PACKAGE_MAX_QUESTIONS_PER_PACKAGE} questões.` }] };
   }
 
+  // Sprint 19.2, seção 7 da ordem — MESMA estratégia em lote do CSV V2:
+  // pré-passo puro (código+fingerprint de cada linha, sem D1) para montar
+  // o contexto de validação em UMA leitura de catálogo + poucas consultas
+  // chunked, nunca uma consulta por linha do questoes.csv.
+  const codesToCheck: string[] = [];
+  const fingerprintsToCheck: string[] = [];
+  for (let i = 0; i < dataRows.length; i++) {
+    if (dataRows[i].length !== headerRow.length) continue;
+    const { code: rowCode, fingerprint: rowFingerprint } = await computeRowFingerprint(dataRows[i], headerIndex);
+    if (rowCode) codesToCheck.push(rowCode);
+    if (rowFingerprint) fingerprintsToCheck.push(rowFingerprint);
+  }
+  const ctx = await buildImportValidationContext(db, codesToCheck, fingerprintsToCheck);
+
   const rowErrors: PackageError[] = [];
   const validRows: ParsedImportRow[] = [];
   const seenCodesInFile = new Map<string, number>();
@@ -225,7 +210,7 @@ export async function previewPackage(db: D1Database, actorUserId: string, zipByt
       rowErrors.push({ row: rowNumber, message: `Número de colunas (${dataRows[i].length}) difere do cabeçalho (${headerRow.length}).` });
       continue;
     }
-    const { parsed, errors } = await parseAndValidateRowV2(db, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile);
+    const { parsed, errors } = await parseAndValidateRowV2(ctx, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile);
     if (errors.length > 0) rowErrors.push(...errors.map((e) => ({ row: e.row, field: e.field, message: e.message })));
     else if (parsed) validRows.push(parsed);
   }
@@ -346,22 +331,17 @@ export async function previewPackage(db: D1Database, actorUserId: string, zipByt
     };
   });
 
-  // Nomes de padrão principal para a prévia visual (seção 11) — uma
-  // consulta em lote, nunca N+1.
-  const principalPatternIds = rowsWithId.map((r) => r.padroes.find((p) => p.role === "principal")?.patternId).filter((id): id is string => !!id);
-  const patternNames = new Map<string, string>();
-  if (principalPatternIds.length > 0) {
-    const placeholders = principalPatternIds.map(() => "?").join(", ");
-    const rows = await db.prepare(`SELECT id, name FROM patterns WHERE id IN (${placeholders})`).bind(...principalPatternIds).all<{ id: string; name: string }>();
-    for (const r of rows.results ?? []) patternNames.set(r.id, r.name);
-  }
+  // Nomes de padrão principal para a prévia visual (seção 11) — resolvidos
+  // EM MEMÓRIA a partir do catálogo já carregado (`ctx.patterns`, Sprint
+  // 19.2): nenhuma consulta adicional, nem em lote — o catálogo inteiro já
+  // está em memória desde `buildImportValidationContext` acima.
 
   const questionsSummary: PackagePreviewQuestionSummary[] = rowsWithId.map((row) => {
     const principalId = row.padroes.find((p) => p.role === "principal")?.patternId ?? null;
     return {
       code: row.code,
       enunciadoPreview: row.enunciado.slice(0, 160),
-      patternName: principalId ? (patternNames.get(principalId) ?? null) : null,
+      patternName: principalId ? (ctx.patterns.getById(principalId)?.name ?? null) : null,
       images: images
         .filter((img) => img.questionCode === row.code)
         .map((img) => ({ imageId: img.imageId, path: img.path, placement: img.placement, alternativeLetter: img.alternativeLetter, altText: img.altText })),
@@ -518,18 +498,24 @@ export async function applyPackage(db: D1Database, bucket: R2Bucket, actorUserId
   if (resentFingerprint !== batch.input_fingerprint) return { ok: false, fingerprintMismatch: true };
 
   // -------- Revalidação completa contra o estado ATUAL do banco (seção 12) --------
+  // Sprint 19.2, seção 8 da ordem — três consultas em lote (chunked: todos
+  // os codes, todos os fingerprints, todos os patternIds do lote INTEIRO),
+  // nunca uma consulta por linha. A ordem de checagem por linha (código →
+  // fingerprint → padrões, na ordem de `payload.rows`) é preservada — só
+  // contra Sets já carregados, não contra o D1 a cada iteração.
+  const revalidation = await loadApplyRevalidationSets(db, {
+    codes: payload.rows.map((r) => r.code),
+    fingerprints: payload.rows.map((r) => r.fingerprint),
+    patternIds: payload.rows.flatMap((r) => r.padroes.map((p) => p.patternId)),
+  });
   for (const row of payload.rows) {
-    const existingCode = await findQuestionByCode(db, row.code);
-    if (existingCode) return { ok: false, conflict: true, conflictReason: `Código "${row.code}" já existe.` };
-    const existingFingerprint = await findQuestionsByFingerprint(db, row.fingerprint);
-    if (existingFingerprint.length > 0) return { ok: false, conflict: true, conflictReason: `Enunciado de "${row.code}" já existe (fingerprint).` };
+    if (revalidation.existingCodes.has(row.code)) return { ok: false, conflict: true, conflictReason: `Código "${row.code}" já existe.` };
+    if (revalidation.existingFingerprints.has(row.fingerprint)) {
+      return { ok: false, conflict: true, conflictReason: `Enunciado de "${row.code}" já existe (fingerprint).` };
+    }
     const patternIds = row.padroes.map((p) => p.patternId);
-    if (patternIds.length > 0) {
-      const placeholders = patternIds.map(() => "?").join(", ");
-      const found = await db.prepare(`SELECT COUNT(*) as total FROM patterns WHERE id IN (${placeholders})`).bind(...patternIds).first<{ total: number }>();
-      if ((found?.total ?? 0) !== patternIds.length) {
-        return { ok: false, conflict: true, conflictReason: `Um ou mais padrões de "${row.code}" não existem mais.` };
-      }
+    if (patternIds.some((id) => !revalidation.existingPatternIds.has(id))) {
+      return { ok: false, conflict: true, conflictReason: `Um ou mais padrões de "${row.code}" não existem mais.` };
     }
   }
 

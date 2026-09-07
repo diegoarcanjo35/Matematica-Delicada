@@ -1289,6 +1289,7 @@ class FakeD1PreparedStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    this.fakeDb.recordD1Call();
     const stmt = this.fakeDb.sqlite.prepare(this.sql);
     const row = stmt.get(...(this.params as never[]));
     // PO v1.2 — se houver uma "porta" (pauseReadsMatching) ativa para este
@@ -1300,6 +1301,17 @@ class FakeD1PreparedStatement {
   }
 
   async run(): Promise<FakeD1RunResult> {
+    this.fakeDb.recordD1Call();
+    return this.runWithoutCounting();
+  }
+
+  /** Sprint 19.2, seção 10 da ordem — usado SÓ pelo laço interno de
+   *  `FakeD1Database.batch()`: um `db.batch()` inteiro conta como UMA
+   *  chamada D1 (`recordD1Call()` já é feito uma vez em `batch()`),
+   *  exatamente como o D1 real fatura/limita `db.batch()` como uma única
+   *  invocação carregando vários statements — nunca um round-trip por
+   *  statement interno. Nunca chamado fora deste arquivo de teste. */
+  async runWithoutCounting(): Promise<FakeD1RunResult> {
     this.fakeDb.maybeThrowForSql(this.sql);
     const stmt = this.fakeDb.sqlite.prepare(this.sql);
     const info = stmt.run(...(this.params as never[]));
@@ -1311,6 +1323,7 @@ class FakeD1PreparedStatement {
   }
 
   async all<T>(): Promise<{ success: true; results: T[]; meta: { changes: number } }> {
+    this.fakeDb.recordD1Call();
     const stmt = this.fakeDb.sqlite.prepare(this.sql);
     const rows = stmt.all(...(this.params as never[]));
     return { success: true, results: rows as T[], meta: { changes: 0 } };
@@ -1333,10 +1346,32 @@ export class FakeD1Database {
   // comportamento de single-writer do SQLite/D1 e evita que duas transações
   // "fake" se interleavem por causa dos microtasks do async/await do JS.
   private writeLock: Promise<unknown> = Promise.resolve();
+  // Sprint 19.2, seção 10 da ordem — conta EXECUÇÕES reais ao D1
+  // (first/all/run/batch — `prepare()` sozinho nunca conta, só monta o
+  // statement). Usado pelos testes para provar ausência de N+1: um
+  // `db.batch()` inteiro conta como UMA chamada, nunca uma por statement
+  // interno (ver `FakeD1PreparedStatement.runWithoutCounting`) — o mesmo
+  // jeito que o D1 real fatura/limita "queries per Worker invocation".
+  private d1CallCount = 0;
 
   constructor() {
     this.sqlite = new DatabaseSync(":memory:");
     this.sqlite.exec(SCHEMA);
+  }
+
+  /** Nunca chamado por código de produção — só pelos testes, para contar
+   *  round-trips D1 (ver worker/src/lib/importValidationContext.ts e a
+   *  seção 10 da ordem Sprint 19.2). */
+  recordD1Call(): void {
+    this.d1CallCount++;
+  }
+
+  getD1CallCount(): number {
+    return this.d1CallCount;
+  }
+
+  resetD1CallCount(): void {
+    this.d1CallCount = 0;
   }
 
   /** Injeta uma falha forçada na PRÓXIMA statement cujo SQL bater com o
@@ -1402,12 +1437,19 @@ export class FakeD1Database {
   }
 
   batch(statements: FakeD1PreparedStatement[]): Promise<FakeD1RunResult[]> {
+    // Sprint 19.2, seção 10 — `db.batch()` conta como UMA chamada D1,
+    // sempre, independente de quantos statements carrega (nunca uma por
+    // statement interno — ver `runWithoutCounting` abaixo). Contada aqui,
+    // na invocação síncrona, não dentro de `run` (que só executa quando o
+    // `writeLock` resolve) — reflete o INTENTO da chamada, igual a
+    // first()/all()/run().
+    this.recordD1Call();
     const run = async (): Promise<FakeD1RunResult[]> => {
       this.sqlite.exec("BEGIN");
       try {
         const results: FakeD1RunResult[] = [];
         for (const statement of statements) {
-          results.push(await statement.run());
+          results.push(await statement.runWithoutCounting());
         }
         this.sqlite.exec("COMMIT");
         return results;

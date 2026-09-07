@@ -818,7 +818,12 @@ describe("applyPackage — testes adversariais de corrida R2↔D1 (correção 19
     const zip = buildPackage({ manifest: standardImageManifest(), images: standardImages() });
     const batchId = await previewAndGetBatchId(zip);
 
-    const gate = db.pauseReadsMatching(/SELECT \* FROM questions WHERE code = \?/, 2);
+    // Sprint 19.2 — o parser de linha não faz mais `SELECT ... WHERE code =
+    // ?` por linha (N+1 eliminado); o novo ponto de sincronização é a
+    // ÚNICA leitura que ambas as tentativas concorrentes fazem bem no
+    // início de `applyPackage`, antes de qualquer revalidação/escrita:
+    // `findImportBatch`.
+    const gate = db.pauseReadsMatching(/SELECT \* FROM question_import_batches WHERE id = \?/, 2);
     const callA = applyPackage(db as never, bucket as never, "editor1", batchId, zip);
     const callB = applyPackage(db as never, bucket as never, "editor1", batchId, zip);
     await gate.arrived;
@@ -848,7 +853,12 @@ describe("applyPackage — testes adversariais de corrida R2↔D1 (correção 19
     const zip = buildPackage({ manifest: standardImageManifest(), images: standardImages() });
     const batchId = await previewAndGetBatchId(zip);
 
-    const gate = db.pauseReadsMatching(/SELECT \* FROM questions WHERE code = \?/, 2);
+    // Sprint 19.2 — o parser de linha não faz mais `SELECT ... WHERE code =
+    // ?` por linha (N+1 eliminado); o novo ponto de sincronização é a
+    // ÚNICA leitura que ambas as tentativas concorrentes fazem bem no
+    // início de `applyPackage`, antes de qualquer revalidação/escrita:
+    // `findImportBatch`.
+    const gate = db.pauseReadsMatching(/SELECT \* FROM question_import_batches WHERE id = \?/, 2);
     // Atinge a PRIMEIRA transação a chegar em `db.batch()` (== a primeira
     // chamada a terminar o upload R2 e tentar aplicar) — consumida uma
     // única vez, então só "a tentativa A" falha; a que roda depois (B, já
@@ -921,6 +931,73 @@ describe("applyPackage — testes adversariais de corrida R2↔D1 (correção 19
     const retry = await applyPackage(db as never, bucket as never, "editor1", batchId, zip);
     expect(retry.ok).toBe(true);
     expect(bucket.size()).toBe(2); // reutilizados, nenhum objeto novo.
+  });
+});
+
+/* Sprint 19.2 da ordem, seção 10 (itens B/C) — prova de ausência de N+1
+   também no Pacote ZIP: `previewPackage` precisa usar EXATAMENTE a mesma
+   estratégia em lote do CSV V2 (seção 7 da ordem), nunca uma implementação
+   paralela que volte a consultar D1 por linha; `applyPackage` revalida
+   código/fingerprint/padrões em lote (seção 8), não por linha. */
+describe("previewPackage/applyPackage — ausência de N+1 (correção 19.2, seção 10, itens B/C)", () => {
+  it("item B — preview de ~100 questões usa poucas chamadas D1, mesmo quando o volume aciona o orçamento de statements (correção 9)", async () => {
+    // 99 linhas de dados — o teto de PACKAGE_MAX_QUESTIONS_PER_PACKAGE=100
+    // aplicado por `parseCsv` conta cabeçalho+dados juntos (100 dados + 1
+    // cabeçalho excederia o próprio limite de LINHAS do CSV, uma checagem
+    // estrutural anterior e não relacionada a esta correção).
+    const rows = Array.from({ length: 99 }, (_, i) =>
+      csvRow({ codigo: `ZIP-BULK-${i}`, enunciado: `Enunciado de teste de pacote ZIP suficientemente longo, variante ${i}.` })
+    );
+    const zip = buildPackage({ csvRows: rows, manifest: [] });
+    db.resetD1CallCount();
+    const result = await previewPackage(db as never, "editor1", zip);
+    // Mesma matemática do CSV V2 (99 linhas × no mínimo 10 statements)
+    // ultrapassa o teto de 500 (correção 9) — o preview É rejeitado por
+    // esse motivo (coberto pelos testes de orçamento dedicados). Este
+    // teste prova algo ortogonal: mesmo parseando/validando as 99 linhas
+    // inteiras (parser V2 completo, resolução de padrão, código,
+    // fingerprint) ANTES desse bloqueio, o preview do ZIP nunca consulta
+    // D1 por linha — a MESMA estratégia em lote do CSV V2, nunca uma
+    // implementação paralela.
+    expect(result.ok).toBe(false);
+    expect(result.errors!.some((e) => e.message.includes("operações no banco de dados"))).toBe(true);
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15);
+  });
+
+  it("caminho feliz: preview de um pacote grande DENTRO do orçamento de statements também usa poucas chamadas D1", async () => {
+    // 40 questões × 10 statements (sem tags/padrões secundários) = 400,
+    // dentro do teto de 500; sem imagens, para isolar a prova de N+1 do
+    // pipeline de imagem (já coberto noutros testes desta suíte).
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      csvRow({ codigo: `ZIP-OK-${i}`, enunciado: `Enunciado de teste de pacote ZIP suficientemente longo, ok ${i}.`, tags: "", padroes_secundarios: "" })
+    );
+    const zip = buildPackage({ csvRows: rows, manifest: [] });
+    db.resetD1CallCount();
+    const result = await previewPackage(db as never, "editor1", zip);
+    expect(result.ok).toBe(true);
+    expect(result.validRowCount).toBe(40);
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15);
+  });
+
+  it("item C — apply de um lote grande DENTRO do orçamento de statements: revalidação pré-R2 em lote, total de chamadas D1 abaixo de 50", async () => {
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      csvRow({ codigo: `ZIP-APPLY-${i}`, enunciado: `Enunciado de teste de pacote ZIP suficientemente longo, apply ${i}.`, tags: "", padroes_secundarios: "" })
+    );
+    const zip = buildPackage({ csvRows: rows, manifest: [] });
+    const batchId = await previewAndGetBatchId(zip);
+
+    db.resetD1CallCount();
+    const result = await applyPackage(db as never, bucket as never, "editor1", batchId, zip);
+    expect(result.ok).toBe(true);
+    expect(result.appliedCount).toBe(40);
+    // findImportBatch(1) + revalidação em lote (codes+fingerprints+patternIds,
+    // 1 chunk cada = 3) + db.batch()(1, independente de quantos statements
+    // carrega) + auditoria(1) — bem abaixo de 50, ordem de grandeza menor
+    // que 15.
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15);
   });
 });
 

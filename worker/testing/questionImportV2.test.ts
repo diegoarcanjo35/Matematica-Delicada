@@ -151,3 +151,58 @@ describe("Sprint 19 — CSV V2 (itens 1-6/9 da política de testes)", () => {
     expect(preview.errorCount).toBe(0);
   });
 });
+
+/* Sprint 19.2 da ordem, seção 10 (item A) — prova de ausência de N+1: um
+   preview de 100 questões precisa ficar CONFORTAVELMENTE abaixo do teto de
+   "queries per Worker invocation" (50 no plano Free), idealmente uma
+   ordem de grandeza menor que 15. Antes desta correção, cada linha fazia
+   1-3 consultas D1 (padrão principal, código, fingerprint) — 100 linhas
+   geravam claramente mais de 100 round-trips. */
+describe("previewImport (CSV V2) — ausência de N+1 (correção 19.2, seção 10, item A)", () => {
+  it("preview de 100 questões usa poucas chamadas D1 — mesmo quando o próprio volume aciona o orçamento de statements (correção 9)", async () => {
+    const rows = Array.from({ length: 100 }, (_, i) =>
+      buildV2Row({
+        codigo: `V2-BULK-${i}`,
+        enunciado: `Enunciado de teste V2 suficientemente longo para passar na validação, variante ${i}.`,
+      })
+    );
+    const csv = toCsvV2(rows);
+    db.resetD1CallCount();
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    // 100 linhas × no mínimo 10 statements cada (5 alternativas + question +
+    // dna + padrão principal + history + item) ultrapassam o teto de 500
+    // statements por lote (correção 9, seção 9 da ordem 19.2) — o preview É
+    // REJEITADO por esse motivo, o que é CORRETO e coberto pelos testes de
+    // orçamento dedicados abaixo. O que ESTE teste prova é ortogonal: mesmo
+    // parseando/validando as 100 linhas inteiras ANTES desse bloqueio (todas
+    // as 100 passam pelo parser V2 completo, incluindo resolução de padrão e
+    // checagem de código/fingerprint), o pipeline nunca faz uma consulta D1
+    // por linha — bem abaixo do teto de "queries per Worker invocation".
+    expect(preview.ok).toBe(false);
+    expect(preview.reason).toBe("too_many_statements");
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15); // ideal da ordem — ordem de grandeza menor que 15.
+  });
+
+  it("caminho feliz: preview de um lote grande DENTRO do orçamento de statements também usa poucas chamadas D1", async () => {
+    // 40 linhas × 10 statements = 400, dentro do teto de 500.
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      buildV2Row({
+        codigo: `V2-OK-${i}`,
+        enunciado: `Enunciado de teste V2 suficientemente longo para passar na validação, ok ${i}.`,
+        tags: "",
+        padroes_secundarios: "",
+      })
+    );
+    const csv = toCsvV2(rows);
+    db.resetD1CallCount();
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    expect(preview.ok).toBe(true);
+    expect(preview.errorCount).toBe(0);
+    expect(preview.validRowCount).toBe(40);
+    // 1 (catálogo de padrões) + poucos chunks de códigos + poucos chunks de
+    // fingerprints + 1 (insertImportBatch) + 1 (auditoria) — nunca perto de 40.
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15);
+  });
+});

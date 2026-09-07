@@ -170,6 +170,9 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       if (result.notFound) return Errors.notFound();
       if (result.expired) return json({ error: { code: "preview_expired", message: "A prévia expirou. Gere uma nova." } }, { status: 409 });
       if (result.conflict) return json({ error: { code: "import_conflict", message: "Um ou mais itens já existem no banco. Gere uma nova prévia." } }, { status: 409 });
+      if (result.tooManyStatements) {
+        return json({ error: { code: "import_too_many_statements", message: result.message ?? "Arquivo grande demais para aplicar de uma vez." } }, { status: 413 });
+      }
       return json({ error: { code: "import_invalid", message: "Prévia inválida ou com erros pendentes." } }, { status: 400 });
     }
     return json({ ok: true, appliedCount: result.appliedCount ?? 0, alreadyApplied: result.alreadyApplied ?? false, questionIds: result.questionIds ?? [] });

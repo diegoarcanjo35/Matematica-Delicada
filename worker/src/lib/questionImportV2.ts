@@ -19,7 +19,7 @@ import {
   type QuestionPatternInput,
 } from "./questionsValidation";
 import { computeQuestionFingerprint } from "./fingerprint";
-import { findQuestionByCode, findQuestionsByFingerprint } from "../repositories/questionRepository";
+import type { ImportValidationContext } from "./importValidationContext";
 import type { ImportRowError, ParsedImportRow } from "../services/questionImportService";
 
 export const IMPORT_CSV_V2_HEADERS = [
@@ -68,33 +68,27 @@ function splitMultivalue(value: string): string[] {
     .filter((v) => v.length > 0);
 }
 
-interface PatternLookupRow {
-  id: string;
-  name: string;
-}
-
-/** Resolve um padrão por NOME (exato, depois case-insensitive/trim) ou por
- *  CÓDIGO (compatibilidade técnica, seção 3 da ordem) — sempre consultando
- *  o banco dinamicamente, nunca uma lista hardcoded. `null` quando não
- *  encontrado (o chamador decide a mensagem de erro — "importação nunca
- *  cria padrão"). */
-export async function resolvePatternByNameOrCode(db: D1Database, raw: string): Promise<PatternLookupRow | null> {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const exact = await db.prepare("SELECT id, name FROM patterns WHERE name = ? OR code = ?").bind(trimmed, trimmed).first<PatternLookupRow>();
-  if (exact) return exact;
-  const caseInsensitive = await db
-    .prepare("SELECT id, name FROM patterns WHERE name = ? COLLATE NOCASE OR code = ? COLLATE NOCASE")
-    .bind(trimmed, trimmed)
-    .first<PatternLookupRow>();
-  return caseInsensitive ?? null;
+/** Sprint 19.2, seção 3 da ordem — resolução por NOME (exato, depois
+ *  case-insensitive/trim) ou por CÓDIGO, EM MEMÓRIA a partir do
+ *  `ImportValidationContext.patterns` já carregado (nunca uma consulta D1
+ *  por linha — ver worker/src/lib/importValidationContext.ts). `null`
+ *  quando não encontrado (o chamador decide a mensagem — "importação
+ *  nunca cria padrão"); `ambiguous: true` quando a chave colide entre dois
+ *  padrões distintos — nunca escolhido arbitrariamente. */
+function resolvePatternByNameOrCode(ctx: ImportValidationContext, raw: string): { pattern: { id: string; name: string } | null; ambiguous: boolean } {
+  const { pattern, ambiguous } = ctx.patterns.resolveByNameOrCode(raw);
+  return { pattern, ambiguous };
 }
 
 /** Mesmo formato de retorno de `parseAndValidateRow` (V1) —
  *  `questionImportService.ts` trata as duas fontes de forma idêntica dali
- *  em diante. */
+ *  em diante. Continua `async` só por causa de `computeQuestionFingerprint`
+ *  (SHA-256 via `crypto.subtle`, inerentemente assíncrono) — desde a
+ *  Sprint 19.2, porém, NENHUM `await` aqui dentro é mais uma consulta D1:
+ *  padrão/código/fingerprint agora consultam o `ImportValidationContext`
+ *  já carregado em lote pelo chamador, de forma síncrona/em memória. */
 export async function parseAndValidateRowV2(
-  db: D1Database,
+  ctx: ImportValidationContext,
   row: string[],
   headerIndex: Record<string, number>,
   rowNumber: number,
@@ -149,9 +143,12 @@ export async function parseAndValidateRowV2(
 
   const padraoPrincipalRaw = cell(row, headerIndex, "padrao_principal");
   if (!padraoPrincipalRaw) errors.push({ row: rowNumber, field: "padrao_principal", message: "Padrão principal é obrigatório." });
-  const principal = padraoPrincipalRaw ? await resolvePatternByNameOrCode(db, padraoPrincipalRaw) : null;
+  const principalResolution = padraoPrincipalRaw ? resolvePatternByNameOrCode(ctx, padraoPrincipalRaw) : null;
+  const principal = principalResolution?.pattern ?? null;
   const padroes: QuestionPatternInput[] = [];
-  if (padraoPrincipalRaw && !principal) {
+  if (padraoPrincipalRaw && principalResolution?.ambiguous) {
+    errors.push({ row: rowNumber, field: "padrao_principal", message: `Padrão "${padraoPrincipalRaw}" é ambíguo (corresponde a mais de um padrão cadastrado) — corrija o cadastro de padrões.` });
+  } else if (padraoPrincipalRaw && !principal) {
     errors.push({ row: rowNumber, field: "padrao_principal", message: `Padrão "${padraoPrincipalRaw}" não existe (importação nunca cria padrão).` });
   } else if (principal) {
     padroes.push({ patternId: principal.id, role: "principal" });
@@ -159,7 +156,11 @@ export async function parseAndValidateRowV2(
 
   const secondaryRaw = splitMultivalue(cell(row, headerIndex, "padroes_secundarios"));
   for (const raw of secondaryRaw) {
-    const secondary = await resolvePatternByNameOrCode(db, raw);
+    const { pattern: secondary, ambiguous } = resolvePatternByNameOrCode(ctx, raw);
+    if (ambiguous) {
+      errors.push({ row: rowNumber, field: "padroes_secundarios", message: `Padrão secundário "${raw}" é ambíguo (corresponde a mais de um padrão cadastrado) — corrija o cadastro de padrões.` });
+      continue;
+    }
     if (!secondary) {
       errors.push({ row: rowNumber, field: "padroes_secundarios", message: `Padrão secundário "${raw}" não existe.` });
       continue;
@@ -180,8 +181,7 @@ export async function parseAndValidateRowV2(
     } else {
       seenCodesInFile.set(code, rowNumber);
     }
-    const existing = await findQuestionByCode(db, code);
-    if (existing) errors.push({ row: rowNumber, field: "codigo", message: "Já existe uma questão com este código no banco." });
+    if (ctx.existingCodes.has(code)) errors.push({ row: rowNumber, field: "codigo", message: "Já existe uma questão com este código no banco." });
   }
 
   const fingerprint = enunciado ? await computeQuestionFingerprint(enunciado, alternativas) : "";
@@ -191,8 +191,9 @@ export async function parseAndValidateRowV2(
     } else {
       seenFingerprintsInFile.set(fingerprint, rowNumber);
     }
-    const dbDuplicates = await findQuestionsByFingerprint(db, fingerprint);
-    if (dbDuplicates.length > 0) errors.push({ row: rowNumber, field: "enunciado", message: "Enunciado equivalente a uma questão já existente no banco (fingerprint duplicada)." });
+    if (ctx.existingFingerprints.has(fingerprint)) {
+      errors.push({ row: rowNumber, field: "enunciado", message: "Enunciado equivalente a uma questão já existente no banco (fingerprint duplicada)." });
+    }
   }
 
   if (errors.length > 0) {

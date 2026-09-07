@@ -26,7 +26,8 @@ import {
 } from "../lib/questionsValidation";
 import { computeQuestionFingerprint } from "../lib/fingerprint";
 import { IMPORT_CSV_V2_HEADERS, parseAndValidateRowV2 } from "../lib/questionImportV2";
-import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE } from "../lib/importBatchLimits";
+import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE, IMPORT_BATCH_MAX_D1_STATEMENTS, plannedD1StatementCountForRows } from "../lib/importBatchLimits";
+import { buildImportValidationContext, computeRowFingerprint, loadApplyRevalidationSets, type ImportValidationContext } from "../lib/importValidationContext";
 import { recordAuditEvent } from "../repositories/auditRepository";
 import {
   buildDeleteQuestionChildrenForUndoStatements,
@@ -46,8 +47,6 @@ import {
   buildInsertQuestionStatement,
   buildInsertTagStatement,
   buildUpsertDnaStatement,
-  findQuestionByCode,
-  findQuestionsByFingerprint,
 } from "../repositories/questionRepository";
 
 function newId(): string {
@@ -161,7 +160,7 @@ function splitMultivalue(value: string): string[] {
  *  não há risco de injeção a rejeitar aqui. Validação continua sendo 100%
  *  SEMÂNTICA por campo (código/ano/dificuldade/origem/status abaixo). */
 async function parseAndValidateRow(
-  db: D1Database,
+  ctx: ImportValidationContext,
   row: string[],
   headerIndex: Record<string, number>,
   rowNumber: number,
@@ -232,30 +231,33 @@ async function parseAndValidateRow(
   const padraoPrincipalCode = cell(row, headerIndex, "padrao_principal_code");
   if (!padraoPrincipalCode) errors.push({ row: rowNumber, field: "padrao_principal_code", message: "Padrão principal é obrigatório." });
 
-  const patternRows = await db
-    .prepare("SELECT id, code FROM patterns WHERE code = ?")
-    .bind(padraoPrincipalCode)
-    .first<{ id: string; code: string }>();
+  // Sprint 19.2, seção 3/5 da ordem — resolução SÓ por código, EM MEMÓRIA a
+  // partir do catálogo já carregado (`ImportValidationContext.patterns`),
+  // nunca uma consulta D1 por linha. V1 nunca resolve por nome (diferença
+  // deliberada em relação ao V2 — compatibilidade histórica); `code` tem
+  // índice UNIQUE no banco, então esta resolução nunca é ambígua.
+  const principalResolution = padraoPrincipalCode ? ctx.patterns.resolveByCodeExact(padraoPrincipalCode) : null;
+  const principal = principalResolution?.pattern ?? null;
   const padroes: QuestionPatternInput[] = [];
-  if (padraoPrincipalCode && !patternRows) {
+  if (padraoPrincipalCode && !principal) {
     errors.push({ row: rowNumber, field: "padrao_principal_code", message: `Padrão "${padraoPrincipalCode}" não existe (importação nunca cria padrão).` });
-  } else if (patternRows) {
-    padroes.push({ patternId: patternRows.id, role: "principal" });
+  } else if (principal) {
+    padroes.push({ patternId: principal.id, role: "principal" });
   }
 
   const secondaryCodes = splitMultivalue(cell(row, headerIndex, "padroes_secundarios_codes"));
   for (const secCode of secondaryCodes) {
-    const secRow = await db.prepare("SELECT id FROM patterns WHERE code = ?").bind(secCode).first<{ id: string }>();
-    if (!secRow) {
+    const secondary = ctx.patterns.resolveByCodeExact(secCode).pattern;
+    if (!secondary) {
       errors.push({ row: rowNumber, field: "padroes_secundarios_codes", message: `Padrão secundário "${secCode}" não existe.` });
       continue;
     }
-    if (secRow.id === patternRows?.id) {
+    if (secondary.id === principal?.id) {
       errors.push({ row: rowNumber, field: "padroes_secundarios_codes", message: `O padrão "${secCode}" não pode ser principal e secundário ao mesmo tempo.` });
       continue;
     }
-    if (padroes.some((p) => p.patternId === secRow.id)) continue;
-    padroes.push({ patternId: secRow.id, role: "secundario" });
+    if (padroes.some((p) => p.patternId === secondary.id)) continue;
+    padroes.push({ patternId: secondary.id, role: "secundario" });
   }
 
   const tags = splitMultivalue(cell(row, headerIndex, "tags"));
@@ -266,8 +268,7 @@ async function parseAndValidateRow(
     } else {
       seenCodesInFile.set(code, rowNumber);
     }
-    const existing = await findQuestionByCode(db, code);
-    if (existing) errors.push({ row: rowNumber, field: "codigo", message: "Já existe uma questão com este código no banco." });
+    if (ctx.existingCodes.has(code)) errors.push({ row: rowNumber, field: "codigo", message: "Já existe uma questão com este código no banco." });
   }
 
   // Correção C (Sprint 7 v1.1) — MESMA função de
@@ -282,8 +283,9 @@ async function parseAndValidateRow(
     } else {
       seenFingerprintsInFile.set(fingerprint, rowNumber);
     }
-    const dbDuplicates = await findQuestionsByFingerprint(db, fingerprint);
-    if (dbDuplicates.length > 0) errors.push({ row: rowNumber, field: "enunciado", message: "Enunciado equivalente a uma questão já existente no banco (fingerprint duplicada)." });
+    if (ctx.existingFingerprints.has(fingerprint)) {
+      errors.push({ row: rowNumber, field: "enunciado", message: "Enunciado equivalente a uma questão já existente no banco (fingerprint duplicada)." });
+    }
   }
 
   // Sprint 19, seção 4 da ordem — importação de imagem por REFERÊNCIA
@@ -366,7 +368,7 @@ export interface PreviewResult {
    *  erro nenhum. */
   errorsReportCsv?: string | null;
   expiresAt?: string;
-  reason?: "empty" | "too_large" | "bad_header" | "malformed" | "payload_too_large";
+  reason?: "empty" | "too_large" | "bad_header" | "malformed" | "payload_too_large" | "too_many_statements";
   message?: string;
 }
 
@@ -411,6 +413,24 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
 
   if (dataRows.length === 0) return { ok: false, reason: "empty", message: "Arquivo sem linhas de dados." };
 
+  // Sprint 19.2, seção 2/4 da ordem — pré-passo PURO (nenhuma consulta D1):
+  // coleta código+fingerprint de CADA linha estruturalmente válida (número
+  // de colunas correto) para montar o contexto de validação em UM lote
+  // só, em vez de o parser de cada linha consultar o D1 individualmente
+  // (o N+1 original). Fingerprint é recalculado de novo dentro do parser
+  // completo abaixo — é CPU pura (SHA-256 local), nunca uma chamada D1
+  // extra; garante que os dois lugares nunca divirjam (mesma função,
+  // worker/src/lib/importValidationContext.ts::computeRowFingerprint).
+  const codesToCheck: string[] = [];
+  const fingerprintsToCheck: string[] = [];
+  for (let i = 0; i < dataRows.length; i++) {
+    if (dataRows[i].length !== headerRow.length) continue;
+    const { code: rowCode, fingerprint: rowFingerprint } = await computeRowFingerprint(dataRows[i], headerIndex);
+    if (rowCode) codesToCheck.push(rowCode);
+    if (rowFingerprint) fingerprintsToCheck.push(rowFingerprint);
+  }
+  const ctx = await buildImportValidationContext(db, codesToCheck, fingerprintsToCheck);
+
   const errors: ImportRowError[] = [];
   const validRows: ParsedImportRow[] = [];
   const seenCodesInFile = new Map<string, number>();
@@ -424,14 +444,31 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
       continue;
     }
     const { parsed, errors: rowErrors } = isV1
-      ? await parseAndValidateRow(db, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile)
-      : await parseAndValidateRowV2(db, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile);
+      ? await parseAndValidateRow(ctx, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile)
+      : await parseAndValidateRowV2(ctx, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile);
     if (rowErrors.length > 0) {
       // Nunca ecoa o conteúdo completo da LINHA — só campo+mensagem+valor da
       // célula responsável (nunca as outras ~30 colunas da linha).
       errors.push(...rowErrors);
     } else if (parsed) {
       validRows.push(parsed);
+    }
+  }
+
+  // Sprint 19.2, seção 9 da ordem — o mesmo orçamento de statements D1 do
+  // ZIP (Sprint 19.1, correção 4), generalizado: CSV cria a MESMA estrutura
+  // por questão (question+dna+alternativas+padrões+tags+history+item),
+  // nunca `question_images`. Calculado ANTES de insertImportBatch — o
+  // limite de linhas (IMPORT_MAX_ROWS) sozinho não protege, já que
+  // tags/padrões variam por linha.
+  if (errors.length === 0) {
+    const plannedStatements = plannedD1StatementCountForRows(validRows);
+    if (plannedStatements > IMPORT_BATCH_MAX_D1_STATEMENTS) {
+      return {
+        ok: false,
+        reason: "too_many_statements",
+        message: `Este arquivo geraria ${plannedStatements} operações no banco de dados, acima do limite seguro de ${IMPORT_BATCH_MAX_D1_STATEMENTS}. Divida a importação em arquivos menores.`,
+      };
     }
   }
 
@@ -511,6 +548,8 @@ export interface ApplyResult {
   invalid?: boolean;
   alreadyApplied?: boolean;
   conflict?: boolean;
+  tooManyStatements?: boolean;
+  message?: string;
   appliedCount?: number;
   questionIds?: string[];
 }
@@ -529,14 +568,36 @@ export async function applyImport(db: D1Database, actorUserId: string, batchId: 
 
   const rows = JSON.parse(batch.payload) as ParsedImportRow[];
 
-  // Revalida duplicidade contra o estado ATUAL do banco (pode ter mudado
-  // desde o preview) — se qualquer linha colidir agora, nenhuma questão do
-  // lote é criada (atomicidade "tudo ou nada" também nesta revalidação).
+  // Sprint 19.2, seção 8 da ordem — revalida duplicidade contra o estado
+  // ATUAL do banco (pode ter mudado desde o preview) EM LOTE: três
+  // consultas chunked (códigos, fingerprints, patternIds — todas as linhas
+  // de uma vez), nunca uma consulta por linha. A ordem em que os
+  // conflitos são reportados é preservada — ainda itera as linhas EM
+  // MEMÓRIA, na mesma sequência de antes, só que contra os Sets já
+  // carregados. `patternIds` é uma checagem NOVA nesta correção (antes só
+  // o Pacote ZIP revalidava padrões no apply) — um padrão pode ter sido
+  // arquivado/removido entre o preview e o apply.
+  const revalidation = await loadApplyRevalidationSets(db, {
+    codes: rows.map((r) => r.code),
+    fingerprints: rows.map((r) => r.fingerprint),
+    patternIds: rows.flatMap((r) => r.padroes.map((p) => p.patternId)),
+  });
   for (const row of rows) {
-    const existingCode = await findQuestionByCode(db, row.code);
-    if (existingCode) return { ok: false, conflict: true };
-    const existingFingerprint = await findQuestionsByFingerprint(db, row.fingerprint);
-    if (existingFingerprint.length > 0) return { ok: false, conflict: true };
+    if (revalidation.existingCodes.has(row.code)) return { ok: false, conflict: true };
+    if (revalidation.existingFingerprints.has(row.fingerprint)) return { ok: false, conflict: true };
+    if (row.padroes.some((p) => !revalidation.existingPatternIds.has(p.patternId))) return { ok: false, conflict: true };
+  }
+
+  // Sprint 19.2, seção 9 da ordem — defesa em profundidade: recalcula o
+  // orçamento de statements ANTES de db.batch() (nunca confia só no
+  // preview, que pode ter sido gerado antes desta correção existir).
+  const plannedStatements = plannedD1StatementCountForRows(rows);
+  if (plannedStatements > IMPORT_BATCH_MAX_D1_STATEMENTS) {
+    return {
+      ok: false,
+      tooManyStatements: true,
+      message: `Este arquivo geraria ${plannedStatements} operações no banco de dados, acima do limite seguro de ${IMPORT_BATCH_MAX_D1_STATEMENTS}. Divida a importação em arquivos menores.`,
+    };
   }
 
   const statements = [buildMarkBatchAppliedStatement(db, batchId)];

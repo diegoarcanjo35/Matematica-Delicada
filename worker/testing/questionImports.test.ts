@@ -443,3 +443,68 @@ describe("Sprint 19 — compatibilidade V1 (itens 7/8 da política de testes)", 
     expect(preview.errors![0].message).toMatch(/Pacote ZIP/);
   });
 });
+
+/* Sprint 19.2 da ordem, seção 10 (itens A/D) — o V1 histórico precisa
+   aproveitar o MESMO contexto em lote do V2 (seção 5 da ordem): nunca
+   ficar com o N+1 antigo enquanto V2 usa o fluxo novo. */
+describe("previewImport/applyImport (CSV V1) — ausência de N+1 (correção 19.2, seção 10, itens A/D)", () => {
+  it("preview de 100 questões V1 usa poucas chamadas D1, mesmo quando o volume aciona o orçamento de statements (correção 9)", async () => {
+    const rows = Array.from({ length: 100 }, (_, i) =>
+      buildCsvRow({ codigo: `V1-BULK-${i}`, enunciado: `Enunciado de teste de importação suficientemente longo, variante ${i}.` })
+    );
+    const csv = toCsv(rows);
+    db.resetD1CallCount();
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    // 100 linhas × no mínimo 10 statements cada ultrapassa o teto de 500
+    // (correção 9) — rejeitado por esse motivo (coberto pelos testes de
+    // orçamento). Este teste prova o ortogonal: parseando/validando as
+    // 100 linhas inteiras (padrão, código, fingerprint) ANTES desse
+    // bloqueio, o V1 nunca consulta D1 por linha — MESMO contexto em lote
+    // do V2, nunca o N+1 antigo.
+    expect(preview.ok).toBe(false);
+    expect(preview.reason).toBe("too_many_statements");
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15);
+  });
+
+  it("item D — apply de um lote V1 DENTRO do orçamento de statements usa poucas chamadas D1 (revalidação em lote)", async () => {
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      buildCsvRow({
+        codigo: `V1-APPLY-${i}`,
+        enunciado: `Enunciado de teste de importação suficientemente longo, apply ${i}.`,
+        tags: "",
+        padroes_secundarios_codes: "",
+      })
+    );
+    const csv = toCsv(rows);
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    expect(preview.ok).toBe(true);
+
+    db.resetD1CallCount();
+    const result = await applyImport(db as never, "editor1", preview.batchId!);
+    expect(result.ok).toBe(true);
+    expect(result.appliedCount).toBe(40);
+    // Revalidação em lote (codes+fingerprints+patternIds, 1 chunk cada) +
+    // db.batch()(1) + auditoria(1) — bem abaixo de 50.
+    expect(db.getD1CallCount()).toBeLessThan(50);
+    expect(db.getD1CallCount()).toBeLessThan(15);
+  });
+
+  it("apply de um lote V1 acima do orçamento de statements bloqueia como defesa em profundidade (nunca só o preview)", async () => {
+    // Preview legítimo e pequeno primeiro (payload real e válido).
+    const csv = toCsv([buildCsvRow({ codigo: "V1-DEFESA" })]);
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    expect(preview.ok).toBe(true);
+    // Simula um payload que ultrapassa o orçamento chegando ao apply sem
+    // ter passado pelo gate do preview desta correção (ex.: prévia antiga)
+    // — infla as tags da linha já persistida diretamente no banco.
+    const batch = db.sqlite.prepare("SELECT payload FROM question_import_batches WHERE id = ?").get(preview.batchId!) as { payload: string };
+    const payload = JSON.parse(batch.payload);
+    payload[0].tags = new Array(500).fill("tag");
+    db.sqlite.exec(`UPDATE question_import_batches SET payload = '${JSON.stringify(payload).replace(/'/g, "''")}' WHERE id = '${preview.batchId}'`);
+
+    const result = await applyImport(db as never, "editor1", preview.batchId!);
+    expect(result.ok).toBe(false);
+    expect(result.tooManyStatements).toBe(true);
+  });
+});
