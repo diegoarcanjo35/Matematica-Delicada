@@ -26,6 +26,7 @@ import {
 } from "../lib/questionsValidation";
 import { computeQuestionFingerprint } from "../lib/fingerprint";
 import { IMPORT_CSV_V2_HEADERS, parseAndValidateRowV2 } from "../lib/questionImportV2";
+import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE } from "../lib/importBatchLimits";
 import { recordAuditEvent } from "../repositories/auditRepository";
 import {
   buildDeleteQuestionChildrenForUndoStatements,
@@ -365,7 +366,7 @@ export interface PreviewResult {
    *  erro nenhum. */
   errorsReportCsv?: string | null;
   expiresAt?: string;
-  reason?: "empty" | "too_large" | "bad_header" | "malformed";
+  reason?: "empty" | "too_large" | "bad_header" | "malformed" | "payload_too_large";
   message?: string;
 }
 
@@ -434,6 +435,17 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
     }
   }
 
+  // Sprint 19.1, correção 3 da ordem — defesa em profundidade: mesmo que
+  // IMPORT_MAX_FILE_BYTES (300KB de CSV bruto) já limite estruturalmente o
+  // quanto um payload de linhas válidas pode crescer, NUNCA confiamos só
+  // nisso — medimos o payload que será REALMENTE gravado, em bytes UTF-8
+  // reais, e rejeitamos ANTES de qualquer INSERT se ultrapassar o teto do
+  // D1 (nunca deixamos o erro surgir só do D1 remoto rejeitando a escrita).
+  const payloadJson = JSON.stringify(errors.length === 0 ? validRows : []);
+  if (errors.length === 0 && !isPayloadWithinBatchLimit(payloadJson)) {
+    return { ok: false, reason: "payload_too_large", message: PAYLOAD_TOO_LARGE_MESSAGE };
+  }
+
   const batchId = newId();
   const expiresAt = new Date(Date.now() + IMPORT_PREVIEW_TTL_MS).toISOString();
   const inputFingerprint = await sha256Hex(text);
@@ -446,7 +458,7 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
     errorCount: errors.length,
     // Só persiste linhas válidas — payload nunca contém o CSV bruto nem
     // linhas rejeitadas (nunca conteúdo de log completo — seção 8.3).
-    payload: JSON.stringify(errors.length === 0 ? validRows : []),
+    payload: payloadJson,
     inputFingerprint,
     expiresAt,
   });

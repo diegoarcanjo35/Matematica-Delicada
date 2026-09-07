@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { zipSync } from "fflate";
+import { Zip, ZipPassThrough, zipSync } from "fflate";
 import { isSafeZipEntryPath, normalizeZipPathForComparison, readZipSafely } from "../src/lib/zip";
 
 /* Sprint 19, seção 8/19 da ordem — leitor de ZIP hardened. Fixtures geradas
@@ -13,6 +13,39 @@ import { isSafeZipEntryPath, normalizeZipPathForComparison, readZipSafely } from
 
 function textEntry(text: string): Uint8Array {
   return new TextEncoder().encode(text);
+}
+
+/** `zipSync({...})` recebe um objeto JS comum — impossível ter duas chaves
+ *  idênticas (ou só diferindo em maiúsculas/minúsculas seria PERMITIDO pelo
+ *  JS, mas exatamente iguais nunca). Para fabricar um ZIP com entradas
+ *  fisicamente duplicadas (o cenário real que a correção 19.1 precisa
+ *  bloquear), usamos a API de escrita EM STREAMING (`Zip`/`ZipPassThrough`),
+ *  que permite `.add()` duas vezes com o MESMO nome — o formato ZIP em si
+ *  não proíbe isso, só o objeto JS de `zipSync` proibiria por acidente. */
+async function buildRawZipWithEntries(entries: Array<{ name: string; data: Uint8Array }>): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    const zip = new Zip((err, chunk, final) => {
+      if (err) return reject(err);
+      if (chunk) chunks.push(chunk);
+      if (final) {
+        const total = chunks.reduce((sum, c) => sum + c.length, 0);
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          merged.set(c, offset);
+          offset += c.length;
+        }
+        resolve(merged);
+      }
+    });
+    for (const entry of entries) {
+      const file = new ZipPassThrough(entry.name);
+      zip.add(file);
+      file.push(entry.data, true);
+    }
+    zip.end();
+  });
 }
 
 describe("readZipSafely — leitura básica", () => {
@@ -144,5 +177,54 @@ describe("isSafeZipEntryPath — segurança de path (seção 7/8)", () => {
 describe("normalizeZipPathForComparison — colisão case-fold", () => {
   it("dois nomes que só diferem em maiúsculas/minúsculas normalizam igual", () => {
     expect(normalizeZipPathForComparison("Imagens/Foto.PNG")).toBe(normalizeZipPathForComparison("imagens/foto.png"));
+  });
+});
+
+/* Sprint 19.1, correção 2 — duplicidade FÍSICA de entradas no ZIP nunca
+   pode ser resolvida silenciosamente por um Map/objeto que aceitaria só a
+   última ocorrência. Toda entrada real é checada, inclusive
+   questoes.csv/manifest.json — nunca só imagens/. */
+describe("readZipSafely — duplicidade física de entradas (correção 19.1, seção 2)", () => {
+  it("item 1 — duas entradas EXATAMENTE iguais bloqueiam o pacote inteiro", async () => {
+    const zip = await buildRawZipWithEntries([
+      { name: "imagens/a.png", data: textEntry("primeira") },
+      { name: "imagens/a.png", data: textEntry("segunda") },
+    ]);
+    const result = await readZipSafely(zip);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/duplicada/);
+  });
+
+  it("item 2 — 'imagens/a.png' + 'imagens/A.PNG' (só case diferente) bloqueia", async () => {
+    const zip = await buildRawZipWithEntries([
+      { name: "imagens/a.png", data: textEntry("primeira") },
+      { name: "imagens/A.PNG", data: textEntry("segunda") },
+    ]);
+    const result = await readZipSafely(zip);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/duplicada/);
+  });
+
+  it("item 3 — dois 'questoes.csv' bloqueiam (não é exclusivo de imagens/)", async () => {
+    const zip = await buildRawZipWithEntries([
+      { name: "questoes.csv", data: textEntry("codigo\nA\n") },
+      { name: "questoes.csv", data: textEntry("codigo\nB\n") },
+      { name: "manifest.json", data: textEntry('{"version":1,"questions":[]}') },
+    ]);
+    const result = await readZipSafely(zip);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/duplicada/);
+  });
+
+  it("item 5 — ZIP normal (sem duplicidade) continua funcionando", async () => {
+    const zip = await buildRawZipWithEntries([
+      { name: "questoes.csv", data: textEntry("codigo\nA\n") },
+      { name: "manifest.json", data: textEntry('{"version":1,"questions":[]}') },
+      { name: "imagens/a.png", data: textEntry("conteudo-a") },
+      { name: "imagens/b.png", data: textEntry("conteudo-b") },
+    ]);
+    const result = await readZipSafely(zip);
+    expect(result.ok).toBe(true);
+    expect(result.entries!.map((e) => e.path).sort()).toEqual(["imagens/a.png", "imagens/b.png", "manifest.json", "questoes.csv"]);
   });
 });

@@ -252,6 +252,9 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       if (result.conflict) {
         return json({ error: { code: "package_conflict", message: result.conflictReason ?? "Um ou mais itens já existem. Gere uma nova prévia." } }, { status: 409 });
       }
+      if (result.tooManyStatements) {
+        return json({ error: { code: "package_too_many_statements", message: result.message ?? "Pacote grande demais para aplicar de uma vez." } }, { status: 413 });
+      }
       return json({ error: { code: "package_invalid", message: "Prévia inválida ou com erros pendentes." } }, { status: 400 });
     }
     return json({

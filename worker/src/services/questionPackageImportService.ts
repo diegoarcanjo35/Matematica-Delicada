@@ -32,6 +32,7 @@ import {
   buildR2AssetKey,
   type AllowedImageUploadMimeType,
 } from "../lib/questionsValidation";
+import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE } from "../lib/importBatchLimits";
 import { recordAuditEvent } from "../repositories/auditRepository";
 import { insertImportBatch, findImportBatch, buildInsertImportItemStatement, buildMarkBatchAppliedStatement, listImportItems } from "../repositories/questionImportRepository";
 import {
@@ -54,6 +55,56 @@ function newId(): string {
 export const PACKAGE_MAX_FILE_BYTES = PACKAGE_MAX_ZIP_COMPRESSED_BYTES;
 
 const ALLOWED_ROOT_ENTRIES = new Set(["questoes.csv", "manifest.json"]);
+
+/* Sprint 19.1, correção 4 da ordem — teto de QUANTIDADE de statements no
+ * `db.batch()` do apply, calculado ANTES de qualquer upload R2.
+ *
+ * O que sabemos com segurança, consultando a documentação oficial de
+ * limites do D1 (developers.cloudflare.com/d1/platform/limits/) nesta
+ * correção: a Cloudflare NÃO documenta um teto explícito de "N statements
+ * por chamada `batch()`" — só limites POR STATEMENT individual (100.000
+ * bytes de SQL, 100 parâmetros vinculados, 2.000.000 bytes por linha/
+ * string) e um timeout de 30s para o batch INTEIRO. Não foi possível
+ * determinar de forma seggura e READ-ONLY um teto específico do
+ * plano/conta atual: a sessão do `wrangler` disponível nesta correção está
+ * autenticada numa conta DIFERENTE da usada para o deploy da Sprint 18
+ * (confirmado via `wrangler d1 info` — aviso de "account_id não bate com
+ * nenhuma conta autenticada"), então reconsultar o plano real do projeto
+ * exigiria trocar de sessão/conta, fora do escopo desta correção (que
+ * também proíbe qualquer acesso remoto). Optamos pelo caminho seguro que a
+ * própria ordem prevê para este caso: reportar a limitação e adotar o
+ * teto mais conservador.
+ *
+ * A própria Cloudflare recomenda, como boa prática (não como limite
+ * rígido), processar migrações em lote "cerca de 1000 linhas por vez".
+ * Adotamos a METADE disso — 500 — como margem de segurança adicional,
+ * porque nosso batch não é uma sequência uniforme de INSERTs simples: боa
+ * parte dos statements (o INSERT de cada questão, os DELETEs implícitos
+ * de undo, etc.) inclui subqueries de guarda (`EXISTS`) mais caras em CPU
+ * por statement do que um INSERT puro — o mesmo NÚMERO de statements pode
+ * custar mais tempo de execução real neste pipeline do que numa migração
+ * de linhas simples. */
+export const IMPORT_BATCH_MAX_D1_STATEMENTS = 500;
+
+/** Conta EXATAMENTE o que `applyPackage` vai enviar a `db.batch()` — 1
+ *  statement de marcação do lote + por questão (question, dna,
+ *  alternativas, padrões, tags, history, item de importação) + 1 por
+ *  imagem. Nunca uma estimativa — o mesmo cálculo usado no preview (para
+ *  dar o erro cedo) e no apply (como gate final antes do R2). */
+export function plannedD1StatementCount(payload: PackageBatchPayload): number {
+  let count = 1; // buildMarkBatchAppliedStatement
+  for (const row of payload.rows) {
+    count += 1; // question
+    count += 1; // dna
+    count += row.alternativas.length;
+    count += row.padroes.length;
+    count += row.tags.length;
+    count += 1; // history
+    count += 1; // import item
+  }
+  count += payload.images.length; // question_images
+  return count;
+}
 
 export interface PackageError {
   code?: string;
@@ -318,10 +369,47 @@ export async function previewPackage(db: D1Database, actorUserId: string, zipByt
     };
   });
 
+  const payload: PackageBatchPayload = { sourceKind: "zip", rows: rowsWithId, images };
+
+  // Sprint 19.1, correção 4 da ordem — calculado ANTES de qualquer coisa
+  // (nesta função, antes até de existir um batchId — preview nunca chega
+  // perto do R2 mesmo sem esta checagem, mas o cálculo é o MESMO que o
+  // apply vai reusar, então validamos aqui primeiro para dar o erro cedo,
+  // na tela de prévia, nunca só depois de Andreia tentar aplicar).
+  const plannedStatements = plannedD1StatementCount(payload);
+  if (plannedStatements > IMPORT_BATCH_MAX_D1_STATEMENTS) {
+    return {
+      ok: false,
+      rowCount: dataRows.length,
+      validRowCount: validRows.length,
+      imageCount: images.length,
+      errorCount: 1,
+      errors: [
+        {
+          message: `Este pacote geraria ${plannedStatements} operações no banco de dados, acima do limite seguro de ${IMPORT_BATCH_MAX_D1_STATEMENTS}. Divida a importação em pacotes menores.`,
+        },
+      ],
+    };
+  }
+
+  // Sprint 19.1, correção 3 da ordem — mesma proteção do CSV (defesa em
+  // profundidade), medida em bytes UTF-8 reais do payload que será
+  // REALMENTE gravado.
+  const payloadJson = JSON.stringify(payload);
+  if (!isPayloadWithinBatchLimit(payloadJson)) {
+    return {
+      ok: false,
+      rowCount: dataRows.length,
+      validRowCount: validRows.length,
+      imageCount: images.length,
+      errorCount: 1,
+      errors: [{ message: PAYLOAD_TOO_LARGE_MESSAGE }],
+    };
+  }
+
   const batchId = newId();
   const expiresAt = new Date(Date.now() + 1000 * 60 * 30).toISOString();
   const inputFingerprint = await sha256HexOfBytes(zipBytes);
-  const payload: PackageBatchPayload = { sourceKind: "zip", rows: rowsWithId, images };
 
   await insertImportBatch(db, {
     id: batchId,
@@ -329,7 +417,7 @@ export async function previewPackage(db: D1Database, actorUserId: string, zipByt
     rowCount: dataRows.length,
     validRowCount: validRows.length,
     errorCount: 0,
-    payload: JSON.stringify(payload),
+    payload: payloadJson,
     inputFingerprint,
     expiresAt,
   });
@@ -365,19 +453,37 @@ export interface PackageApplyResult {
   alreadyApplied?: boolean;
   conflict?: boolean;
   conflictReason?: string;
+  tooManyStatements?: boolean;
+  message?: string;
   appliedCount?: number;
   imageCount?: number;
   questionIds?: string[];
 }
 
-async function safeDeleteR2Objects(bucket: R2Bucket, keys: string[]): Promise<void> {
-  for (const key of keys) {
-    try {
-      await bucket.delete(key);
-    } catch (error) {
-      console.error("questionPackageImportService: falha ao limpar objeto R2", { key, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
+/** Sprint 19.1, correção 1 da ordem — NUNCA apaga um objeto R2 nesta
+ *  chave: as chaves finais (`questions/<questionId>/<imageId>.<ext>`) são
+ *  DETERMINÍSTICAS e COMPARTILHÁVEIS entre duas tentativas concorrentes do
+ *  MESMO batchId (mesma prévia, mesmos questionId/imageId gerados no
+ *  preview). Uma tentativa que falha (upload parcial, falha de D1, ou
+ *  perda de corrida) NUNCA consegue provar que é a ÚNICA dona daquela
+ *  chave — outra tentativa concorrente pode ter subido o MESMO objeto e
+ *  estar prestes a (ou já ter) confirmado no D1. Apagar aqui arriscaria
+ *  deixar o D1 do VENCEDOR apontando para um objeto inexistente — a
+ *  violação mais grave que este pipeline pode cometer (seção 12 da ordem
+ *  original: "nunca D1 apontando conscientemente para objeto inexistente").
+ *
+ *  A correção deliberada: preferir um eventual objeto R2 órfão (estado
+ *  RECUPERÁVEL — um retry legítimo do mesmo lote reconhece a key
+ *  determinística já existente e a REUTILIZA, comparando
+ *  contentSha256/MIME/tamanho, ver o laço de upload abaixo) a qualquer
+ *  chance de corrupção D1→R2. Só registra tecnicamente (nunca conteúdo
+ *  sensível) para eventual limpeza manual futura — nunca apaga. */
+function logPotentialOrphans(context: string, keys: string[], error: unknown): void {
+  if (keys.length === 0) return;
+  console.error(`questionPackageImportService: ${context} — as chaves abaixo desta tentativa NÃO foram apagadas (podem ficar órfãs, recuperáveis por retry)`, {
+    keys,
+    error: error instanceof Error ? error.message : String(error),
+  });
 }
 
 export async function applyPackage(db: D1Database, bucket: R2Bucket, actorUserId: string, batchId: string, zipBytes: Uint8Array): Promise<PackageApplyResult> {
@@ -452,6 +558,20 @@ export async function applyPackage(db: D1Database, bucket: R2Bucket, actorUserId
     }
   }
 
+  // Sprint 19.1, correção 4 da ordem — recalculado aqui (nunca confiamos só
+  // no preview, que pode ter sido gerado antes desta correção existir, ou
+  // cujo resultado nunca é a fonte de verdade do que será REALMENTE
+  // enviado) e verificado ANTES de qualquer upload R2 — se o pacote
+  // ultrapassa o teto seguro, nenhum objeto sobe para o R2.
+  const plannedStatements = plannedD1StatementCount(payload);
+  if (plannedStatements > IMPORT_BATCH_MAX_D1_STATEMENTS) {
+    return {
+      ok: false,
+      tooManyStatements: true,
+      message: `Este pacote geraria ${plannedStatements} operações no banco de dados, acima do limite seguro de ${IMPORT_BATCH_MAX_D1_STATEMENTS}. Divida a importação em pacotes menores.`,
+    };
+  }
+
   // -------- Upload R2 (seção 12: só depois de TUDO revalidado) --------
   const uploadedThisAttempt: string[] = [];
   const imageKeyById = new Map<string, string>();
@@ -491,7 +611,11 @@ export async function applyPackage(db: D1Database, bucket: R2Bucket, actorUserId
       uploadedThisAttempt.push(realKey);
     }
   } catch (error) {
-    await safeDeleteR2Objects(bucket, uploadedThisAttempt);
+    // Correção 1 — NUNCA apaga: ver logPotentialOrphans. Um upload
+    // parcialmente concluído (algumas imagens já em R2, outras não) fica
+    // como está; um retry do mesmo lote reconhece as chaves já presentes
+    // (idênticas, por hash) e só sobe as que faltam.
+    logPotentialOrphans("falha durante upload de imagens ao R2", uploadedThisAttempt, error);
     throw error;
   }
 
@@ -567,25 +691,47 @@ export async function applyPackage(db: D1Database, bucket: R2Bucket, actorUserId
   try {
     results = await db.batch(statements);
   } catch (error) {
-    await safeDeleteR2Objects(bucket, uploadedThisAttempt);
+    // Correção 1 — NUNCA apaga aqui. Uma causa comum desta exceção é
+    // justamente OUTRA tentativa concorrente do MESMO batchId ter vencido
+    // a corrida e já ter inserido as MESMAS questions(id=...) (violação de
+    // PRIMARY KEY) — nesse caso, as chaves R2 desta tentativa são
+    // EXATAMENTE as mesmas que o vencedor está usando; apagá-las corromperia
+    // o apply que teve sucesso. Deixar como está é sempre seguro: se
+    // ninguém mais venceu, um retry reconhece e reaproveita; se alguém
+    // venceu, os objetos já são dele também (mesma chave determinística).
+    logPotentialOrphans("falha ao aplicar o lote no D1", uploadedThisAttempt, error);
+
+    // Sprint 19.1, correção 1 da ordem (teste adversarial A/B) — o erro que
+    // chegou aqui é, na prática, quase sempre uma violação de PRIMARY
+    // KEY/UNIQUE nas linhas determinísticas (mesmos questionId/imageId):
+    // outra tentativa concorrente do MESMO batchId venceu a corrida e já
+    // commitou entre a checagem de status feita no início desta chamada e
+    // agora. Antes de propagar como falha genérica (que o chamador não
+    // saberia distinguir de uma falha real), confere explicitamente esse
+    // caso: se o lote já está 'applied' agora, devolve o MESMO resultado
+    // de sucesso que um retry legítimo receberia — nunca uma exceção solta
+    // para quem só perdeu uma corrida legítima contra outra tentativa
+    // válida do mesmo lote.
+    const maybeApplied = await findImportBatch(db, batchId);
+    if (maybeApplied?.status === "applied") {
+      const items = await listImportItems(db, batchId);
+      return { ok: true, alreadyApplied: true, questionIds: items.map((i) => i.question_id).filter((id): id is string => id !== null) };
+    }
     throw error;
   }
 
   const [markResult] = results;
   if (markResult.meta.changes !== 1) {
     // Corrida real: outra requisição aplicou o mesmo lote entre a checagem
-    // e agora. Nunca deixa sucesso parcial: os objetos R2 desta tentativa
-    // são limpos (o outro apply, se realmente aplicou, já tem os SEUS
-    // próprios objetos — as chaves são determinísticas por questionId/
-    // imageId, então se a OUTRA tentativa é a mesma prévia, as chaves
-    // coincidem e nada é perdido; nunca apagamos algo que outra aplicação
-    // bem-sucedida referencia).
+    // e agora. NUNCA limpa os objetos R2 desta tentativa (correção 1) — se
+    // a outra tentativa é a mesma prévia (mesmo batchId), as chaves
+    // determinísticas coincidem e são exatamente as que ELA está usando;
+    // apagá-las agora corromperia o apply vencedor.
     const wasApplied = await findImportBatch(db, batchId);
     if (wasApplied?.status === "applied") {
       const items = await listImportItems(db, batchId);
       return { ok: true, alreadyApplied: true, questionIds: items.map((i) => i.question_id).filter((id): id is string => id !== null) };
     }
-    await safeDeleteR2Objects(bucket, uploadedThisAttempt);
     return { ok: false, conflict: true };
   }
 

@@ -17,12 +17,30 @@ export class FakeR2Bucket {
   /** Espelha put()/delete() reais — exposto só para os testes provarem
    *  "objeto foi gravado"/"objeto foi limpo", nunca usado pelo serviço. */
   readonly deletedKeys: string[] = [];
+  /** Sprint 19.1, correção 1 — quantos `put()` bem-sucedidos devem ocorrer
+   *  antes de o PRÓXIMO `put()` falhar (simula upload que falha no MEIO do
+   *  laço de imagens do apply, adversarial Teste C). Análogo a
+   *  `FakeD1Database.failNextMatching`. `0` desativa (padrão). */
+  private putsUntilFailure = 0;
+
+  /** Faz o `put()` de número `afterSuccessfulPuts + 1` (contando a partir
+   *  de agora) lançar, simulando uma falha de upload no meio do laço. Só
+   *  essa UMA chamada falha — as seguintes voltam ao comportamento normal. */
+  failNthPut(afterSuccessfulPuts: number): void {
+    this.putsUntilFailure = afterSuccessfulPuts + 1;
+  }
 
   async put(
     key: string,
     value: ArrayBuffer | Uint8Array,
     options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }
   ): Promise<void> {
+    if (this.putsUntilFailure > 0) {
+      this.putsUntilFailure--;
+      if (this.putsUntilFailure === 0) {
+        throw new Error("FakeR2Bucket: falha simulada de put() (Teste C — upload falha no meio do laço).");
+      }
+    }
     const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
     this.store.set(key, {
       key,

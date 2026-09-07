@@ -99,6 +99,16 @@ export async function readZipSafely(
     errorMessage = message;
   }
 
+  // Sprint 19.1, correção 2 — duplicidade FÍSICA de entradas no ZIP nunca
+  // pode chegar a ser "resolvida" silenciosamente por um Map (que a essa
+  // altura já aceitaria a ÚLTIMA entrada e descartaria as anteriores sem
+  // avisar ninguém). Toda entrada REAL do arquivo (inclusive diretórios,
+  // inclusive questoes.csv/manifest.json — nunca só imagens/) é checada
+  // ANTES de decidir extrair ou não: duas entradas cujo path, depois de
+  // normalizado/case-fold, colidem (exatamente iguais OU só diferindo em
+  // maiúsculas/minúsculas) abortam o pacote inteiro.
+  const seenNormalizedEntryPaths = new Set<string>();
+
   const unzip = new Unzip((file: UnzipFile) => {
     if (aborted) return;
     entryCount++;
@@ -108,7 +118,15 @@ export async function readZipSafely(
       return;
     }
 
-    // Diretório — só existe para contar no limite acima; nunca extraído.
+    const normalizedEntryPath = normalizeZipPathForComparison(file.name);
+    if (seenNormalizedEntryPaths.has(normalizedEntryPath)) {
+      abort(`Entrada duplicada no pacote (mesmo caminho após normalização): "${file.name}".`);
+      file.terminate();
+      return;
+    }
+    seenNormalizedEntryPaths.add(normalizedEntryPath);
+
+    // Diretório — só existe para contar no limite/deduplicação acima; nunca extraído.
     if (file.name.endsWith("/")) return;
 
     // Checagem PRÉVIA com o tamanho declarado no cabeçalho local, quando
