@@ -29,6 +29,7 @@ import { ErrorNotebookListPage } from "./pages/errorNotebook/ErrorNotebookListPa
 import { ErrorNotebookDetailPage } from "./pages/errorNotebook/ErrorNotebookDetailPage";
 import { MapaEnemListPage } from "./pages/studentMetrics/MapaEnemListPage";
 import { MapaEnemDetailPage } from "./pages/studentMetrics/MapaEnemDetailPage";
+import { PerformancePage } from "./pages/performance/PerformancePage";
 import { WeeklyReviewPage } from "./pages/weeklyReview/WeeklyReviewPage";
 import { EditorialQuestionsPage } from "./pages/editorial/EditorialQuestionsPage";
 import { EditorialQuestionFormPage } from "./pages/editorial/EditorialQuestionFormPage";
@@ -58,6 +59,7 @@ const IMPLEMENTED_NAV_PATHS = new Set([
   "/padroes-enem",
   "/caderno-de-erros",
   "/mapa-enem",
+  "/desempenho",
   "/treino-diario",
   "/simulados",
   "/relatorio-semanal",
@@ -213,6 +215,7 @@ export function App() {
             <Route path="/caderno-de-erros/:entryId" element={<ErrorNotebookDetailPage />} />
             <Route path="/mapa-enem" element={<MapaEnemListPage />} />
             <Route path="/mapa-enem/:slug" element={<MapaEnemDetailPage />} />
+            <Route path="/desempenho" element={<PerformancePage />} />
             <Route path="/relatorio-semanal" element={<WeeklyReviewPage />} />
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route

@@ -9,7 +9,12 @@ import { useOnboardingStatus } from "../onboarding/useOnboardingStatus";
 import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClient";
 import { fetchPatterns } from "../api/patternsClient";
 import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookClient";
-import { fetchStudentMetricsSummary, type StudentMetricsSummary } from "../api/studentMetricsClient";
+import {
+  fetchPatternPerformanceOverview,
+  fetchStudentMetricsSummary,
+  type PatternPerformanceOverviewItem,
+  type StudentMetricsSummary,
+} from "../api/studentMetricsClient";
 import {
   fetchCurrent as fetchDailyTrainingCurrent,
   fetchPreview as fetchDailyTrainingPreview,
@@ -43,6 +48,11 @@ export function DashboardPage() {
      namespace do aluno; `hasAnyEvidence: false` mostra um convite honesto,
      nunca um 0%/domínio fabricado. */
   const [metricsSummary, setMetricsSummary] = useState<StudentMetricsSummary | null>(null);
+  /* Sprint 21 — resumo compacto "Seu desempenho por padrão" (seção 11 da
+   *  ordem): até 3 padrões que pedem ação (attention.needed) ou, se nenhum
+   *  pedir ação, até 3 com evidência recente. `null` enquanto carrega —
+   *  nunca inventa urgência nem mostra a seção com dado fabricado. */
+  const [performancePatterns, setPerformancePatterns] = useState<PatternPerformanceOverviewItem[] | null>(null);
   /* Sprint 6 — resumo REAL do catálogo de padrões, sem nenhuma métrica
      fabricada: `total` é quantos padrões publicados o Worker devolveu e
      `withEvidence` é quantos deles têm evidência realmente registrada para
@@ -101,6 +111,20 @@ export function DashboardPage() {
       })
       .catch(() => {
         // Sem Mapa ENEM disponível — o card mostra o estado "em preparação".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPatternPerformanceOverview()
+      .then((result) => {
+        if (!cancelled && result.available !== false && result.patterns) setPerformancePatterns(result.patterns);
+      })
+      .catch(() => {
+        // Sem desempenho por padrão disponível — a seção não aparece.
       });
     return () => {
       cancelled = true;
@@ -266,6 +290,17 @@ export function DashboardPage() {
     };
   }, []);
 
+  /* Sprint 21, seção 11 da ordem — "até 3 padrões que pedem ação; ou, se
+     nenhum pedir ação, até 3 padrões com evidência recente. Nunca inventar
+     urgência." A ordem de prioridade já vem pronta do backend
+     (getPatternPerformanceOverview) — aqui só filtra/recorta, nunca
+     reordena por conta própria. */
+  const actionablePatterns = performancePatterns?.filter((p) => p.attention.needed) ?? [];
+  const recentPatterns = (performancePatterns ?? [])
+    .filter((p) => p.evidence.lastPracticeAt !== null)
+    .sort((a, b) => (b.evidence.lastPracticeAt! < a.evidence.lastPracticeAt! ? -1 : 1));
+  const performanceSummaryPatterns = (actionablePatterns.length > 0 ? actionablePatterns : recentPatterns).slice(0, 3);
+
   const goalLabel =
     profile?.goalType === "acertos"
       ? `${profile.goalValue} acertos`
@@ -330,6 +365,26 @@ export function DashboardPage() {
           </>
         )}
       </section>
+
+      {/* Sprint 21, seção 11 da ordem — resumo compacto abaixo do Treino
+          Diário. Só aparece quando há dados reais (nunca some por padrão;
+          nunca inventa urgência quando não há nada acionável nem recente). */}
+      {performancePatterns && performanceSummaryPatterns.length > 0 && (
+        <section aria-labelledby="performance-summary-heading" className="dashboard__performance-summary">
+          <h3 id="performance-summary-heading">Seu desempenho por padrão</h3>
+          <ul className="dashboard__performance-list">
+            {performanceSummaryPatterns.map((item) => (
+              <li key={item.pattern.id} className="dashboard__performance-item">
+                <span className="dashboard__performance-name">{item.pattern.name}</span>
+                <span className={`dashboard__performance-badge dashboard__performance-badge--${item.state.code}`}>{item.state.label}</span>
+              </li>
+            ))}
+          </ul>
+          <Link to="/desempenho" className="btn btn--secondary">
+            <span>Ver desempenho completo</span>
+          </Link>
+        </section>
+      )}
 
       <div className="dashboard__grid">
         <Card className="dashboard__card">

@@ -1,0 +1,170 @@
+/* Desempenho por padrão — Sprint 21. Mesmas convenções de
+   src/pages/studentMetrics/MapaEnemPage.css: tokens do sistema visual,
+   grade fluida sem largura fixa (nunca força rolagem horizontal em
+   390px), foco visível herdado de src/index.css. Nenhum estado é
+   comunicado só por cor — todo rótulo é sempre texto. */
+
+.performance {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 100%;
+}
+
+.performance--centered {
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.performance__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.performance__intro {
+  color: var(--color-text-secondary);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.performance__disclaimer {
+  padding: var(--space-2) var(--space-3);
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  max-width: 68ch;
+  margin: 0;
+}
+
+.performance__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.performance__filter {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-bg-surface);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.performance__filter--active {
+  background: var(--color-navy-deep);
+  border-color: var(--color-navy-deep);
+  color: var(--color-text-inverse);
+  font-weight: 700;
+}
+
+.performance__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.performance__card {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.performance__card-header {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.performance__card-name {
+  font-weight: 700;
+  margin: 0;
+}
+
+.performance__state-badge {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill, 999px);
+  border: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.performance__state-badge--revisao_pendente {
+  border-color: var(--color-danger, #b3261e);
+  color: var(--color-danger, #b3261e);
+}
+
+.performance__attention {
+  font-size: var(--font-size-sm);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-accent-strategic);
+  border-radius: var(--radius-sm);
+  margin: 0;
+}
+
+.performance__low-evidence-note {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.performance__accuracy {
+  font-weight: 700;
+  margin: 0;
+}
+
+.performance__stats,
+.performance__last-practice {
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+.performance__stats-label {
+  font-weight: 700;
+}
+
+.performance__details summary {
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.performance__detail-list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.performance__card-actions {
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.performance__cta-disabled {
+  display: inline-block;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  padding: var(--space-2) 0;
+}
+
+@media (max-width: 480px) {
+  .performance__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .performance * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

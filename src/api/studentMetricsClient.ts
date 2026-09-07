@@ -55,6 +55,28 @@ export interface StudentMetricsSummary {
   lastPracticeAt: string | null;
 }
 
+/* Sprint 21 — Dashboard de Desempenho por Padrão. Espelha
+   PatternPerformanceOverviewItemDTO (worker/src/services/studentMetricsService.ts)
+   campo a campo — nenhum cálculo novo aqui, só formatação na UI. */
+export interface PatternPerformanceOverviewItem {
+  pattern: { id: string; slug: string; name: string; mainStrategy: string };
+  evidence: {
+    confirmedAttempts: number;
+    correctCount: number;
+    incorrectCount: number;
+    distinctQuestionsUsed: number;
+    distinctPracticeDays: number;
+    attemptsWithHelp: number;
+    reviewsCorrect: number;
+    reviewsIncorrect: number;
+    lastPracticeAt: string | null;
+  };
+  accuracy: number | null;
+  state: { code: ProvisionalState; label: string };
+  attention: { needed: boolean; reason: string | null };
+  training: { canTrain: boolean; availableQuestionCount: number };
+}
+
 export interface ActivityItem {
   kind: "answer" | "recognition" | "help" | "review";
   patternId: string | null;
@@ -119,6 +141,17 @@ export interface PatternsResponse {
 
 export function fetchPatternMetrics(): Promise<PatternsResponse> {
   return request("/api/student-metrics/patterns");
+}
+
+export interface PatternPerformanceOverviewResponse {
+  ok: true;
+  available?: boolean;
+  message?: string;
+  patterns?: PatternPerformanceOverviewItem[];
+}
+
+export function fetchPatternPerformanceOverview(): Promise<PatternPerformanceOverviewResponse> {
+  return request("/api/student-metrics/patterns/overview");
 }
 
 export interface PatternDetailResponse {

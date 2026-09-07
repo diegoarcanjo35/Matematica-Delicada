@@ -1,8 +1,15 @@
 import type { Env } from "../env";
+import { isLocalEditorialFixturesAllowed } from "../env";
 import { Errors, json } from "../lib/response";
 import { readSessionToken } from "../lib/cookies";
 import { checkSession } from "../services/authService";
-import { getPatternMetricDetail, getRecentActivity, getStudentMetricsSummary, listPatternMetrics } from "../services/studentMetricsService";
+import {
+  getPatternMetricDetail,
+  getPatternPerformanceOverview,
+  getRecentActivity,
+  getStudentMetricsSummary,
+  listPatternMetrics,
+} from "../services/studentMetricsService";
 import { isQuestionBankAvailable } from "../repositories/questionRepository";
 
 /* Rotas do Mapa ENEM do Aluno — Sprint 10 v1.0.
@@ -76,6 +83,16 @@ export async function handleStudentMetricsRequest(request: Request, env: Env, ur
     if (method !== "GET") return Errors.methodNotAllowed();
     const patterns = await listPatternMetrics(env.DB, user.id);
     return json({ ok: true, patterns });
+  }
+
+  // Sprint 21 — checado ANTES de PATTERN_DETAIL_RE (que casaria "overview"
+  // como se fosse um slug de padrão), mesmo cuidado já aplicado pelo Treino
+  // Diário (Sprint 20) entre /patterns e /patterns/:id/preview.
+  if (path === "/api/student-metrics/patterns/overview") {
+    if (method !== "GET") return Errors.methodNotAllowed();
+    const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
+    const overview = await getPatternPerformanceOverview(env.DB, user.id, fixturesAllowed);
+    return json({ ok: true, patterns: overview });
   }
 
   if (path === "/api/student-metrics/activity") {

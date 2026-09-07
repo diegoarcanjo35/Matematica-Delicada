@@ -16,7 +16,7 @@ const TRAINABLE_PATTERNS = [
   { id: "p2", slug: "geometria", name: "Geometria Espacial", mainStrategy: "", availableQuestionCount: 0, canTrain: false },
 ];
 
-function mockApi(dailyTrainingCurrent: unknown = { ok: true, list: null }) {
+function mockApi(dailyTrainingCurrent: unknown = { ok: true, list: null }, performanceOverview: unknown = { ok: true, available: false }) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
@@ -26,6 +26,9 @@ function mockApi(dailyTrainingCurrent: unknown = { ok: true, list: null }) {
       }
       if (url.includes("/api/daily-training/current")) {
         return new Response(JSON.stringify(dailyTrainingCurrent), { status: 200 });
+      }
+      if (url.endsWith("/api/student-metrics/patterns/overview")) {
+        return new Response(JSON.stringify(performanceOverview), { status: 200 });
       }
       // Todos os outros cards do Dashboard (Cronograma, Padrões ENEM,
       // Caderno de Erros, Mapa ENEM, Simulados, Relatório Semanal) — resposta
@@ -154,5 +157,95 @@ describe("DashboardPage — só lista ACTIVE bloqueia o seletor (Sprint 20.1)", 
     expect(within(dominantSection).getByRole("link", { name: /Escala/ })).toHaveAttribute("href", "/treino-diario?patternId=p1");
     expect(screen.queryByRole("link", { name: "Continuar treino" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Treino de Escala" })).not.toBeInTheDocument();
+  });
+});
+
+/* Sprint 21 — "Seu desempenho por padrão", resumo compacto abaixo da seção
+   dominante do Treino Diário (seção 11 da ordem). */
+
+function buildPerformanceItem(
+  patternId: string,
+  name: string,
+  stateCode: string,
+  stateLabel: string,
+  overrides: Partial<{ attentionNeeded: boolean; lastPracticeAt: string | null; accuracy: number | null }> = {}
+) {
+  return {
+    pattern: { id: patternId, slug: patternId, name, mainStrategy: "" },
+    evidence: {
+      confirmedAttempts: 3,
+      correctCount: 1,
+      incorrectCount: 2,
+      distinctQuestionsUsed: 3,
+      distinctPracticeDays: 2,
+      attemptsWithHelp: 0,
+      reviewsCorrect: 0,
+      reviewsIncorrect: 0,
+      lastPracticeAt: "lastPracticeAt" in overrides ? overrides.lastPracticeAt! : "2026-09-01T10:00:00.000Z",
+    },
+    accuracy: overrides.accuracy ?? null,
+    state: { code: stateCode, label: stateLabel },
+    attention: { needed: overrides.attentionNeeded ?? false, reason: overrides.attentionNeeded ? "Mais respostas incorretas do que corretas neste padrão até agora." : null },
+    training: { canTrain: true, availableQuestionCount: 1 },
+  };
+}
+
+describe("DashboardPage — 'Seu desempenho por padrão' (Sprint 21)", () => {
+  it("item 21 — mostra a seção quando há dados reais de desempenho", async () => {
+    mockApi(undefined, {
+      ok: true,
+      patterns: [buildPerformanceItem("p1", "Escala", "em_desenvolvimento", "Em desenvolvimento", { attentionNeeded: true })],
+    });
+    renderDashboard();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Seu desempenho por padrão" })).toBeInTheDocument());
+  });
+
+  it("item 22 — mostra no máximo 3 padrões, mesmo com mais disponíveis", async () => {
+    mockApi(undefined, {
+      ok: true,
+      patterns: [
+        buildPerformanceItem("p1", "Padrão Um", "revisao_pendente", "Revisão pendente", { attentionNeeded: true }),
+        buildPerformanceItem("p2", "Padrão Dois", "em_desenvolvimento", "Em desenvolvimento", { attentionNeeded: true }),
+        buildPerformanceItem("p3", "Padrão Três", "em_desenvolvimento", "Em desenvolvimento", { attentionNeeded: true }),
+        buildPerformanceItem("p4", "Padrão Quatro", "em_desenvolvimento", "Em desenvolvimento", { attentionNeeded: true }),
+      ],
+    });
+    renderDashboard();
+    const heading = await screen.findByRole("heading", { name: "Seu desempenho por padrão" });
+    const section = heading.closest("section")!;
+    expect(within(section).getAllByText(/Padrão (Um|Dois|Três|Quatro)/)).toHaveLength(3);
+  });
+
+  it("item 23 — 'Ver desempenho completo' aponta para /desempenho", async () => {
+    mockApi(undefined, {
+      ok: true,
+      patterns: [buildPerformanceItem("p1", "Escala", "em_desenvolvimento", "Em desenvolvimento", { attentionNeeded: true })],
+    });
+    renderDashboard();
+    const heading = await screen.findByRole("heading", { name: "Seu desempenho por padrão" });
+    const section = heading.closest("section")!;
+    expect(within(section).getByRole("link", { name: "Ver desempenho completo" })).toHaveAttribute("href", "/desempenho");
+  });
+
+  it("item 24/25 — pouca evidência nunca é chamada de 'fraco', e nenhum '0%' aparece no resumo", async () => {
+    mockApi(undefined, {
+      ok: true,
+      patterns: [
+        buildPerformanceItem("p1", "Padrão Sem Evidência", "sem_evidencias", "Ainda sem evidências suficientes"),
+        buildPerformanceItem("p2", "Padrão Inicial", "evidencias_iniciais", "Evidências iniciais", { lastPracticeAt: "2026-09-02T10:00:00.000Z" }),
+      ],
+    });
+    renderDashboard();
+    const heading = await screen.findByRole("heading", { name: "Seu desempenho por padrão" });
+    const section = heading.closest("section")!;
+    expect(within(section).queryByText(/fraco/i)).not.toBeInTheDocument();
+    expect(within(section).queryByText(/0%/)).not.toBeInTheDocument();
+  });
+
+  it("sem nenhum padrão acionável e sem evidência recente: a seção não aparece (nunca inventa urgência)", async () => {
+    mockApi(undefined, { ok: true, patterns: [buildPerformanceItem("p1", "Escala", "sem_evidencias", "Ainda sem evidências suficientes", { lastPracticeAt: null })] });
+    renderDashboard();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "O que você quer treinar hoje?" })).toBeInTheDocument());
+    expect(screen.queryByRole("heading", { name: "Seu desempenho por padrão" })).not.toBeInTheDocument();
   });
 });

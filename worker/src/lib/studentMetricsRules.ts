@@ -269,3 +269,63 @@ export function deriveProvisionalState(input: StateInput): ProvisionalState {
   }
   return "em_desenvolvimento";
 }
+
+/* ---------------------------------------------------------------------------
+ * Sprint 21 — "Precisa de atenção" para o Dashboard de Desempenho por
+ * Padrão. Mesma disciplina do resto deste arquivo: DESCRITIVO e
+ * PROVISÓRIO, nunca um score combinado, nunca inventa domínio — só reúne
+ * sinais que JÁ existem (o `state` provisório acima, mais contadores
+ * factuais reais) atrás de uma regra ÚNICA e centralizada, para nunca
+ * espalhar limiar mágico pela UI (seção 7 da ordem da Sprint 21).
+ *
+ * Regra (mutuamente exclusiva, primeira condição verdadeira decide):
+ *   A) `state === 'revisao_pendente'` → sempre precisa de atenção (mesma
+ *      prioridade máxima que `deriveProvisionalState` já dá a revisão
+ *      vencida sobre qualquer outro critério);
+ *   B) `state === 'em_desenvolvimento'` E `confirmedAttempts >=
+ *      MIN_CONFIRMED_FOR_DEVELOPMENT` (reaproveitado, nunca um novo
+ *      limiar) E existe evidência NEGATIVA factual relevante:
+ *        - mais erros confirmados que acertos confirmados; OU
+ *        - dependência de ajuda acima de `MAX_HELP_DEPENDENCY_RATIO_FOR_
+ *          CONSISTENT` (mesma constante já usada por
+ *          `deriveProvisionalState` para bloquear `consistente_no_recorte`
+ *          — nunca um segundo limiar inventado); OU
+ *        - existe ao menos uma revisão espaçada registrada como
+ *          INCORRETA para este padrão.
+ *   Qualquer outro caso (inclusive `evidencias_iniciais`/`sem_evidencias`,
+ *   mesmo com 1-2 tentativas erradas — seção 7: "não marcar 'precisa de
+ *   atenção' com 1 questão, 2 questões, uma única tentativa ruim") →
+ *   `needed: false`. `consistente_no_recorte` nunca precisa de atenção. */
+export interface PatternAttentionInput {
+  state: ProvisionalState;
+  confirmedAttempts: number;
+  correctCount: number;
+  incorrectCount: number;
+  attemptsWithHelp: number;
+  reviewsIncorrect: number;
+}
+
+export interface PatternAttentionResult {
+  needed: boolean;
+  reason: string | null;
+}
+
+export function derivePatternAttention(input: PatternAttentionInput): PatternAttentionResult {
+  if (input.state === "revisao_pendente") {
+    return { needed: true, reason: "Há uma revisão pendente no Caderno de Erros para este padrão." };
+  }
+  if (input.state !== "em_desenvolvimento") return { needed: false, reason: null };
+  if (input.confirmedAttempts < MIN_CONFIRMED_FOR_DEVELOPMENT) return { needed: false, reason: null };
+
+  if (input.incorrectCount > input.correctCount) {
+    return { needed: true, reason: "Mais respostas incorretas do que corretas neste padrão até agora." };
+  }
+  const helpDependencyRatio = input.confirmedAttempts > 0 ? input.attemptsWithHelp / input.confirmedAttempts : 0;
+  if (helpDependencyRatio > MAX_HELP_DEPENDENCY_RATIO_FOR_CONSISTENT) {
+    return { needed: true, reason: "Alta dependência de ajuda nas tentativas confirmadas deste padrão." };
+  }
+  if (input.reviewsIncorrect > 0) {
+    return { needed: true, reason: "Há uma revisão registrada como incorreta para este padrão." };
+  }
+  return { needed: false, reason: null };
+}

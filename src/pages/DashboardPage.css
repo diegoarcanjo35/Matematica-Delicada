@@ -94,6 +94,58 @@
   }
 }
 
+.dashboard__performance-summary {
+  background-color: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  margin-bottom: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.dashboard__performance-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.dashboard__performance-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dashboard__performance-item:last-child {
+  border-bottom: none;
+}
+
+.dashboard__performance-name {
+  font-weight: 700;
+}
+
+.dashboard__performance-badge {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill, 999px);
+  border: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.dashboard__performance-badge--revisao_pendente {
+  border-color: var(--color-danger, #b3261e);
+  color: var(--color-danger, #b3261e);
+}
+
 .dashboard__grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

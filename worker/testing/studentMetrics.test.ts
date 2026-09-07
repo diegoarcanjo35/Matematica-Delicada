@@ -11,7 +11,8 @@ import { handleErrorNotebookRequest } from "../src/routes/errorNotebook";
 import { handleStudentMetricsRequest } from "../src/routes/studentMetrics";
 import { findEntryByUserAndQuestion } from "../src/repositories/errorNotebookRepository";
 import { getPatternEvidence } from "../src/repositories/studentMetricsRepository";
-import { deriveProvisionalState, PROVISIONAL_STATES, PROVISIONAL_STATE_LABELS, type StateInput } from "../src/lib/studentMetricsRules";
+import { deriveProvisionalState, derivePatternAttention, PROVISIONAL_STATES, PROVISIONAL_STATE_LABELS, type StateInput } from "../src/lib/studentMetricsRules";
+import { getPatternPerformanceOverview, type PatternPerformanceOverviewItemDTO } from "../src/services/studentMetricsService";
 
 /* Sprint 10 v1.0 — Métricas Centrais e Mapa ENEM do Aluno. Testes
    ALVEJADOS (seção 15 da ordem, seção 2 tornada permanente): cobrem só os
@@ -881,5 +882,296 @@ describe("gate de disponibilidade do módulo (Sprint 16 v1.2 — isQuestionBankA
     expect(response.status).toBe(200);
     const body = (await response.json()) as { available?: boolean };
     expect(body.available).not.toBe(false);
+  });
+});
+
+/* ==========================================================================
+ * Sprint 21 — Dashboard de Desempenho por Padrão.
+ *
+ * `getPatternPerformanceOverview` reaproveita 100% de `deriveProvisionalState`
+ * (inalterado) e a nova `derivePatternAttention` — nenhuma fórmula de
+ * domínio nova. As consultas agregadas (studentMetricsRepository.ts) são
+ * testadas aqui pela EQUIVALÊNCIA com `getPatternEvidence` (já exaustivamente
+ * provado acima) para os mesmos cenários — nunca reimplementando os testes
+ * de fronteira de deriveProvisionalState, que já existem e continuam
+ * passando sem alteração nenhuma. ========================================== */
+
+function findOverviewItem(items: PatternPerformanceOverviewItemDTO[], patternId: string): PatternPerformanceOverviewItemDTO {
+  const item = items.find((i) => i.pattern.id === patternId);
+  if (!item) throw new Error(`padrão ${patternId} não encontrado no overview`);
+  return item;
+}
+
+describe("getPatternPerformanceOverview — catálogo completo (Sprint 21, seções 5/18)", () => {
+  it("todos os padrões PUBLISHED aparecem, mesmo sem nenhuma tentativa — accuracy null, state sem_evidencias", async () => {
+    const items = await getPatternPerformanceOverview(db as never, "overview-catalog-1", false);
+    expect(items.map((i) => i.pattern.id).sort()).toEqual(["pat-1", "pat-2"]);
+    for (const item of items) {
+      expect(item.state.code).toBe("sem_evidencias");
+      expect(item.accuracy).toBeNull();
+      expect(item.attention.needed).toBe(false);
+    }
+  });
+
+  it("padrão DRAFT e padrão ARCHIVED nunca aparecem no overview", async () => {
+    db.sqlite.exec(
+      `INSERT INTO patterns (id, code, slug, name, recognition_phrase, description, main_strategy, introductory_example, strategic_summary, editorial_status)
+       VALUES ('pat-draft', 'PAD-DRAFT', 'padrao-draft', 'Padrão Rascunho', 'F', 'D', 'E', 'X', 'R', 'draft')`
+    );
+    db.sqlite.exec(
+      `INSERT INTO patterns (id, code, slug, name, recognition_phrase, description, main_strategy, introductory_example, strategic_summary, editorial_status)
+       VALUES ('pat-archived', 'PAD-ARCH', 'padrao-arquivado', 'Padrão Arquivado', 'F', 'D', 'E', 'X', 'R', 'archived')`
+    );
+    const items = await getPatternPerformanceOverview(db as never, "overview-catalog-2", false);
+    const ids = items.map((i) => i.pattern.id);
+    expect(ids).not.toContain("pat-draft");
+    expect(ids).not.toContain("pat-archived");
+    expect(ids.sort()).toEqual(["pat-1", "pat-2"]);
+  });
+
+  it("padrão sem questão treinável elegível: training.canTrain=false, availableQuestionCount=0", async () => {
+    const items = await getPatternPerformanceOverview(db as never, "overview-catalog-3", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.training.canTrain).toBe(false);
+    expect(pat1.training.availableQuestionCount).toBe(0);
+  });
+
+  it("padrão com questão publicada elegível: training.canTrain=true, availableQuestionCount reflete a contagem real", async () => {
+    seedPublishedQuestion({ id: "q-overview-trainable" });
+    const items = await getPatternPerformanceOverview(db as never, "overview-catalog-4", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.training.canTrain).toBe(true);
+    expect(pat1.training.availableQuestionCount).toBe(1);
+  });
+});
+
+describe("getPatternPerformanceOverview — evidência agregada (equivalência com getPatternEvidence, Sprint 21 seção 3)", () => {
+  it("três tentativas confirmadas na MESMA questão: confirmedAttempts=3, distinctQuestionsUsed=1 (nunca 3)", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-repeat" });
+    await startAndConfirm("overview-repeat", qId, "B");
+    await startAndConfirm("overview-repeat", qId, "A");
+    await startAndConfirm("overview-repeat", qId, "B");
+    const items = await getPatternPerformanceOverview(db as never, "overview-repeat", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.evidence.confirmedAttempts).toBe(3);
+    expect(pat1.evidence.distinctQuestionsUsed).toBe(1);
+    expect(pat1.evidence.correctCount).toBe(2);
+    expect(pat1.evidence.incorrectCount).toBe(1);
+  });
+
+  it("tentativa in_progress nunca entra em accuracy nem em confirmedAttempts", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-inprogress" });
+    const token = await ensureUserSession("overview-inprogress");
+    await callPlayerRoute("/api/player/attempts", token, { method: "POST", body: JSON.stringify({ questionId: qId, mode: "learning" }) });
+    // Nunca respondida/confirmada — permanece in_progress.
+    const items = await getPatternPerformanceOverview(db as never, "overview-inprogress", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.evidence.confirmedAttempts).toBe(0);
+    expect(pat1.accuracy).toBeNull();
+    expect(pat1.state.code).toBe("sem_evidencias");
+  });
+
+  it("tentativa abandoned nunca entra em accuracy nem em confirmedAttempts", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-abandoned" });
+    const token = await ensureUserSession("overview-abandoned");
+    const create = await callPlayerRoute("/api/player/attempts", token, { method: "POST", body: JSON.stringify({ questionId: qId, mode: "learning" }) });
+    const { attemptId } = (await create.json()) as { attemptId: string };
+    db.sqlite.exec(`UPDATE question_attempts SET status = 'abandoned' WHERE id = '${attemptId}'`);
+    const items = await getPatternPerformanceOverview(db as never, "overview-abandoned", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.evidence.confirmedAttempts).toBe(0);
+    expect(pat1.accuracy).toBeNull();
+  });
+
+  it("vínculo SECUNDÁRIO nunca contribui para a evidência do overview (mesmo isolamento já provado para getPatternEvidence)", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-secondary" });
+    db.sqlite.exec(`INSERT INTO question_patterns (id, question_id, pattern_id, role) VALUES ('qp-overview-sec', '${qId}', 'pat-2', 'secundario')`);
+    await startAndConfirm("overview-secondary", qId, "B");
+    const items = await getPatternPerformanceOverview(db as never, "overview-secondary", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    const pat2 = findOverviewItem(items, "pat-2");
+    expect(pat1.evidence.confirmedAttempts).toBe(1); // padrão principal real da questão
+    expect(pat2.evidence.confirmedAttempts).toBe(0); // vínculo secundário nunca conta
+  });
+
+  it("dependência de ajuda: attemptsWithHelp conta tentativas CONFIRMADAS distintas, nunca o total bruto de aberturas de camada", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-help" });
+    const token = await ensureUserSession("overview-help");
+    const create = await callPlayerRoute("/api/player/attempts", token, { method: "POST", body: JSON.stringify({ questionId: qId, mode: "learning" }) });
+    const { attemptId } = (await create.json()) as { attemptId: string };
+    await callPlayerRoute(`/api/player/attempts/${attemptId}/help/1`, token, { method: "POST", body: JSON.stringify({ version: 1 }) });
+    await callPlayerRoute(`/api/player/attempts/${attemptId}/help/2`, token, { method: "POST", body: JSON.stringify({ version: 2 }) });
+    await callPlayerRoute(`/api/player/attempts/${attemptId}/answer`, token, { method: "PATCH", body: JSON.stringify({ version: 3, alternative: "B" }) });
+    await callPlayerRoute(`/api/player/attempts/${attemptId}/confirm`, token, { method: "POST", body: JSON.stringify({ version: 4 }) });
+    const items = await getPatternPerformanceOverview(db as never, "overview-help", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.evidence.attemptsWithHelp).toBe(1); // uma tentativa, duas camadas abertas — conta 1, nunca 2
+  });
+
+  it("lastPracticeAt reflete a tentativa CONFIRMADA mais recente", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-lastpractice" });
+    await startAndConfirm("overview-lastpractice", qId, "B");
+    const items = await getPatternPerformanceOverview(db as never, "overview-lastpractice", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.evidence.lastPracticeAt).not.toBeNull();
+    const real = countRows("question_attempts", `WHERE user_id = 'overview-lastpractice' AND status = 'completed'`);
+    expect(real).toBe(1);
+  });
+
+  it("revisão correta/incorreta entram no padrão PRINCIPAL correto (reviewsCorrect/reviewsIncorrect)", async () => {
+    const originalId = seedPublishedQuestion({ id: "q-overview-review-orig" });
+    seedPublishedQuestion({ id: "q-overview-review-sim" });
+    await startAndConfirm("overview-review", originalId, "A"); // errada, cria a entrada
+    const entry = await findEntryByUserAndQuestion(db as never, "overview-review", originalId);
+    const token = await ensureUserSession("overview-review");
+    const start = await callNotebookRoute(`/api/error-notebook/${entry!.id}/start-review`, token, { method: "POST" });
+    const { attemptId } = (await start.json()) as { attemptId: string };
+    await callPlayerRoute(`/api/player/attempts/${attemptId}/answer`, token, { method: "PATCH", body: JSON.stringify({ version: 1, alternative: "B" }) });
+    await callPlayerRoute(`/api/player/attempts/${attemptId}/confirm`, token, { method: "POST", body: JSON.stringify({ version: 2 }) });
+
+    const items = await getPatternPerformanceOverview(db as never, "overview-review", false);
+    const pat1 = findOverviewItem(items, "pat-1");
+    expect(pat1.evidence.reviewsCorrect).toBe(1);
+    expect(pat1.evidence.reviewsIncorrect).toBe(0);
+  });
+});
+
+describe("isolamento entre alunos — getPatternPerformanceOverview (Sprint 21, seção 22)", () => {
+  it("aluno A só vê a própria evidência agregada, nunca a de B", async () => {
+    const qId = seedPublishedQuestion({ id: "q-overview-isolation" });
+    await startAndConfirm("overview-iso-a", qId, "B");
+    await startAndConfirm("overview-iso-b", qId, "A");
+    await startAndConfirm("overview-iso-b", qId, "A");
+
+    const itemsA = await getPatternPerformanceOverview(db as never, "overview-iso-a", false);
+    const itemsB = await getPatternPerformanceOverview(db as never, "overview-iso-b", false);
+
+    expect(findOverviewItem(itemsA, "pat-1").evidence.confirmedAttempts).toBe(1);
+    expect(findOverviewItem(itemsA, "pat-1").evidence.correctCount).toBe(1);
+    expect(findOverviewItem(itemsB, "pat-1").evidence.confirmedAttempts).toBe(2);
+    expect(findOverviewItem(itemsB, "pat-1").evidence.incorrectCount).toBe(2);
+  });
+});
+
+describe("endpoint /api/student-metrics/patterns/overview — HTTP (Sprint 21)", () => {
+  it("sem sessão responde 401", async () => {
+    const response = await callMetricsRoute("/api/student-metrics/patterns/overview", null);
+    expect(response.status).toBe(401);
+  });
+
+  it("com sessão responde 200 com o catálogo publicado, roteado ANTES de /patterns/:slug (nunca casa 'overview' como slug)", async () => {
+    const token = await ensureUserSession("overview-http-1");
+    const response = await callMetricsRoute("/api/student-metrics/patterns/overview", token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { patterns: PatternPerformanceOverviewItemDTO[] };
+    expect(body.patterns.map((p) => p.pattern.id).sort()).toEqual(["pat-1", "pat-2"]);
+  });
+
+  it("GET nunca escreve: nenhuma tabela de evidência muda com a chamada", async () => {
+    const token = await ensureUserSession("overview-http-2");
+    const before = countRows("question_attempts") + countRows("error_notebook_entries") + countRows("error_review_events");
+    await callMetricsRoute("/api/student-metrics/patterns/overview", token);
+    const after = countRows("question_attempts") + countRows("error_notebook_entries") + countRows("error_review_events");
+    expect(after).toBe(before);
+  });
+});
+
+describe("derivePatternAttention — regra centralizada (Sprint 21, seção 7 da ordem)", () => {
+  const BASE = { confirmedAttempts: 0, correctCount: 0, incorrectCount: 0, attemptsWithHelp: 0, reviewsIncorrect: 0 };
+
+  it("revisao_pendente → sempre needed=true, independente de qualquer outro contador", () => {
+    const result = derivePatternAttention({ ...BASE, state: "revisao_pendente", confirmedAttempts: 0 });
+    expect(result.needed).toBe(true);
+    expect(result.reason).not.toBeNull();
+  });
+
+  it("1 tentativa errada (evidencias_iniciais, abaixo do mínimo de 3) → NÃO precisa de atenção automaticamente", () => {
+    const result = derivePatternAttention({ ...BASE, state: "evidencias_iniciais", confirmedAttempts: 1, incorrectCount: 1 });
+    expect(result.needed).toBe(false);
+  });
+
+  it("2 tentativas (ainda evidencias_iniciais, abaixo do mínimo de 3) → ainda não classifica agressivamente", () => {
+    const result = derivePatternAttention({ ...BASE, state: "evidencias_iniciais", confirmedAttempts: 2, incorrectCount: 2 });
+    expect(result.needed).toBe(false);
+  });
+
+  it("confirmedAttempts suficiente (>=3) + em_desenvolvimento + mais erros que acertos → attention=true", () => {
+    const result = derivePatternAttention({ ...BASE, state: "em_desenvolvimento", confirmedAttempts: 3, correctCount: 1, incorrectCount: 2 });
+    expect(result.needed).toBe(true);
+    expect(result.reason).not.toBeNull();
+  });
+
+  it("em_desenvolvimento + confirmedAttempts suficiente MAS sem nenhuma evidência negativa → attention=false", () => {
+    const result = derivePatternAttention({ ...BASE, state: "em_desenvolvimento", confirmedAttempts: 3, correctCount: 3, incorrectCount: 0 });
+    expect(result.needed).toBe(false);
+  });
+
+  it("em_desenvolvimento + alta dependência de ajuda (acima do limiar já existente) → attention=true", () => {
+    const result = derivePatternAttention({
+      ...BASE,
+      state: "em_desenvolvimento",
+      confirmedAttempts: 4,
+      correctCount: 4,
+      incorrectCount: 0,
+      attemptsWithHelp: 3, // 75% > MAX_HELP_DEPENDENCY_RATIO_FOR_CONSISTENT (0.5)
+    });
+    expect(result.needed).toBe(true);
+  });
+
+  it("em_desenvolvimento + revisão incorreta registrada → attention=true", () => {
+    const result = derivePatternAttention({ ...BASE, state: "em_desenvolvimento", confirmedAttempts: 3, correctCount: 3, incorrectCount: 0, reviewsIncorrect: 1 });
+    expect(result.needed).toBe(true);
+  });
+
+  it("consistente_no_recorte → nunca precisa de atenção, mesmo hipoteticamente com contadores ruins", () => {
+    const result = derivePatternAttention({ ...BASE, state: "consistente_no_recorte", confirmedAttempts: 10, correctCount: 1, incorrectCount: 9 });
+    expect(result.needed).toBe(false);
+  });
+
+  it("sem_evidencias → nunca precisa de atenção", () => {
+    const result = derivePatternAttention({ ...BASE, state: "sem_evidencias" });
+    expect(result.needed).toBe(false);
+  });
+
+  it("nunca é um score combinado: dois padrões com o mesmo state e MESMOS contadores produzem o MESMO resultado (determinístico, sem aleatoriedade)", () => {
+    const input = { ...BASE, state: "em_desenvolvimento" as const, confirmedAttempts: 3, correctCount: 1, incorrectCount: 2 };
+    expect(derivePatternAttention(input)).toEqual(derivePatternAttention(input));
+  });
+});
+
+describe("ordenação de prioridade de ação (Sprint 21, seção 10 da ordem — nunca ranking de nota)", () => {
+  it("revisao_pendente vem antes de attention, que vem antes de em_desenvolvimento, evidencias_iniciais, sem_evidencias, consistente_no_recorte", async () => {
+    // pat-1: sem evidência (permanece sem_evidencias).
+    // pat-2: revisão vencida (revisao_pendente) — prioridade máxima.
+    seedPublishedQuestion({ id: "q-order-1", patternId: "pat-2" });
+    await startAndConfirm("overview-order", "q-order-1", "A"); // errada, cria entrada
+    const entry = await findEntryByUserAndQuestion(db as never, "overview-order", "q-order-1");
+    db.sqlite.exec(`UPDATE error_notebook_entries SET next_review_at = '2020-01-01T00:00:00.000Z' WHERE id = '${entry!.id}'`);
+
+    const items = await getPatternPerformanceOverview(db as never, "overview-order", false);
+    expect(items[0].pattern.id).toBe("pat-2");
+    expect(items[0].state.code).toBe("revisao_pendente");
+    expect(items[1].pattern.id).toBe("pat-1");
+    expect(items[1].state.code).toBe("sem_evidencias");
+  });
+});
+
+describe("performance D1 — 20 padrões published, sem N+1 (Sprint 21, seção 21 da ordem)", () => {
+  it("20 padrões publicados → menos de 20 chamadas D1 para o overview completo (meta <= 6)", async () => {
+    for (let i = 3; i <= 20; i++) {
+      db.sqlite.exec(
+        `INSERT INTO patterns (id, code, slug, name, recognition_phrase, description, main_strategy, introductory_example, strategic_summary, editorial_status)
+         VALUES ('pat-${i}', 'PAD-${String(i).padStart(2, "0")}', 'padrao-${i}', 'Padrão ${i}', 'F', 'D', 'E', 'X', 'R', 'published')`
+      );
+    }
+    expect(countRows("patterns", `WHERE editorial_status = 'published'`)).toBe(20);
+
+    db.resetD1CallCount();
+    const items = await getPatternPerformanceOverview(db as never, "overview-perf", false);
+    const calls = db.getD1CallCount();
+
+    expect(items).toHaveLength(20);
+    expect(calls).toBeLessThan(20);
+    expect(calls).toBeLessThanOrEqual(6);
   });
 });

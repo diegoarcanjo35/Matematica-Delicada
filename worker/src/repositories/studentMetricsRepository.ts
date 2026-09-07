@@ -357,3 +357,155 @@ export async function listRecentActivity(db: D1Database, userId: string, limit: 
     reviewResult: row.review_result,
   }));
 }
+
+/* ---------------------------------------------------------------------------
+ * Sprint 21 — Dashboard de Desempenho por Padrão (seção 4 da ordem: "evitar
+ * N+1"). `getPatternEvidence` acima é ótimo para UM padrão (chamado uma vez
+ * pela lista/detalhe do Mapa ENEM, Sprint 10), mas soma 6 consultas por
+ * padrão — inaceitável para um dashboard com TODOS os padrões publicados de
+ * uma vez (20 padrões × 6 = 120 idas ao D1). As quatro funções abaixo
+ * substituem isso por consultas AGREGADAS (GROUP BY pattern_id), sempre
+ * escopadas por `user_id` no próprio SQL: uma volta por métrica, nunca uma
+ * volta por padrão. Os nomes de campo espelham deliberadamente
+ * `PatternEvidenceRow` (mesma semântica, nunca uma segunda definição de
+ * "o que conta como tentativa confirmada" — só a forma de buscar mudou). */
+
+export interface PatternAttemptAggregateRow {
+  patternId: string;
+  confirmedAttempts: number;
+  correctCount: number;
+  incorrectCount: number;
+  distinctQuestionsUsed: number;
+  distinctPracticeDays: number;
+  firstConfirmedAt: string | null;
+  lastPracticeAt: string | null;
+}
+
+/** Um registro por padrão (só os padrões que já têm ao menos uma tentativa
+ *  deste aluno aparecem — o chamador preenche zero/null para os demais).
+ *  Mesma convenção de `getAttemptAggregate` (tentativa `in_progress`/
+ *  `abandoned` nunca conta como confirmada; questão repetida incrementa
+ *  volume, nunca `distinctQuestionsUsed`; só padrão PRINCIPAL). */
+export async function listPatternAttemptAggregates(db: D1Database, userId: string): Promise<PatternAttemptAggregateRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT
+         qp.pattern_id AS pattern_id,
+         COALESCE(SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END), 0) AS confirmed_attempts,
+         COALESCE(SUM(CASE WHEN a.status = 'completed' AND a.is_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count,
+         COALESCE(SUM(CASE WHEN a.status = 'completed' AND a.is_correct = 0 THEN 1 ELSE 0 END), 0) AS incorrect_count,
+         COUNT(DISTINCT CASE WHEN a.status = 'completed' THEN a.question_id END) AS distinct_questions_used,
+         COUNT(DISTINCT CASE WHEN a.status = 'completed' THEN date(a.completed_at) END) AS distinct_practice_days,
+         MIN(CASE WHEN a.status = 'completed' THEN a.completed_at END) AS first_confirmed_at,
+         MAX(CASE WHEN a.status = 'completed' THEN a.completed_at END) AS last_practice_at
+       FROM question_patterns qp
+       JOIN question_attempts a ON a.question_id = qp.question_id AND a.user_id = ?
+       WHERE qp.role = 'principal'
+       GROUP BY qp.pattern_id`
+    )
+    .bind(userId)
+    .all<{
+      pattern_id: string;
+      confirmed_attempts: number;
+      correct_count: number;
+      incorrect_count: number;
+      distinct_questions_used: number;
+      distinct_practice_days: number;
+      first_confirmed_at: string | null;
+      last_practice_at: string | null;
+    }>();
+  return (result.results ?? []).map((row) => ({
+    patternId: row.pattern_id,
+    confirmedAttempts: row.confirmed_attempts,
+    correctCount: row.correct_count,
+    incorrectCount: row.incorrect_count,
+    distinctQuestionsUsed: row.distinct_questions_used,
+    distinctPracticeDays: row.distinct_practice_days,
+    firstConfirmedAt: row.first_confirmed_at,
+    lastPracticeAt: row.last_practice_at,
+  }));
+}
+
+export interface PatternHelpAggregateRow {
+  patternId: string;
+  attemptsWithHelp: number;
+}
+
+/** Mesma semântica de `countAttemptsWithHelp` (uma tentativa CONFIRMADA
+ *  conta no máximo 1 vez, mesmo com várias camadas abertas), agregada por
+ *  padrão numa única consulta. */
+export async function listPatternHelpAggregates(db: D1Database, userId: string): Promise<PatternHelpAggregateRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT qp.pattern_id AS pattern_id, COUNT(DISTINCT he.attempt_id) AS attempts_with_help
+       FROM question_help_events he
+       JOIN question_attempts a ON a.id = he.attempt_id AND a.status = 'completed' AND a.user_id = ?
+       JOIN question_patterns qp ON qp.question_id = a.question_id AND qp.role = 'principal'
+       GROUP BY qp.pattern_id`
+    )
+    .bind(userId)
+    .all<{ pattern_id: string; attempts_with_help: number }>();
+  return (result.results ?? []).map((row) => ({ patternId: row.pattern_id, attemptsWithHelp: row.attempts_with_help }));
+}
+
+export interface PatternActiveReviewRow {
+  patternId: string;
+  status: string;
+  nextReviewAt: string | null;
+}
+
+/** Entrada ATIVA (nunca `archived`/`corrected`) mais próxima de vencer, POR
+ *  padrão — mesma semântica de `findActiveErrorEntry`, mas para todos os
+ *  padrões de uma vez: uma única consulta ordenada por vencimento, agrupada
+ *  em memória (a primeira linha de cada `pattern_id`, já ordenada por
+ *  `next_review_at ASC`, é a mais próxima de vencer — nunca recomputado por
+ *  padrão). O volume de entradas ATIVAS de um aluno é sempre pequeno
+ *  (limitado pela prática pedagógica real, nunca pela quantidade de
+ *  padrões publicados), então isto continua sendo UMA consulta barata. */
+export async function listPatternActiveReviews(db: D1Database, userId: string): Promise<PatternActiveReviewRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT primary_pattern_id AS pattern_id, status, next_review_at
+       FROM error_notebook_entries
+       WHERE user_id = ? AND status != 'archived' AND status != 'corrected' AND primary_pattern_id IS NOT NULL
+       ORDER BY next_review_at ASC, id ASC`
+    )
+    .bind(userId)
+    .all<{ pattern_id: string; status: string; next_review_at: string | null }>();
+  const seen = new Set<string>();
+  const rows: PatternActiveReviewRow[] = [];
+  for (const row of result.results ?? []) {
+    if (seen.has(row.pattern_id)) continue; // já ordenado por vencimento — a primeira ocorrência é a mais próxima.
+    seen.add(row.pattern_id);
+    rows.push({ patternId: row.pattern_id, status: row.status, nextReviewAt: row.next_review_at });
+  }
+  return rows;
+}
+
+export interface PatternReviewCountsRow {
+  patternId: string;
+  reviewsCorrect: number;
+  reviewsIncorrect: number;
+}
+
+/** Contagem de revisões corretas/incorretas por padrão — mesma semântica de
+ *  `getReviewCounts`, agregada numa única consulta. */
+export async function listPatternReviewCounts(db: D1Database, userId: string): Promise<PatternReviewCountsRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT e.primary_pattern_id AS pattern_id,
+              COALESCE(SUM(CASE WHEN r.result = 'correct' THEN 1 ELSE 0 END), 0) AS reviews_correct,
+              COALESCE(SUM(CASE WHEN r.result = 'incorrect' THEN 1 ELSE 0 END), 0) AS reviews_incorrect
+       FROM error_review_events r
+       JOIN error_notebook_entries e ON e.id = r.entry_id
+       WHERE r.user_id = ? AND e.primary_pattern_id IS NOT NULL
+       GROUP BY e.primary_pattern_id`
+    )
+    .bind(userId)
+    .all<{ pattern_id: string; reviews_correct: number; reviews_incorrect: number }>();
+  return (result.results ?? []).map((row) => ({
+    patternId: row.pattern_id,
+    reviewsCorrect: row.reviews_correct,
+    reviewsIncorrect: row.reviews_incorrect,
+  }));
+}

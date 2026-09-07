@@ -18,10 +18,21 @@ import {
   listPublishedPatterns,
   type PatternRow,
 } from "../repositories/patternsRepository";
-import { getPatternEvidence, listRecentActivity, type PatternEvidenceRow } from "../repositories/studentMetricsRepository";
 import {
+  getPatternEvidence,
+  listPatternActiveReviews,
+  listPatternAttemptAggregates,
+  listPatternHelpAggregates,
+  listPatternReviewCounts,
+  listRecentActivity,
+  type PatternEvidenceRow,
+} from "../repositories/studentMetricsRepository";
+import { listPublishedPatternsWithTrainableCounts } from "../repositories/dailyTrainingRepository";
+import {
+  derivePatternAttention,
   deriveProvisionalState,
   PROVISIONAL_STATE_LABELS,
+  type PatternAttentionResult,
   type ProvisionalState,
 } from "../lib/studentMetricsRules";
 import type { Clock } from "./scheduleService";
@@ -266,4 +277,139 @@ export async function getRecentActivity(db: D1Database, userId: string, limit: n
       reviewResult: row.reviewResult,
     };
   });
+}
+
+/* ---------------------------------------------------------------------------
+ * Sprint 21 — Dashboard de Desempenho por Padrão. Reaproveita 100% da
+ * camada existente (`deriveProvisionalState`, `PROVISIONAL_STATE_LABELS`,
+ * a nova `derivePatternAttention`) — nenhuma fórmula de domínio nova.
+ * Diferente de `listPatternMetrics` acima (que chama `getPatternEvidence`
+ * uma vez POR padrão — aceitável para o Mapa ENEM, que sempre foi uma tela
+ * separada), esta função usa 5 consultas AGREGADAS no total, sempre — nunca
+ * cresce com o número de padrões publicados (seção 4/21 da ordem). */
+
+export interface PatternPerformanceOverviewItemDTO {
+  pattern: { id: string; slug: string; name: string; mainStrategy: string };
+  evidence: {
+    confirmedAttempts: number;
+    correctCount: number;
+    incorrectCount: number;
+    distinctQuestionsUsed: number;
+    distinctPracticeDays: number;
+    attemptsWithHelp: number;
+    reviewsCorrect: number;
+    reviewsIncorrect: number;
+    lastPracticeAt: string | null;
+  };
+  accuracy: number | null;
+  state: { code: ProvisionalState; label: string };
+  attention: PatternAttentionResult;
+  /** Sprint 20 — reaproveita `listPublishedPatternsWithTrainableCounts`
+   *  (dailyTrainingRepository.ts) para o CTA "Treinar este padrão" saber,
+   *  sem N+1, se há questão publicada elegível (seção 17/18 da ordem). */
+  training: { canTrain: boolean; availableQuestionCount: number };
+}
+
+/** Prioridade de AÇÃO (nunca nota — seção 10 da ordem: "isso é prioridade
+ *  de ação, NÃO nota"). Menor número = mostrado primeiro. */
+function performanceSortPriority(state: ProvisionalState, attentionNeeded: boolean): number {
+  if (state === "revisao_pendente") return 0;
+  if (attentionNeeded) return 1;
+  if (state === "em_desenvolvimento") return 2;
+  if (state === "evidencias_iniciais") return 3;
+  if (state === "sem_evidencias") return 4;
+  return 5; // consistente_no_recorte
+}
+
+/** Visão agregada de desempenho por padrão (seção 5, endpoint
+ *  `/api/student-metrics/patterns/overview`). `fixturesAllowed` chega
+ *  SEMPRE calculado pela rota (`isLocalEditorialFixturesAllowed`), mesmo
+ *  padrão de todo o namespace do Treino Diário (Sprint 20) — nunca lido de
+ *  header/query/body. Ordenação de prioridade de ação aplicada aqui, uma
+ *  única vez, nunca recalculada no cliente. */
+export async function getPatternPerformanceOverview(
+  db: D1Database,
+  userId: string,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<PatternPerformanceOverviewItemDTO[]> {
+  const [catalog, attemptAggregates, helpAggregates, activeReviews, reviewCounts] = await Promise.all([
+    listPublishedPatternsWithTrainableCounts(db, fixturesAllowed),
+    listPatternAttemptAggregates(db, userId),
+    listPatternHelpAggregates(db, userId),
+    listPatternActiveReviews(db, userId),
+    listPatternReviewCounts(db, userId),
+  ]);
+
+  const attemptsByPattern = new Map(attemptAggregates.map((row) => [row.patternId, row]));
+  const helpByPattern = new Map(helpAggregates.map((row) => [row.patternId, row]));
+  const activeReviewByPattern = new Map(activeReviews.map((row) => [row.patternId, row]));
+  const reviewCountsByPattern = new Map(reviewCounts.map((row) => [row.patternId, row]));
+  const now = clock.now().getTime();
+
+  const items: PatternPerformanceOverviewItemDTO[] = catalog.map((pattern) => {
+    const attempts = attemptsByPattern.get(pattern.id);
+    const help = helpByPattern.get(pattern.id);
+    const activeReview = activeReviewByPattern.get(pattern.id);
+    const reviews = reviewCountsByPattern.get(pattern.id);
+
+    const confirmedAttempts = attempts?.confirmedAttempts ?? 0;
+    const correctCount = attempts?.correctCount ?? 0;
+    const incorrectCount = attempts?.incorrectCount ?? 0;
+    const distinctQuestionsUsed = attempts?.distinctQuestionsUsed ?? 0;
+    const distinctPracticeDays = attempts?.distinctPracticeDays ?? 0;
+    const firstConfirmedAt = attempts?.firstConfirmedAt ?? null;
+    const lastPracticeAt = attempts?.lastPracticeAt ?? null;
+    const attemptsWithHelp = help?.attemptsWithHelp ?? 0;
+    const reviewsCorrect = reviews?.reviewsCorrect ?? 0;
+    const reviewsIncorrect = reviews?.reviewsIncorrect ?? 0;
+
+    // Mesma semântica de `hasOverdueActiveReview` acima (Mapa ENEM): entrada
+    // ATIVA (já filtrada na consulta — nunca archived/corrected) com
+    // next_review_at já vencido. Nenhum critério novo.
+    const hasOverdueActiveReview = Boolean(activeReview?.nextReviewAt && new Date(activeReview.nextReviewAt).getTime() <= now);
+
+    const state = deriveProvisionalState({
+      confirmedAttempts,
+      correctCount,
+      distinctQuestionsUsed,
+      distinctSessionDates: distinctPracticeDays,
+      hasCorrectReview: reviewsCorrect > 0,
+      firstConfirmedAt,
+      lastConfirmedAt: lastPracticeAt,
+      attemptsWithHelp,
+      hasOverdueActiveReview,
+    });
+
+    const attention = derivePatternAttention({ state, confirmedAttempts, correctCount, incorrectCount, attemptsWithHelp, reviewsIncorrect });
+
+    const accuracy = correctCount + incorrectCount > 0 ? correctCount / (correctCount + incorrectCount) : null;
+
+    return {
+      pattern: { id: pattern.id, slug: pattern.slug, name: pattern.name, mainStrategy: pattern.main_strategy },
+      evidence: {
+        confirmedAttempts,
+        correctCount,
+        incorrectCount,
+        distinctQuestionsUsed,
+        distinctPracticeDays,
+        attemptsWithHelp,
+        reviewsCorrect,
+        reviewsIncorrect,
+        lastPracticeAt,
+      },
+      accuracy,
+      state: { code: state, label: PROVISIONAL_STATE_LABELS[state] },
+      attention,
+      training: { canTrain: pattern.available_count > 0, availableQuestionCount: pattern.available_count },
+    };
+  });
+
+  items.sort((a, b) => {
+    const priorityDiff = performanceSortPriority(a.state.code, a.attention.needed) - performanceSortPriority(b.state.code, b.attention.needed);
+    if (priorityDiff !== 0) return priorityDiff;
+    return a.pattern.name.localeCompare(b.pattern.name, "pt-BR");
+  });
+
+  return items;
 }
