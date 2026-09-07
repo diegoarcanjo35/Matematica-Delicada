@@ -881,6 +881,11 @@ export interface QuestionDetailDto extends QuestionSummaryDto {
     position: number;
     placement: string;
     alternativeLetter: string | null;
+    /** Sprint 18.1, seção C da correção — o cliente usa isto para decidir
+     *  como exibir a imagem: 'r2' vai por /api/question-media/:id; 'local'
+     *  é um asset estático do repositório (compatibilidade com imagens
+     *  pré-Sprint-18). */
+    storageKind: string;
   }>;
   padroes: Array<{ patternId: string; role: string }>;
   tags: string[];
@@ -973,6 +978,7 @@ function toDetailDto(
       position: i.position,
       placement: i.placement,
       alternativeLetter: i.alternative_letter,
+      storageKind: i.storage_kind,
     })),
     padroes: patterns.map((p) => ({ patternId: p.pattern_id, role: p.role })),
     tags: tags.map((t) => t.content),

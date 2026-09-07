@@ -2,7 +2,9 @@ import { useRef, useState } from "react";
 import { Button } from "../../components/Button";
 import {
   deleteQuestionImage,
+  localAssetUrl,
   questionMediaUrl,
+  updateQuestionImageMetadata,
   uploadQuestionImage,
   type QuestionImageDto,
 } from "../../api/editorialClient";
@@ -10,9 +12,22 @@ import {
 /* Sprint 18, seção 14 da ordem — zona de upload de imagem reutilizada tanto
    para o enunciado quanto para cada alternativa A-E. A Andreia NUNCA digita
    asset_ref/URL/object key: só seleciona arquivo, arrasta/solta, ou cola
-   (Ctrl+V) uma imagem copiada. Alt text é OBRIGATÓRIO no momento do envio
-   (o contrato desta sprint só tem upload/delete dedicados — sem endpoint de
-   edição de metadado; para corrigir o alt text depois, remove e reenvia). */
+   (Ctrl+V) uma imagem copiada.
+
+   Sprint 18.1, seção B da correção — o alt text de uma imagem já enviada
+   agora é editável in-line (endpoint PATCH dedicado de metadado); Andreia
+   não precisa mais remover e reenviar a imagem só para corrigir a
+   descrição — "Remover" continua uma ação separada.
+
+   Sprint 18.1, seção C da correção — imagens locais legadas
+   (`storageKind === 'local'`) e imagens novas via R2 (`storageKind ===
+   'r2'`) usam URLs de exibição DIFERENTES (ver localAssetUrl/
+   questionMediaUrl em editorialClient.ts); a rota /api/question-media
+   nunca serve um asset local (404). */
+
+function imageSrc(image: QuestionImageDto): string {
+  return image.storageKind === "r2" ? questionMediaUrl(image.id) : localAssetUrl(image.assetRef);
+}
 
 interface Props {
   questionId: string;
@@ -31,7 +46,29 @@ export function ImageUploadZone({ questionId, placement, alternativeLetter, imag
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingAltId, setEditingAltId] = useState<string | null>(null);
+  const [editingAltDraft, setEditingAltDraft] = useState("");
+  const [savingAltId, setSavingAltId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function startEditingAlt(image: QuestionImageDto) {
+    setEditingAltId(image.id);
+    setEditingAltDraft(image.altText);
+  }
+
+  async function handleSaveAlt(imageId: string) {
+    if (editingAltDraft.trim().length === 0) return;
+    setSavingAltId(imageId);
+    try {
+      await updateQuestionImageMetadata(questionId, imageId, { mutationId: crypto.randomUUID(), altText: editingAltDraft.trim() });
+      setEditingAltId(null);
+      onChanged();
+    } catch {
+      setError("Não foi possível salvar o texto alternativo. Tente novamente.");
+    } finally {
+      setSavingAltId(null);
+    }
+  }
 
   function acceptFile(file: File) {
     setError(null);
@@ -104,8 +141,28 @@ export function ImageUploadZone({ questionId, placement, alternativeLetter, imag
         <ul className="editorial__image-list">
           {images.map((image) => (
             <li key={image.id} className="editorial__image-item">
-              <img src={questionMediaUrl(image.id)} alt={image.altText} className="editorial__image-thumb" />
-              <span className="editorial__image-alt">{image.altText}</span>
+              <img src={imageSrc(image)} alt={image.altText} className="editorial__image-thumb" />
+              {editingAltId === image.id ? (
+                <div className="editorial__field">
+                  <label htmlFor={`alt-edit-${image.id}`}>Texto alternativo</label>
+                  <input id={`alt-edit-${image.id}`} value={editingAltDraft} onChange={(e) => setEditingAltDraft(e.target.value)} />
+                  <div className="editorial__actions">
+                    <Button type="button" onClick={() => void handleSaveAlt(image.id)} isLoading={savingAltId === image.id}>
+                      Salvar
+                    </Button>
+                    <Button type="button" variant="secondary" onClick={() => setEditingAltId(null)} disabled={savingAltId === image.id}>
+                      Cancelar
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <span className="editorial__image-alt">{image.altText}</span>
+                  <Button type="button" variant="secondary" onClick={() => startEditingAlt(image)}>
+                    Editar descrição
+                  </Button>
+                </>
+              )}
               <Button type="button" variant="secondary" onClick={() => void handleRemove(image.id)} isLoading={deletingId === image.id}>
                 Remover
               </Button>

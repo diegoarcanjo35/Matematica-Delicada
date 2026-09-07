@@ -96,6 +96,7 @@ describe("migrations/0022_question_images_placement_r2.sql", () => {
     expect(byName.storage_kind).toMatchObject({ type: "TEXT", notnull: 1, dflt_value: "'local'" });
     expect(byName.mime_type).toMatchObject({ type: "TEXT", notnull: 0 });
     expect(byName.size_bytes).toMatchObject({ type: "INTEGER", notnull: 0 });
+    expect(byName.content_sha256).toMatchObject({ type: "TEXT", notnull: 0 });
     db.close();
   });
 
@@ -111,6 +112,7 @@ describe("migrations/0022_question_images_placement_r2.sql", () => {
     expect(row.storage_kind).toBe("local");
     expect(row.mime_type).toBeNull();
     expect(row.size_bytes).toBeNull();
+    expect(row.content_sha256).toBeNull();
     db.close();
   });
 

@@ -25,11 +25,22 @@ export function generateOpaqueToken(): string {
   return toBase64Url(bytes);
 }
 
+async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** SHA-256 do token, em hex — é o que fica persistido no D1 (nunca o token bruto). */
 export async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return sha256HexBytes(new TextEncoder().encode(input));
+}
+
+/** Sprint 18.1, seção G da correção de auditoria — SHA-256 dos BYTES reais de
+ *  um upload de imagem (nunca do nome/metadado), usado como componente de
+ *  identidade forte de um retry de mutação (ver questionMediaService.ts:
+ *  addQuestionImage). Nunca persistimos os bytes em si, só este hash. */
+export async function sha256HexOfBytes(bytes: Uint8Array): Promise<string> {
+  return sha256HexBytes(bytes);
 }
 
 /* Hash de senha — PBKDF2-HMAC-SHA256, primitiva consolidada disponível via

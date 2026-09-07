@@ -34,14 +34,18 @@ import {
   type AllowedImageUploadMimeType,
 } from "../lib/questionsValidation";
 import { isDeclaredMimeConsistent, sniffImageMimeType } from "../lib/imageSniffing";
+import { sha256HexOfBytes } from "../lib/crypto";
 import {
+  buildGuardedQuestionImageAuditStatement,
   buildStandaloneDeleteImageStatement,
   buildStandaloneInsertImageStatement,
+  buildStandaloneUpdateImageMetadataStatement,
   countImagesForQuestion,
   findImageById,
   findQuestionById,
   type QuestionImageRow,
 } from "../repositories/questionRepository";
+import type { AuditEventType } from "../repositories/auditRepository";
 
 export interface QuestionImageDto {
   id: string;
@@ -51,6 +55,12 @@ export interface QuestionImageDto {
   position: number;
   placement: "enunciado" | "alternativa";
   alternativeLetter: string | null;
+  /** Sprint 18.1, seção C da correção — o cliente precisa saber qual regime
+   *  de exibição usar: 'r2' vai por /api/question-media/:id (rota
+   *  controlada); 'local' é um asset estático do próprio repositório
+   *  (compatibilidade com imagens pré-Sprint-18, nunca servidas por
+   *  question-media). */
+  storageKind: "local" | "r2";
 }
 
 function toImageDto(row: QuestionImageRow): QuestionImageDto {
@@ -62,7 +72,29 @@ function toImageDto(row: QuestionImageRow): QuestionImageDto {
     position: row.position,
     placement: row.placement,
     alternativeLetter: row.alternative_letter,
+    storageKind: row.storage_kind,
   };
+}
+
+/** Sprint 18.1, seção F da correção — metadado mínimo aceitável para a
+ *  trilha de auditoria do pipeline de imagens: NUNCA bytes, alt text
+ *  completo, nome original de arquivo ou conteúdo da questão — só os
+ *  identificadores técnicos que provam O QUE mudou, nunca o CONTEÚDO. */
+function buildImageAuditMetadata(params: {
+  questionId: string;
+  imageId: string;
+  placement: "enunciado" | "alternativa";
+  alternativeLetter: string | null;
+  storageKind: "local" | "r2";
+}): Record<string, string | number | boolean> {
+  const metadata: Record<string, string | number | boolean> = {
+    questionId: params.questionId,
+    imageId: params.imageId,
+    placement: params.placement,
+    storageKind: params.storageKind,
+  };
+  if (params.alternativeLetter) metadata.alternativeLetter = params.alternativeLetter;
+  return metadata;
 }
 
 /* Mesmo formato "achatado" (um único tipo, campos de motivo de falha todos
@@ -89,6 +121,7 @@ export async function addQuestionImage(
   db: D1Database,
   bucket: R2Bucket,
   questionId: string,
+  actorUserId: string,
   input: {
     mutationId: string;
     placement: unknown;
@@ -99,25 +132,14 @@ export async function addQuestionImage(
     declaredMimeType: string | null;
   }
 ): Promise<AddImageResult> {
-  const question = await findQuestionById(db, questionId);
-  if (!question) return { ok: false, notFound: true };
-
-  // Idempotência: mutationId reaproveitado como o próprio `id` da imagem
-  // (mesmo idioma de patterns/diagnostic — mutationId = id). Um retry com o
-  // MESMO mutationId encontra a mesma linha já gravada — sucesso sem tocar
-  // R2 de novo. Verificado ANTES de qualquer outra validação/upload.
-  const existingByMutationId = await findImageById(db, input.mutationId);
-  if (existingByMutationId) {
-    if (existingByMutationId.question_id !== questionId) {
-      return { ok: false, conflict: true };
-    }
-    return { ok: true, changed: false, value: toImageDto(existingByMutationId) };
-  }
-
-  if (question.editorial_status !== "draft" && question.editorial_status !== "changes_requested") {
-    return { ok: false, fieldErrors: questionEditableStatusError(question.editorial_status) };
-  }
-
+  // Sprint 18.1, seção G da correção — ORDEM obrigatória: 1) validar/
+  // sniffar/hashear o REQUEST inteiro (nunca depende de estado do banco);
+  // 2) só então verificar se este mutationId já foi aplicado (retry); 3) só
+  // para uma operação GENUINAMENTE NOVA (mutationId nunca visto), aplicar o
+  // gate de status editável. Isso é o que permite um retry LEGÍTIMO
+  // continuar reconhecido mesmo que a questão tenha mudado de status depois
+  // da primeira aplicação — a prova de "já foi feito" é a IDENTIDADE exata
+  // da operação, nunca o status atual da questão.
   const placementResult = validateImagePlacement(input.placement, input.alternativeLetter);
   if (!placementResult.ok) return { ok: false, fieldErrors: { placement: placementResult.error! } };
   const altTextResult = validateImageAltText(input.altText);
@@ -141,6 +163,39 @@ export async function addQuestionImage(
     return { ok: false, fieldErrors: { file: "O tipo declarado do arquivo não corresponde ao conteúdo real." } };
   }
 
+  const altText = altTextResult.value!;
+  const caption = captionResult.value ?? null;
+  const placement = placementResult.value!.placement;
+  const alternativeLetter = placementResult.value!.alternativeLetter;
+  const contentSha256 = await sha256HexOfBytes(input.fileBytes);
+
+  // 2) Retry — reconhecido SÓ quando TODOS os componentes de identidade da
+  //    operação coincidem com o que já foi gravado sob este mutationId.
+  //    Qualquer divergência (arquivo diferente, altText diferente,
+  //    placement diferente, etc.) é 409 — nunca um "sucesso" silencioso
+  //    sobre dados diferentes de um mutationId reutilizado por engano.
+  const existingByMutationId = await findImageById(db, input.mutationId);
+  if (existingByMutationId) {
+    if (existingByMutationId.question_id !== questionId) return { ok: false, conflict: true };
+    const identityMatches =
+      existingByMutationId.placement === placement &&
+      existingByMutationId.alternative_letter === alternativeLetter &&
+      existingByMutationId.alt_text === altText &&
+      (existingByMutationId.caption ?? null) === caption &&
+      existingByMutationId.mime_type === sniffed &&
+      existingByMutationId.size_bytes === input.fileBytes.byteLength &&
+      existingByMutationId.content_sha256 === contentSha256;
+    if (!identityMatches) return { ok: false, conflict: true };
+    return { ok: true, changed: false, value: toImageDto(existingByMutationId) };
+  }
+
+  // 3) Operação GENUINAMENTE NOVA — só agora o gate de status se aplica.
+  const question = await findQuestionById(db, questionId);
+  if (!question) return { ok: false, notFound: true };
+  if (question.editorial_status !== "draft" && question.editorial_status !== "changes_requested") {
+    return { ok: false, fieldErrors: questionEditableStatusError(question.editorial_status) };
+  }
+
   const existingCount = await countImagesForQuestion(db, questionId);
   if (existingCount >= MAX_IMAGES_PER_QUESTION) {
     return { ok: false, fieldErrors: { file: `Esta questão já atingiu o limite de ${MAX_IMAGES_PER_QUESTION} imagens.` } };
@@ -161,14 +216,25 @@ export async function addQuestionImage(
         id: imageId,
         questionId,
         assetRef,
-        altText: altTextResult.value!,
-        caption: captionResult.value ?? null,
+        altText,
+        caption,
         position: existingCount,
-        placement: placementResult.value!.placement,
-        alternativeLetter: placementResult.value!.alternativeLetter,
+        placement,
+        alternativeLetter,
         storageKind: "r2",
         mimeType: sniffed,
         sizeBytes: input.fileBytes.byteLength,
+        contentSha256,
+      }),
+      // Sprint 18.1, seção F — mesmo batch da imagem: só grava trilha
+      // quando a imagem REALMENTE foi inserida nesta chamada (mesma guarda
+      // de status, ver buildGuardedQuestionImageAuditStatement).
+      buildGuardedQuestionImageAuditStatement(db, {
+        id: input.mutationId,
+        questionId,
+        eventType: "editorial_question_image_added" satisfies AuditEventType,
+        userId: actorUserId,
+        metadata: buildImageAuditMetadata({ questionId, imageId, placement, alternativeLetter, storageKind: "r2" }),
       }),
     ]);
     if (result[0].meta.changes !== 1) {
@@ -206,11 +272,88 @@ async function safeDeleteR2Object(bucket: R2Bucket, key: string): Promise<void> 
   }
 }
 
+/* ------------------------------ Metadado (alt text) -------------------------
+   Sprint 18.1, seção B da correção — edição dedicada de alt text/legenda,
+   SEM tocar bytes/R2/asset_ref. Andreia não precisa mais remover e reenviar
+   uma imagem só para corrigir a descrição. */
+
+export interface UpdateImageMetadataResult {
+  ok: boolean;
+  value?: QuestionImageDto;
+  changed?: boolean;
+  notFound?: boolean;
+  fieldErrors?: Record<string, string>;
+}
+
+export async function updateQuestionImageMetadata(
+  db: D1Database,
+  questionId: string,
+  imageId: string,
+  actorUserId: string,
+  input: { mutationId: string; altText: unknown; caption: unknown }
+): Promise<UpdateImageMetadataResult> {
+  const image = await findImageById(db, imageId);
+  if (!image || image.question_id !== questionId) return { ok: false, notFound: true };
+
+  const question = await findQuestionById(db, questionId);
+  if (!question) return { ok: false, notFound: true };
+  if (question.editorial_status !== "draft" && question.editorial_status !== "changes_requested") {
+    return { ok: false, fieldErrors: questionEditableStatusError(question.editorial_status) };
+  }
+
+  const altTextResult = validateImageAltText(input.altText);
+  if (!altTextResult.ok) return { ok: false, fieldErrors: { altText: altTextResult.error! } };
+  const captionResult = validateImageCaption(input.caption);
+  if (!captionResult.ok) return { ok: false, fieldErrors: { caption: captionResult.error! } };
+
+  const newAltText = altTextResult.value!;
+  const newCaption = captionResult.value ?? null;
+  const changed = newAltText !== image.alt_text || newCaption !== (image.caption ?? null);
+  if (!changed) {
+    // Idempotente: reenviar exatamente o que já está gravado nunca duplica
+    // trilha de auditoria nem toca o banco (seção F da correção: "auditar
+    // somente quando changed=true").
+    return { ok: true, changed: false, value: toImageDto(image) };
+  }
+
+  const result = await db.batch([
+    buildStandaloneUpdateImageMetadataStatement(db, { id: imageId, questionId, altText: newAltText, caption: newCaption }),
+    buildGuardedQuestionImageAuditStatement(db, {
+      id: input.mutationId,
+      questionId,
+      eventType: "editorial_question_image_updated" satisfies AuditEventType,
+      userId: actorUserId,
+      metadata: buildImageAuditMetadata({
+        questionId,
+        imageId,
+        placement: image.placement,
+        alternativeLetter: image.alternative_letter,
+        storageKind: image.storage_kind,
+      }),
+    }),
+  ]);
+  if (result[0].meta.changes !== 1) {
+    const after = await findQuestionById(db, questionId);
+    if (!after) return { ok: false, notFound: true };
+    return { ok: false, fieldErrors: questionEditableStatusError(after.editorial_status) };
+  }
+
+  const row = await findImageById(db, imageId);
+  if (!row) return { ok: false, notFound: true };
+  return { ok: true, changed: true, value: toImageDto(row) };
+}
+
 /* --------------------------------- Leitura --------------------------------- */
 
 export interface ImageDeliveryInfo {
   image: QuestionImageRow;
   questionEditorialStatus: string;
+  /** Sprint 18.1, seção D da correção — a rota de mídia precisa saber se a
+   *  questão dona da imagem é uma FIXTURE TÉCNICA LOCAL para aplicar o
+   *  MESMO gate fail-closed já usado para conteúdo do aluno (nunca vaza
+   *  fixture fora de dev local com a flag explícita, mesmo que a fixture
+   *  esteja, por erro, marcada como `published`). */
+  isLocalFixture: boolean;
 }
 
 /** Sprint 18, seção 13 da ordem — busca o metadado da imagem E o status da
@@ -224,7 +367,7 @@ export async function findImageForDelivery(db: D1Database, imageId: string): Pro
   if (!image) return null;
   const question = await findQuestionById(db, image.question_id);
   if (!question) return null;
-  return { image, questionEditorialStatus: question.editorial_status };
+  return { image, questionEditorialStatus: question.editorial_status, isLocalFixture: question.is_local_fixture === 1 };
 }
 
 export interface DeleteImageResult {
@@ -234,7 +377,13 @@ export interface DeleteImageResult {
   fieldErrors?: Record<string, string>;
 }
 
-export async function deleteQuestionImage(db: D1Database, bucket: R2Bucket, questionId: string, imageId: string): Promise<DeleteImageResult> {
+export async function deleteQuestionImage(
+  db: D1Database,
+  bucket: R2Bucket,
+  questionId: string,
+  imageId: string,
+  actorUserId: string
+): Promise<DeleteImageResult> {
   const image = await findImageById(db, imageId);
   if (!image || image.question_id !== questionId) {
     // Já não existe (ou nunca existiu para esta questão) — remoção
@@ -249,8 +398,25 @@ export async function deleteQuestionImage(db: D1Database, bucket: R2Bucket, ques
   }
 
   // 1) D1 primeiro (seção 12 da ordem) — a referência precisa deixar de
-  //    existir ANTES de qualquer tentativa de apagar o objeto do R2.
-  const result = await db.batch([buildStandaloneDeleteImageStatement(db, imageId, questionId)]);
+  //    existir ANTES de qualquer tentativa de apagar o objeto do R2. Mesmo
+  //    batch da auditoria (seção F da correção) — só grava trilha quando a
+  //    remoção realmente aconteceu nesta chamada (mesma guarda).
+  const result = await db.batch([
+    buildStandaloneDeleteImageStatement(db, imageId, questionId),
+    buildGuardedQuestionImageAuditStatement(db, {
+      id: crypto.randomUUID(),
+      questionId,
+      eventType: "editorial_question_image_removed" satisfies AuditEventType,
+      userId: actorUserId,
+      metadata: buildImageAuditMetadata({
+        questionId,
+        imageId,
+        placement: image.placement,
+        alternativeLetter: image.alternative_letter,
+        storageKind: image.storage_kind,
+      }),
+    }),
+  ]);
   if (result[0].meta.changes !== 1) {
     // Guard falhou entre a checagem acima e agora (corrida rara) — nada foi
     // removido, nenhuma limpeza R2 é tentada.

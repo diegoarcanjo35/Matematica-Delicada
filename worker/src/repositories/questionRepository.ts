@@ -79,6 +79,9 @@ export interface QuestionImageRow {
   storage_kind: "local" | "r2";
   mime_type: string | null;
   size_bytes: number | null;
+  /** Sprint 18.1 (correção de auditoria, seção G) — hash SHA-256 (hex) dos
+   *  bytes de um upload R2; `null` para toda imagem local legada. */
+  content_sha256: string | null;
 }
 
 export interface QuestionPatternRow {
@@ -227,20 +230,31 @@ export interface StandaloneImageInsertParams {
   storageKind: "local" | "r2";
   mimeType: string | null;
   sizeBytes: number | null;
+  contentSha256: string | null;
 }
 
-/** INSERT guardado só por status editável (nunca por versão — este
- *  pipeline não participa do versionamento de `questions`, ver nota acima).
- *  `id` é sempre o `mutationId` do cliente (mesmo idioma de patterns/
- *  diagnostic — mutationId = id): um retry com o mesmo id colide na PK,
- *  reconhecido e tratado no serviço sem tocar R2 de novo. */
+/** Fragmento de guarda compartilhado por INSERT/UPDATE/DELETE/auditoria do
+ *  pipeline de imagem — nunca depende de versão (este pipeline não
+ *  participa do versionamento de `questions`, ver nota acima). Usar o MESMO
+ *  texto em toda escrita relacionada (incluindo o evento de auditoria
+ *  guardado, ver `buildGuardedQuestionImageAuditStatement`) garante que
+ *  todas só podem concordar sobre "esta questão está editável agora". */
+function imageEditableStatusGuard(): string {
+  return `EXISTS (SELECT 1 FROM questions WHERE id = ? AND editorial_status IN ('draft', 'changes_requested'))`;
+}
+
+/** INSERT guardado só por status editável. `id` é sempre o `mutationId` do
+ *  cliente (mesmo idioma de patterns/diagnostic — mutationId = id): um
+ *  retry com o mesmo id colide na PK, reconhecido e tratado no serviço sem
+ *  tocar R2 de novo (Sprint 18.1 — a identidade completa do retry, incluindo
+ *  `content_sha256`, é comparada no serviço antes de aceitar o retry). */
 export function buildStandaloneInsertImageStatement(db: D1Database, params: StandaloneImageInsertParams): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO question_images
-         (id, question_id, asset_ref, alt_text, caption, position, placement, alternative_letter, storage_kind, mime_type, size_bytes)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       WHERE EXISTS (SELECT 1 FROM questions WHERE id = ? AND editorial_status IN ('draft', 'changes_requested'))`
+         (id, question_id, asset_ref, alt_text, caption, position, placement, alternative_letter, storage_kind, mime_type, size_bytes, content_sha256)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE ${imageEditableStatusGuard()}`
     )
     .bind(
       params.id,
@@ -254,23 +268,60 @@ export function buildStandaloneInsertImageStatement(db: D1Database, params: Stan
       params.storageKind,
       params.mimeType,
       params.sizeBytes,
+      params.contentSha256,
       params.questionId
     );
 }
 
-/** DELETE guardado só por status editável — mesma razão de não depender de
- *  versão do INSERT acima. Filtra por `id AND question_id` juntos (nunca só
- *  `id`) para que um imageId nunca possa ser usado para apagar a imagem de
- *  OUTRA questão por engano/malícia — sempre confirma o par certo antes de
- *  qualquer efeito. */
+/** DELETE guardado só por status editável. Filtra por `id AND question_id`
+ *  juntos (nunca só `id`) para que um imageId nunca possa ser usado para
+ *  apagar a imagem de OUTRA questão por engano/malícia — sempre confirma o
+ *  par certo antes de qualquer efeito. */
 export function buildStandaloneDeleteImageStatement(db: D1Database, imageId: string, questionId: string): D1PreparedStatement {
   return db
-    .prepare(
-      `DELETE FROM question_images
-       WHERE id = ? AND question_id = ?
-       AND EXISTS (SELECT 1 FROM questions WHERE id = ? AND editorial_status IN ('draft', 'changes_requested'))`
-    )
+    .prepare(`DELETE FROM question_images WHERE id = ? AND question_id = ? AND ${imageEditableStatusGuard()}`)
     .bind(imageId, questionId, questionId);
+}
+
+export interface StandaloneImageMetadataUpdateParams {
+  id: string;
+  questionId: string;
+  altText: string;
+  caption: string | null;
+}
+
+/** Sprint 18.1, seção B da correção — UPDATE de METADADO apenas (alt text/
+ *  legenda), nunca `asset_ref`/bytes/R2. Mesma guarda de status editável do
+ *  INSERT/DELETE acima. */
+export function buildStandaloneUpdateImageMetadataStatement(db: D1Database, params: StandaloneImageMetadataUpdateParams): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE question_images SET alt_text = ?, caption = ?, updated_at = datetime('now')
+       WHERE id = ? AND question_id = ? AND ${imageEditableStatusGuard()}`
+    )
+    .bind(params.altText, params.caption, params.id, params.questionId, params.questionId);
+}
+
+/** Sprint 18.1, seção F da correção — evento de auditoria do pipeline de
+ *  imagens, guardado pela MESMA condição de status editável do INSERT/
+ *  UPDATE/DELETE que ele acompanha (nunca a versão de `questions` — este
+ *  pipeline não versiona). Rodar no MESMO `db.batch()` da mutação real
+ *  garante que a auditoria só é gravada quando a mutação de fato aconteceu
+ *  nesta chamada: se a condição falhar (corrida perdida entre a checagem no
+ *  serviço e o instante do batch), NENHUM dos dois statements afeta
+ *  qualquer linha — nunca uma auditoria "fantasma" de uma operação que na
+ *  prática não teve efeito. */
+export function buildGuardedQuestionImageAuditStatement(
+  db: D1Database,
+  params: { id: string; questionId: string; eventType: string; userId: string | null; metadata: Record<string, string | number | boolean> }
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO audit_log (id, user_id, event_type, metadata)
+       SELECT ?, ?, ?, ?
+       WHERE ${imageEditableStatusGuard()}`
+    )
+    .bind(params.id, params.userId, params.eventType, JSON.stringify(params.metadata), params.questionId);
 }
 
 export async function listPatternsForQuestion(db: D1Database, questionId: string): Promise<QuestionPatternRow[]> {

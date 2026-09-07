@@ -9,7 +9,7 @@ import { sha256Hex, hashPassword } from "../src/lib/crypto";
 import type { Env } from "../src/env";
 import { handleEditorialQuestionsRequest } from "../src/routes/editorialQuestions";
 import { handleQuestionMediaRequest } from "../src/routes/questionMedia";
-import { isValidR2AssetKey } from "../src/lib/questionsValidation";
+import { isValidR2AssetKey, MAX_IMAGE_MULTIPART_BYTES } from "../src/lib/questionsValidation";
 import { addQuestionImage } from "../src/services/questionMediaService";
 
 /* Sprint 18, seções 11-13/19 da ordem — upload/delete/serve de imagem.
@@ -81,11 +81,24 @@ function webpBytes(): Uint8Array {
 }
 const NOT_AN_IMAGE_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // "%PDF" — formato não aceito.
 
-function uploadRequest(
+/* Sprint 18.1, seção E da correção — o precheck de tamanho da rota agora
+   EXIGE um Content-Length real (fail-closed); confirmado ANTES de escrever
+   este helper que undici (fetch nativo usado por estes testes) NUNCA
+   calcula esse cabeçalho sozinho para um corpo FormData (nem em Node, nem —
+   por extensão do mesmo motivo — em runtimes de teste equivalentes). Por
+   isso o multipart é serializado manualmente aqui (via um Response
+   temporário, que faz o MESMO trabalho de boundary que um navegador real
+   faz ao enviar um <form>), e o Content-Length é sempre computado a partir
+   dos bytes REAIS, exatamente como um navegador legítimo faria — os testes
+   de upload válido continuam válidos sob o novo precheck sem precisar saber
+   dele. `headerOverrides` existe só para os testes NEGATIVOS da seção E
+   (ausente/malformado/acima do teto). */
+async function uploadRequest(
   questionId: string,
   token: string | null,
-  fields: { file?: Uint8Array; filename?: string; mimeType?: string; mutationId?: string; placement?: string; alternativeLetter?: string; altText?: string; caption?: string }
-): Request {
+  fields: { file?: Uint8Array; filename?: string; mimeType?: string; mutationId?: string; placement?: string; alternativeLetter?: string; altText?: string; caption?: string },
+  headerOverrides: { omitContentLength?: boolean; contentLength?: string } = {}
+): Promise<Request> {
   const form = new FormData();
   if (fields.file !== undefined) {
     form.set("arquivo", new File([fields.file], fields.filename ?? "imagem.png", { type: fields.mimeType ?? "image/png" }));
@@ -96,9 +109,17 @@ function uploadRequest(
   if (fields.altText !== undefined) form.set("altText", fields.altText);
   if (fields.caption !== undefined) form.set("caption", fields.caption);
 
+  const serialized = new Response(form);
+  const contentType = serialized.headers.get("content-type")!;
+  const body = new Uint8Array(await serialized.arrayBuffer());
+
   const headers = new Headers();
   if (token) headers.set("Cookie", `md_session=${token}`);
-  return new Request(`${LOCAL_ORIGIN}/api/editorial/questions/${questionId}/images`, { method: "POST", body: form, headers });
+  headers.set("content-type", contentType);
+  if (!headerOverrides.omitContentLength) {
+    headers.set("content-length", headerOverrides.contentLength ?? String(body.byteLength));
+  }
+  return new Request(`${LOCAL_ORIGIN}/api/editorial/questions/${questionId}/images`, { method: "POST", body, headers });
 }
 
 async function callImagesRoute(request: Request): Promise<Response> {
@@ -113,11 +134,22 @@ async function callDelete(questionId: string, imageId: string, token: string | n
   return (await handleEditorialQuestionsRequest(request, localEnv(), new URL(request.url)))!;
 }
 
-async function callServe(imageId: string, token: string | null): Promise<Response> {
+async function callUpdateAlt(questionId: string, imageId: string, token: string | null, body: { mutationId?: string; altText?: unknown; caption?: unknown }): Promise<Response> {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (token) headers.set("Cookie", `md_session=${token}`);
+  const request = new Request(`${LOCAL_ORIGIN}/api/editorial/questions/${questionId}/images/${imageId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(body),
+  });
+  return (await handleEditorialQuestionsRequest(request, localEnv(), new URL(request.url)))!;
+}
+
+async function callServe(imageId: string, token: string | null, envOverrides: Partial<Env> = {}): Promise<Response> {
   const headers = new Headers();
   if (token) headers.set("Cookie", `md_session=${token}`);
   const request = new Request(`${LOCAL_ORIGIN}/api/question-media/${imageId}`, { method: "GET", headers });
-  return (await handleQuestionMediaRequest(request, localEnv(), new URL(request.url)))!;
+  return (await handleQuestionMediaRequest(request, localEnv(envOverrides), new URL(request.url)))!;
 }
 
 function mutId(seed: string): string {
@@ -132,7 +164,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
 
     const response = await callImagesRoute(
-      uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("1"), placement: "enunciado", altText: "Gráfico de barras" })
+      await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("1"), placement: "enunciado", altText: "Gráfico de barras" })
     );
     expect(response.status).toBe(201);
     const body = (await response.json()) as { ok: true; image: { id: string; placement: string; alternativeLetter: string | null } };
@@ -147,7 +179,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
 
     const response = await callImagesRoute(
-      uploadRequest(qId, token, { file: JPEG_BYTES, mimeType: "image/jpeg", mutationId: mutId("2"), placement: "alternativa", alternativeLetter: "C", altText: "Figura da alternativa C" })
+      await uploadRequest(qId, token, { file: JPEG_BYTES, mimeType: "image/jpeg", mutationId: mutId("2"), placement: "alternativa", alternativeLetter: "C", altText: "Figura da alternativa C" })
     );
     expect(response.status).toBe(201);
     const body = (await response.json()) as { image: { placement: string; alternativeLetter: string | null } };
@@ -160,7 +192,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
     const response = await callImagesRoute(
-      uploadRequest(qId, token, { file: webpBytes(), mimeType: "image/webp", filename: "a.webp", mutationId: mutId("3"), placement: "enunciado", altText: "Foto" })
+      await uploadRequest(qId, token, { file: webpBytes(), mimeType: "image/webp", filename: "a.webp", mutationId: mutId("3"), placement: "enunciado", altText: "Foto" })
     );
     expect(response.status).toBe(201);
   });
@@ -170,8 +202,8 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
 
-    const r1 = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("10"), placement: "enunciado", altText: "Primeira" }));
-    const r2 = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("11"), placement: "enunciado", altText: "Segunda" }));
+    const r1 = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("10"), placement: "enunciado", altText: "Primeira" }));
+    const r2 = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("11"), placement: "enunciado", altText: "Segunda" }));
     expect(r1.status).toBe(201);
     expect(r2.status).toBe(201);
     const rows = db.sqlite.prepare("SELECT alt_text, position FROM question_images WHERE question_id = ? ORDER BY position ASC").all(qId) as Array<{ alt_text: string; position: number }>;
@@ -184,7 +216,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
 
-    const response = await callImagesRoute(uploadRequest(qId, token, { file: NOT_AN_IMAGE_BYTES, mutationId: mutId("20"), placement: "enunciado", altText: "X" }));
+    const response = await callImagesRoute(await uploadRequest(qId, token, { file: NOT_AN_IMAGE_BYTES, mutationId: mutId("20"), placement: "enunciado", altText: "X" }));
     expect(response.status).toBe(400);
     expect(bucket.size()).toBe(0);
     expect((db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE question_id = ?").get(qId) as { total: number }).total).toBe(0);
@@ -197,7 +229,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
 
     const big = new Uint8Array(8 * 1024 * 1024 + 1);
     big.set(PNG_BYTES, 0);
-    const response = await callImagesRoute(uploadRequest(qId, token, { file: big, mutationId: mutId("30"), placement: "enunciado", altText: "Grande" }));
+    const response = await callImagesRoute(await uploadRequest(qId, token, { file: big, mutationId: mutId("30"), placement: "enunciado", altText: "Grande" }));
     expect(response.status).toBe(413);
     expect(bucket.size()).toBe(0);
   });
@@ -218,8 +250,8 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const q1 = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
     const q2 = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
 
-    const r1 = await callImagesRoute(uploadRequest(q1, editorToken, { file: PNG_BYTES, mutationId: mutId("40"), placement: "enunciado", altText: "E" }));
-    const r2 = await callImagesRoute(uploadRequest(q2, adminToken, { file: PNG_BYTES, mutationId: mutId("41"), placement: "enunciado", altText: "A" }));
+    const r1 = await callImagesRoute(await uploadRequest(q1, editorToken, { file: PNG_BYTES, mutationId: mutId("40"), placement: "enunciado", altText: "E" }));
+    const r2 = await callImagesRoute(await uploadRequest(q2, adminToken, { file: PNG_BYTES, mutationId: mutId("41"), placement: "enunciado", altText: "A" }));
     expect(r1.status).toBe(201);
     expect(r2.status).toBe(201);
   });
@@ -228,7 +260,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const token = await seedUserWithSession("no-role-user");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
 
-    const upload = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("50"), placement: "enunciado", altText: "X" }));
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("50"), placement: "enunciado", altText: "X" }));
     expect(upload.status).toBe(403);
     expect(bucket.size()).toBe(0);
 
@@ -240,7 +272,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const editorToken = await seedUserWithSession("editor1");
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
-    const upload = await callImagesRoute(uploadRequest(qId, editorToken, { file: PNG_BYTES, mutationId: mutId("60"), placement: "enunciado", altText: "X" }));
+    const upload = await callImagesRoute(await uploadRequest(qId, editorToken, { file: PNG_BYTES, mutationId: mutId("60"), placement: "enunciado", altText: "X" }));
     const { image } = (await upload.json()) as { image: { id: string } };
 
     const studentToken = await seedUserWithSession("student-sem-papel");
@@ -252,7 +284,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const editorToken = await seedUserWithSession("editor1");
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
-    const upload = await callImagesRoute(uploadRequest(qId, editorToken, { file: PNG_BYTES, mutationId: mutId("70"), placement: "enunciado", altText: "X" }));
+    const upload = await callImagesRoute(await uploadRequest(qId, editorToken, { file: PNG_BYTES, mutationId: mutId("70"), placement: "enunciado", altText: "X" }));
     const { image } = (await upload.json()) as { image: { id: string } };
 
     db.sqlite.exec(`UPDATE questions SET editorial_status = 'published' WHERE id = '${qId}'`);
@@ -274,11 +306,11 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
     const mutationId = mutId("80");
 
-    const first = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "X" }));
+    const first = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "X" }));
     expect(first.status).toBe(201);
     expect(bucket.size()).toBe(1);
 
-    const retry = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "X" }));
+    const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "X" }));
     expect(retry.status).toBe(200);
     const retryBody = (await retry.json()) as { changed: boolean };
     expect(retryBody.changed).toBe(false);
@@ -300,7 +332,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     db.failNextMatching(/INSERT INTO question_images/);
 
     await expect(
-      addQuestionImage(db as never, bucket as never, qId, {
+      addQuestionImage(db as never, bucket as never, qId, "editor1", {
         mutationId: mutId("90"),
         placement: "enunciado",
         alternativeLetter: null,
@@ -322,7 +354,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const token = await seedUserWithSession("editor1");
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
-    const upload = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("100"), placement: "enunciado", altText: "X" }));
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("100"), placement: "enunciado", altText: "X" }));
     const { image } = (await upload.json()) as { image: { id: string } };
     expect(bucket.size()).toBe(1);
 
@@ -342,7 +374,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const token = await seedUserWithSession("editor1");
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
-    const upload = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("110"), placement: "enunciado", altText: "X" }));
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("110"), placement: "enunciado", altText: "X" }));
     const { image } = (await upload.json()) as { image: { id: string } };
     db.sqlite.exec(`UPDATE questions SET editorial_status = 'published' WHERE id = '${qId}'`);
 
@@ -368,7 +400,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const token = await seedUserWithSession("editor1");
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
-    const response = await callImagesRoute(uploadRequest(qId, token, { mutationId: mutId("120"), placement: "enunciado", altText: "X" }));
+    const response = await callImagesRoute(await uploadRequest(qId, token, { mutationId: mutId("120"), placement: "enunciado", altText: "X" }));
     expect(response.status).toBe(400);
   });
 
@@ -378,7 +410,7 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", withAlternatives: true });
 
     const response = await callImagesRoute(
-      uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("140"), placement: "alternativa", alternativeLetter: "D", altText: "Figura de apoio da alternativa D" })
+      await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("140"), placement: "alternativa", alternativeLetter: "D", altText: "Figura de apoio da alternativa D" })
     );
     expect(response.status).toBe(201);
     const altRow = db.sqlite.prepare("SELECT text FROM question_alternatives WHERE question_id = ? AND letter = 'D'").get(qId) as { text: string };
@@ -400,8 +432,239 @@ describe("Sprint 18 — upload/delete/serve de imagem (item 13-26 da política d
     grantRole("editor1", "editor");
     const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
     db.sqlite.exec(`UPDATE questions SET editorial_status = 'published' WHERE id = '${qId}'`);
-    const response = await callImagesRoute(uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("130"), placement: "enunciado", altText: "X" }));
+    const response = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("130"), placement: "enunciado", altText: "X" }));
     expect(response.status).toBe(400);
     expect(bucket.size()).toBe(0);
+  });
+});
+
+describe("Correção 18.1, seção B — edição dedicada de alt text/legenda (PATCH), sem tocar bytes/R2", () => {
+  it("editor corrige alt text sem remover a imagem — bytes/R2 nunca tocados", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("200"), placement: "enunciado", altText: "Antes" }));
+    const { image } = (await upload.json()) as { image: { id: string; assetRef: string } };
+    expect(bucket.size()).toBe(1);
+
+    const response = await callUpdateAlt(qId, image.id, token, { mutationId: mutId("201"), altText: "Depois", caption: "Legenda nova" });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; changed: boolean; image: { altText: string; caption: string | null; assetRef: string } };
+    expect(body.changed).toBe(true);
+    expect(body.image.altText).toBe("Depois");
+    expect(body.image.caption).toBe("Legenda nova");
+    expect(body.image.assetRef).toBe(image.assetRef); // assetRef/bytes nunca mudam.
+    expect(bucket.size()).toBe(1); // R2 nunca tocado por uma edição de metadado.
+  });
+
+  it("reenviar exatamente o mesmo alt text é idempotente (changed:false, sem duplicar auditoria)", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("210"), placement: "enunciado", altText: "Igual" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+
+    const response = await callUpdateAlt(qId, image.id, token, { mutationId: mutId("211"), altText: "Igual", caption: null });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { changed: boolean };
+    expect(body.changed).toBe(false);
+    const auditCount = (db.sqlite.prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = 'editorial_question_image_updated'").get() as { total: number }).total;
+    expect(auditCount).toBe(0);
+  });
+
+  it("alt text vazio é rejeitado (400), imagem existente não muda", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("220"), placement: "enunciado", altText: "Original" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+
+    const response = await callUpdateAlt(qId, image.id, token, { mutationId: mutId("221"), altText: "", caption: null });
+    expect(response.status).toBe(400);
+    const row = db.sqlite.prepare("SELECT alt_text FROM question_images WHERE id = ?").get(image.id) as { alt_text: string };
+    expect(row.alt_text).toBe("Original");
+  });
+
+  it("edição de alt text em questão publicada é bloqueada", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("230"), placement: "enunciado", altText: "X" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+    db.sqlite.exec(`UPDATE questions SET editorial_status = 'published' WHERE id = '${qId}'`);
+
+    const response = await callUpdateAlt(qId, image.id, token, { mutationId: mutId("231"), altText: "Nova", caption: null });
+    expect(response.status).toBe(400);
+  });
+
+  it("usuário sem papel editorial não edita alt text", async () => {
+    const editorToken = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const upload = await callImagesRoute(await uploadRequest(qId, editorToken, { file: PNG_BYTES, mutationId: mutId("240"), placement: "enunciado", altText: "X" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+
+    const noRoleToken = await seedUserWithSession("no-role-alt-editor");
+    const response = await callUpdateAlt(qId, image.id, noRoleToken, { mutationId: mutId("241"), altText: "Hackeado", caption: null });
+    expect(response.status).toBe(403);
+  });
+});
+
+describe("Correção 18.1, seção D — gate fail-closed de fixture na rota de mídia", () => {
+  it("fixture PUBLICADA em ambiente 'remoto' (fora de dev local) nunca é servida, mesmo marcada published", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", isLocalFixture: true });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("300"), placement: "enunciado", altText: "X" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+    db.sqlite.exec(`UPDATE questions SET editorial_status = 'published' WHERE id = '${qId}'`);
+
+    const studentToken = await seedUserWithSession("student-fixture-remote");
+    const response = await callServe(image.id, studentToken, { ENVIRONMENT: "production" });
+    expect(response.status).toBe(404);
+  });
+
+  it("fixture PUBLICADA em dev local COM a flag explícita segue o comportamento normal (qualquer sessão válida)", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", isLocalFixture: true });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("310"), placement: "enunciado", altText: "X" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+    db.sqlite.exec(`UPDATE questions SET editorial_status = 'published' WHERE id = '${qId}'`);
+
+    const studentToken = await seedUserWithSession("student-fixture-local");
+    const response = await callServe(image.id, studentToken, { ENABLE_LOCAL_EDITORIAL_FIXTURES: "true" });
+    expect(response.status).toBe(200);
+  });
+
+  it("fixture em DRAFT, mesmo em dev local com a flag, continua restrita a editor/admin", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", isLocalFixture: true });
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("320"), placement: "enunciado", altText: "X" }));
+    const { image } = (await upload.json()) as { image: { id: string } };
+
+    const studentToken = await seedUserWithSession("student-fixture-draft");
+    const response = await callServe(image.id, studentToken, { ENABLE_LOCAL_EDITORIAL_FIXTURES: "true" });
+    expect(response.status).toBe(403);
+  });
+});
+
+describe("Correção 18.1, seção E — limite real do multipart (fail-closed)", () => {
+  it("sem Content-Length: rejeitado ANTES do parse (400), nada gravado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const response = await callImagesRoute(
+      await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("400"), placement: "enunciado", altText: "X" }, { omitContentLength: true })
+    );
+    expect(response.status).toBe(400);
+    expect(bucket.size()).toBe(0);
+  });
+
+  it("Content-Length malformado (não numérico): rejeitado (400)", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const response = await callImagesRoute(
+      await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("410"), placement: "enunciado", altText: "X" }, { contentLength: "abc" })
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("corpo declarado (Content-Length) acima do teto de multipart: 413 antes do parse", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const response = await callImagesRoute(
+      await uploadRequest(
+        qId,
+        token,
+        { file: PNG_BYTES, mutationId: mutId("420"), placement: "enunciado", altText: "X" },
+        { contentLength: String(MAX_IMAGE_MULTIPART_BYTES + 1) }
+      )
+    );
+    expect(response.status).toBe(413);
+    expect(bucket.size()).toBe(0);
+  });
+
+  it("upload normal com Content-Length real continua funcionando (mesmo caminho da UI)", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const response = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId("430"), placement: "enunciado", altText: "X" }));
+    expect(response.status).toBe(201);
+  });
+});
+
+describe("Correção 18.1, seção G — idempotência FORTE do upload (hash de conteúdo)", () => {
+  const PNG_VARIANT_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9, 9, 9]);
+
+  it("retry idêntico (mesmo mutationId, mesmo arquivo/campos) não duplica D1 nem R2", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const mutationId = mutId("500");
+
+    const first = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Idêntico" }));
+    expect(first.status).toBe(201);
+    const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Idêntico" }));
+    expect(retry.status).toBe(200);
+    expect(((await retry.json()) as { changed: boolean }).changed).toBe(false);
+    expect(bucket.size()).toBe(1);
+    expect((db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE question_id = ?").get(qId) as { total: number }).total).toBe(1);
+  });
+
+  it("mesmo mutationId + arquivo DIFERENTE → 409 (nunca aceito como retry)", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const mutationId = mutId("510");
+
+    const first = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "X" }));
+    expect(first.status).toBe(201);
+    const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_VARIANT_BYTES, mutationId, placement: "enunciado", altText: "X" }));
+    expect(retry.status).toBe(409);
+    expect(bucket.size()).toBe(1); // nenhum objeto novo gravado por causa do conflito.
+  });
+
+  it("mesmo mutationId + altText DIFERENTE → 409", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const mutationId = mutId("520");
+
+    const first = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Texto A" }));
+    expect(first.status).toBe(201);
+    const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Texto B" }));
+    expect(retry.status).toBe(409);
+  });
+
+  it("mesmo mutationId + placement DIFERENTE → 409", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft", withAlternatives: true });
+    const mutationId = mutId("530");
+
+    const first = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "X" }));
+    expect(first.status).toBe(201);
+    const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "alternativa", alternativeLetter: "A", altText: "X" }));
+    expect(retry.status).toBe(409);
+  });
+
+  it("retry legítimo (identidade EXATA) é reconhecido mesmo depois de a questão sair de draft/changes_requested", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const mutationId = mutId("540");
+
+    const first = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Estável" }));
+    expect(first.status).toBe(201);
+
+    db.sqlite.exec(`UPDATE questions SET editorial_status = 'in_review' WHERE id = '${qId}'`);
+
+    const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Estável" }));
+    expect(retry.status).toBe(200);
+    expect(((await retry.json()) as { changed: boolean }).changed).toBe(false);
   });
 });

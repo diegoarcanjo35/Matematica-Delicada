@@ -93,7 +93,15 @@ export type AuditEventType =
   | "admin_pattern_created"
   | "admin_pattern_updated"
   | "admin_pattern_published"
-  | "admin_pattern_inactivated";
+  | "admin_pattern_inactivated"
+  // Sprint 18.1 (correção de auditoria) — pipeline dedicado de imagem do
+  // Banco de Questões (upload/edição de metadado/remoção). Nunca registram
+  // bytes, alt text completo, nome original de arquivo ou conteúdo da
+  // questão — só os identificadores técnicos mínimos (ver
+  // questionMediaService.ts:buildImageAuditMetadata).
+  | "editorial_question_image_added"
+  | "editorial_question_image_updated"
+  | "editorial_question_image_removed";
 
 /** Nunca registra senha, token bruto ou dado sensível — só metadados mínimos e justificados. */
 export async function recordAuditEvent(

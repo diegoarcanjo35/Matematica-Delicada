@@ -441,6 +441,8 @@ CREATE TABLE question_images (
   storage_kind TEXT NOT NULL DEFAULT 'local' CHECK (storage_kind IN ('local', 'r2')),
   mime_type TEXT,
   size_bytes INTEGER,
+  -- Sprint 18.1 (correção de auditoria, seção G) - content_sha256, mesma migration 0022.
+  content_sha256 TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

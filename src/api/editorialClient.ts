@@ -108,6 +108,10 @@ export interface QuestionImageDto {
   position: number;
   placement: "enunciado" | "alternativa";
   alternativeLetter: string | null;
+  /** Sprint 18.1, seção C da correção — 'r2' exibe via questionMediaUrl(id);
+   *  'local' exibe via localAssetUrl(assetRef) (compatibilidade com imagens
+   *  pré-Sprint-18, nunca servidas por /api/question-media). */
+  storageKind: "local" | "r2";
 }
 
 export interface QuestionDetail extends QuestionSummary {
@@ -254,11 +258,38 @@ export function deleteQuestionImage(questionId: string, imageId: string): Promis
   return request(`/api/editorial/questions/${encodeURIComponent(questionId)}/images/${encodeURIComponent(imageId)}`, { method: "DELETE" });
 }
 
+/** Sprint 18.1, seção B da correção — edição dedicada de alt text/legenda,
+ *  SEM tocar bytes/R2 (Andreia não precisa mais remover e reenviar a imagem
+ *  só para corrigir a descrição). */
+export function updateQuestionImageMetadata(
+  questionId: string,
+  imageId: string,
+  params: { mutationId: string; altText: string; caption?: string | null }
+): Promise<{ ok: true; changed: boolean; image: QuestionImageDto }> {
+  return request(`/api/editorial/questions/${encodeURIComponent(questionId)}/images/${encodeURIComponent(imageId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ mutationId: params.mutationId, altText: params.altText, caption: params.caption ?? null }),
+  });
+}
+
 /** URL da mídia para <img src>, sempre pelo ID técnico (nunca pela chave de
  *  storage) — worker/src/routes/questionMedia.ts aplica a autorização
- *  correta ao servir. */
+ *  correta ao servir. Só usar quando `storageKind === 'r2'`. */
 export function questionMediaUrl(imageId: string): string {
   return `/api/question-media/${encodeURIComponent(imageId)}`;
+}
+
+/** Sprint 18.1, seção C da correção — exibição de imagem LOCAL legada
+ *  (pré-Sprint-18, `storageKind === 'local'`): `assetRef` já é validado no
+ *  servidor contra o namespace histórico `assets/questoes/` (nunca um
+ *  esquema http(s), nunca ".."), mas o cliente NUNCA monta uma URL a partir
+ *  de um valor que pareça um esquema externo — defesa em profundidade, não
+ *  apenas confiança no backend. Retorna string vazia (falha seguramente
+ *  inerte, nunca uma URL externa) se o valor recebido não parecer um
+ *  caminho local seguro. */
+export function localAssetUrl(assetRef: string): string {
+  if (/^[a-z]+:\/\//i.test(assetRef) || assetRef.includes("..")) return "";
+  return `/${assetRef}`;
 }
 
 export type WorkflowAction = "submit-review" | "request-changes" | "approve" | "publish" | "archive";

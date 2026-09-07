@@ -137,6 +137,18 @@ describe("EditorialQuestionFormPage — editor simplificado (Sprint 18)", () => 
     expect(screen.queryByRole("textbox", { name: /^código$/i })).not.toBeInTheDocument();
   });
 
+  it("correção 18.1, seção A — o código técnico NÃO aparece em nenhum ponto da tela simplificada, nem no título", async () => {
+    const calls = mockApi({ withLoadedQuestion: true });
+    renderEdit();
+    await screen.findByLabelText("Macete / Como resolver");
+    expect(screen.getByRole("heading", { name: "Editar questão" })).toBeInTheDocument();
+    expect(screen.queryByText(LOADED_QUESTION.code)).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(LOADED_QUESTION.code))).not.toBeInTheDocument();
+    // O código nunca é buscado pela tela — nenhuma chamada de rede o
+    // referencia (nem no corpo, nem na URL, mesmo em GET/PATCH).
+    expect(calls.every((c) => !c.url.includes(LOADED_QUESTION.code))).toBe(true);
+  });
+
   it("item 2 — Prova e Ano aparecem na visão principal", async () => {
     mockApi();
     renderNew();

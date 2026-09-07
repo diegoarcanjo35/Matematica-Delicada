@@ -454,6 +454,19 @@ export type AllowedImageUploadMimeType = (typeof ALLOWED_IMAGE_UPLOAD_MIME_TYPES
 export const MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024; // 8 MB, seção 11 da ordem.
 export const MAX_IMAGES_PER_QUESTION = 15; // seção 11 da ordem.
 
+/** Sprint 18.1 (correção de auditoria, seção E) — teto do CORPO multipart
+ *  inteiro (arquivo + boundary/campos de texto ao redor), verificado ANTES
+ *  de `request.formData()` via um `Content-Length` OBRIGATÓRIO (nunca
+ *  opcional — ver worker/src/routes/editorialQuestions.ts). Próximo do
+ *  limite de arquivo + uma margem razoável de overhead de multipart (nunca
+ *  um múltiplo arbitrário como "2x" o limite de arquivo, que na prática
+ *  nunca rejeitava nada porque exigia um Content-Length que os clientes de
+ *  teste/reais com corpo FormData tipicamente não enviam pré-calculado —
+ *  ver nota extensa na rota). A checagem do tamanho REAL do arquivo, depois
+ *  do parse, continua obrigatória e inalterada (MAX_IMAGE_UPLOAD_BYTES) —
+ *  esta constante é só o teto do INVÓLUCRO multipart. */
+export const MAX_IMAGE_MULTIPART_BYTES = MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024; // 9 MB.
+
 const MIME_TO_EXTENSION: Record<AllowedImageUploadMimeType, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",

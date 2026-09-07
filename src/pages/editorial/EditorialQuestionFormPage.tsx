@@ -321,7 +321,13 @@ export function EditorialQuestionFormPage() {
 
   return (
     <div className="editorial">
-      <h1>{isNew ? "Nova questão" : `Editar questão${question?.code ? ` (${question.code})` : ""}`}</h1>
+      {/* Sprint 18.1, seção A da correção — o título NUNCA mostra o código
+          editorial técnico (violava o escopo aprovado: Andreia não trabalha
+          com código técnico na visão operacional). O código continua
+          existindo e sendo preservado internamente (ver buildUpdatePayload —
+          nunca enviado no PATCH), só não aparece mais em lugar nenhum desta
+          tela. */}
+      <h1>{isNew ? "Nova questão" : "Editar questão"}</h1>
 
       {question?.isLocalFixture && (
         <p className="editorial__fixture-notice" role="note">

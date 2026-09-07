@@ -1,6 +1,12 @@
 -- Sprint 18 — Editor de questão simplificado + imagens no enunciado e
 -- alternativas (seção 8/9/10 da ordem).
 --
+-- Sprint 18.1 (correção de auditoria) — `content_sha256` adicionado a esta
+-- MESMA migration (seção 3 abaixo), não numa 0023 nova: confirmado antes de
+-- editar que 0022 ainda não tinha sido aplicada em nenhum ambiente remoto
+-- (nem preview nem produção) no momento da correção — só então é seguro
+-- alterar uma migration já commitada, nunca depois de aplicada de verdade.
+--
 -- Estritamente ADITIVA: só `ALTER TABLE ... ADD COLUMN` (novas colunas,
 -- todas com DEFAULT compatível com as linhas já existentes) e
 -- `CREATE TRIGGER/INDEX IF NOT EXISTS`. Nenhuma migration 0001-0021 é
@@ -65,6 +71,35 @@ CREATE INDEX IF NOT EXISTS idx_question_images_placement ON question_images (que
 ALTER TABLE question_images ADD COLUMN storage_kind TEXT NOT NULL DEFAULT 'local' CHECK (storage_kind IN ('local', 'r2'));
 ALTER TABLE question_images ADD COLUMN mime_type TEXT;
 ALTER TABLE question_images ADD COLUMN size_bytes INTEGER;
+
+-- ============================================================================
+-- 3) IDENTIDADE FORTE DE MUTAÇÃO — Sprint 18.1 (correção de auditoria, seção G)
+-- ============================================================================
+--
+-- Esta migration ainda NÃO tinha sido aplicada em nenhum ambiente remoto
+-- quando a correção foi pedida (ver ordem da correção 18.1) — por isso o
+-- campo entra AQUI, na mesma migration, em vez de virar uma 0023 separada
+-- (nunca alteramos uma migration já aplicada remotamente; esta ainda não
+-- tinha sido).
+--
+-- `content_sha256` é o hash SHA-256 (hex) dos BYTES reais de um upload R2 —
+-- nunca os bytes em si. Existe para fechar um buraco de idempotência: antes
+-- desta coluna, um retry com o MESMO mutationId era aceito automaticamente
+-- como "sucesso, nada mudou" mesmo que o segundo request trouxesse um
+-- ARQUIVO DIFERENTE (ou altText/placement diferentes) — o serviço só
+-- conferia a PK (mutationId = imageId), nunca o conteúdo. Com este hash
+-- salvo junto ao metadado, `addQuestionImage` (questionMediaService.ts)
+-- agora compara TODOS os componentes de identidade da operação (placement,
+-- alternativeLetter, altText, caption, mimeType, sizeBytes, contentSha256)
+-- antes de aceitar um mutationId repetido como retry legítimo — se qualquer
+-- componente divergir, é 409 (conflito), nunca um "sucesso" silencioso sobre
+-- dados diferentes.
+--
+-- NULL para toda imagem local legada (`storage_kind = 'local'`) — nunca
+-- calculado/gravado para assets do repositório, só para uploads novos via
+-- R2. Sem CHECK/índice: é só um metadado de comparação, lido inteiro pelo
+-- serviço, nunca usado para busca em massa nesta sprint.
+ALTER TABLE question_images ADD COLUMN content_sha256 TEXT;
 
 -- ============================================================================
 -- COERÊNCIA placement/alternative_letter — TRIGGER aditivo (seção 8 da ordem:
