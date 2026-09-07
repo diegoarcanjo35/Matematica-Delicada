@@ -279,16 +279,23 @@ export function questionMediaUrl(imageId: string): string {
   return `/api/question-media/${encodeURIComponent(imageId)}`;
 }
 
-/** Sprint 18.1, seção C da correção — exibição de imagem LOCAL legada
- *  (pré-Sprint-18, `storageKind === 'local'`): `assetRef` já é validado no
- *  servidor contra o namespace histórico `assets/questoes/` (nunca um
- *  esquema http(s), nunca ".."), mas o cliente NUNCA monta uma URL a partir
- *  de um valor que pareça um esquema externo — defesa em profundidade, não
- *  apenas confiança no backend. Retorna string vazia (falha seguramente
- *  inerte, nunca uma URL externa) se o valor recebido não parecer um
- *  caminho local seguro. */
+/** Sprint 18.2, seção 3 da correção — WHITELIST POSITIVA, não mais uma lista
+ *  de padrões proibidos. A versão anterior (Sprint 18.1) só bloqueava
+ *  "://" e ".." — deixava passar qualquer outra coisa, inclusive um
+ *  protocol-relative ("//evil.com/x.png", que o navegador resolve para o
+ *  esquema da PÁGINA ATUAL, então vira uma URL externa de verdade) ou um
+ *  esquema sem "//" (`javascript:alert(1)`). `assetRef` já é validado no
+ *  servidor contra o namespace histórico `assets/questoes/`
+ *  (ASSET_REF_RE, worker/src/lib/questionsValidation.ts), mas o cliente
+ *  NUNCA confia só nisso — reaplica exatamente o mesmo formato aqui como
+ *  defesa em profundidade: só monta a URL se `assetRef` casar
+ *  integralmente com `assets/questoes/<subcaminho>.<extensão-permitida>`;
+ *  qualquer outra coisa retorna string vazia (falha seguramente inerte,
+ *  nunca uma URL externa). */
+const LOCAL_ASSET_REF_RE = /^assets\/questoes\/[A-Za-z0-9_/-]+\.(png|jpg|jpeg|svg|webp)$/;
+
 export function localAssetUrl(assetRef: string): string {
-  if (/^[a-z]+:\/\//i.test(assetRef) || assetRef.includes("..")) return "";
+  if (!LOCAL_ASSET_REF_RE.test(assetRef)) return "";
   return `/${assetRef}`;
 }
 

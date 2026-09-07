@@ -36,7 +36,7 @@ import {
 import { isDeclaredMimeConsistent, sniffImageMimeType } from "../lib/imageSniffing";
 import { sha256HexOfBytes } from "../lib/crypto";
 import {
-  buildGuardedQuestionImageAuditStatement,
+  buildGuardedImageAuditStatement,
   buildStandaloneDeleteImageStatement,
   buildStandaloneInsertImageStatement,
   buildStandaloneUpdateImageMetadataStatement,
@@ -115,6 +115,20 @@ function questionEditableStatusError(status: string): Record<string, string> {
   return status === "published"
     ? { editorial_status: "Questão publicada não pode ter mídia alterada diretamente nesta sprint." }
     : { editorial_status: "Questão não está num status editável." };
+}
+
+/** Sprint 18.2, seção 1 da correção — a mutação real (INSERT/UPDATE/DELETE
+ *  de `question_images`) e sua auditoria acoplada (`buildGuardedImageAuditStatement`)
+ *  usam a MESMA condição, avaliada no MESMO instante da transação (mesmo
+ *  `db.batch()`) — estruturalmente elas NUNCA podem divergir. Se algum dia
+ *  divergirem, é um bug real (guardas deixaram de ser idênticas, ou a ordem
+ *  dos statements no batch mudou sem preservar a semântica pré/pós-mutação
+ *  documentada em `buildGuardedImageAuditStatement`), nunca um resultado de
+ *  negócio comum — por isso um `throw`, não um retorno de erro tratável. */
+function assertMutationAuditCoupling(mutationChanges: number, auditChanges: number, context: string): void {
+  if (mutationChanges !== auditChanges) {
+    throw new Error(`invariante violada: mutação (${mutationChanges}) e auditoria (${auditChanges}) de question_images divergiram — ${context}`);
+  }
 }
 
 export async function addQuestionImage(
@@ -211,6 +225,11 @@ export async function addQuestionImage(
   await bucket.put(assetRef, input.fileBytes, { httpMetadata: { contentType: sniffed } });
 
   try {
+    // Sprint 18.2, seção 1 — auditoria DEPOIS do INSERT nesta operação: só
+    // uma checagem PÓS-insert (a linha id+questionId REALMENTE existe
+    // agora) prova que esta chamada específica criou a imagem — nunca uma
+    // condição derivada só do status da questão (ver
+    // buildGuardedImageAuditStatement).
     const result = await db.batch([
       buildStandaloneInsertImageStatement(db, {
         id: imageId,
@@ -226,18 +245,19 @@ export async function addQuestionImage(
         sizeBytes: input.fileBytes.byteLength,
         contentSha256,
       }),
-      // Sprint 18.1, seção F — mesmo batch da imagem: só grava trilha
-      // quando a imagem REALMENTE foi inserida nesta chamada (mesma guarda
-      // de status, ver buildGuardedQuestionImageAuditStatement).
-      buildGuardedQuestionImageAuditStatement(db, {
+      buildGuardedImageAuditStatement(db, {
         id: input.mutationId,
+        imageId,
         questionId,
         eventType: "editorial_question_image_added" satisfies AuditEventType,
         userId: actorUserId,
         metadata: buildImageAuditMetadata({ questionId, imageId, placement, alternativeLetter, storageKind: "r2" }),
       }),
     ]);
-    if (result[0].meta.changes !== 1) {
+    const insertChanges = result[0].meta.changes;
+    const auditChanges = result[1].meta.changes;
+    assertMutationAuditCoupling(insertChanges, auditChanges, `addQuestionImage(${imageId})`);
+    if (insertChanges !== 1) {
       // O guard (status editável) falhou entre a checagem acima e agora —
       // corrida real, rara. O objeto R2 recém-criado NESTA chamada nunca
       // pode ficar solto sem tentativa de limpeza.
@@ -316,10 +336,16 @@ export async function updateQuestionImageMetadata(
     return { ok: true, changed: false, value: toImageDto(image) };
   }
 
+  // Sprint 18.2, seção 1 — auditoria ANTES do UPDATE nesta operação: prova
+  // que a imagem EXISTIA (id+questionId) e a questão estava editável no
+  // instante exato da mutação, nunca só o status re-derivado depois (ver
+  // buildGuardedImageAuditStatement). UPDATE não remove a linha, então a
+  // ordem audit->update não muda o resultado, mas mantém o mesmo padrão de
+  // "auditoria vê o estado pré-mutação" usado pelo DELETE.
   const result = await db.batch([
-    buildStandaloneUpdateImageMetadataStatement(db, { id: imageId, questionId, altText: newAltText, caption: newCaption }),
-    buildGuardedQuestionImageAuditStatement(db, {
+    buildGuardedImageAuditStatement(db, {
       id: input.mutationId,
+      imageId,
       questionId,
       eventType: "editorial_question_image_updated" satisfies AuditEventType,
       userId: actorUserId,
@@ -331,8 +357,12 @@ export async function updateQuestionImageMetadata(
         storageKind: image.storage_kind,
       }),
     }),
+    buildStandaloneUpdateImageMetadataStatement(db, { id: imageId, questionId, altText: newAltText, caption: newCaption }),
   ]);
-  if (result[0].meta.changes !== 1) {
+  const auditChanges = result[0].meta.changes;
+  const updateChanges = result[1].meta.changes;
+  assertMutationAuditCoupling(updateChanges, auditChanges, `updateQuestionImageMetadata(${imageId})`);
+  if (updateChanges !== 1) {
     const after = await findQuestionById(db, questionId);
     if (!after) return { ok: false, notFound: true };
     return { ok: false, fieldErrors: questionEditableStatusError(after.editorial_status) };
@@ -397,14 +427,19 @@ export async function deleteQuestionImage(
     return { ok: false, fieldErrors: questionEditableStatusError(question.editorial_status) };
   }
 
-  // 1) D1 primeiro (seção 12 da ordem) — a referência precisa deixar de
-  //    existir ANTES de qualquer tentativa de apagar o objeto do R2. Mesmo
-  //    batch da auditoria (seção F da correção) — só grava trilha quando a
-  //    remoção realmente aconteceu nesta chamada (mesma guarda).
+  // Sprint 18.2, seção 1 — auditoria ANTES do DELETE, na MESMA transação:
+  // só assim ela enxerga o estado PRÉ-remoção (id+questionId+status
+  // editável) — se rodasse depois, a linha já teria sido apagada e a
+  // checagem de existência da auditoria falharia mesmo num delete
+  // bem-sucedido. Isso fecha a corrida em que a imagem desaparece entre a
+  // pré-leitura do serviço (acima) e o instante do batch: se já não existir
+  // mais, NENHUM dos dois statements afeta linha alguma (ver
+  // buildGuardedImageAuditStatement); D1 continua sendo escrito ANTES de
+  // qualquer tentativa de apagar o objeto do R2 (seção 12 da ordem original).
   const result = await db.batch([
-    buildStandaloneDeleteImageStatement(db, imageId, questionId),
-    buildGuardedQuestionImageAuditStatement(db, {
+    buildGuardedImageAuditStatement(db, {
       id: crypto.randomUUID(),
+      imageId,
       questionId,
       eventType: "editorial_question_image_removed" satisfies AuditEventType,
       userId: actorUserId,
@@ -416,8 +451,12 @@ export async function deleteQuestionImage(
         storageKind: image.storage_kind,
       }),
     }),
+    buildStandaloneDeleteImageStatement(db, imageId, questionId),
   ]);
-  if (result[0].meta.changes !== 1) {
+  const auditChanges = result[0].meta.changes;
+  const deleteChanges = result[1].meta.changes;
+  assertMutationAuditCoupling(deleteChanges, auditChanges, `deleteQuestionImage(${imageId})`);
+  if (deleteChanges !== 1) {
     // Guard falhou entre a checagem acima e agora (corrida rara) — nada foi
     // removido, nenhuma limpeza R2 é tentada.
     return { ok: false, fieldErrors: questionEditableStatusError(question.editorial_status) };

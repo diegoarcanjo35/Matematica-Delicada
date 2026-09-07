@@ -8,6 +8,7 @@ import {
   uploadQuestionImage,
   type QuestionImageDto,
 } from "../../api/editorialClient";
+import { computePayloadSignature, isNetworkFailure, resolveMutationId, type MutationRetryState } from "./mutationId";
 
 /* Sprint 18, seção 14 da ordem — zona de upload de imagem reutilizada tanto
    para o enunciado quanto para cada alternativa A-E. A Andreia NUNCA digita
@@ -23,7 +24,20 @@ import {
    (`storageKind === 'local'`) e imagens novas via R2 (`storageKind ===
    'r2'`) usam URLs de exibição DIFERENTES (ver localAssetUrl/
    questionMediaUrl em editorialClient.ts); a rota /api/question-media
-   nunca serve um asset local (404). */
+   nunca serve um asset local (404).
+
+   Sprint 18.2, seção 2 da correção — o retry forte do backend (mutationId +
+   hash de conteúdo, ver questionMediaService.ts) só tem efeito prático se o
+   CLIENTE reaproveitar o mesmo mutationId ao reenviar a MESMA tentativa
+   depois de uma falha de rede — gerar um UUID novo a cada clique (como
+   antes) invalidava essa proteção na prática: um retry legítimo do usuário
+   sempre parecia uma operação NOVA para o servidor. Mesma disciplina já
+   usada pelo PATCH geral da questão (ver mutationId.ts/
+   EditorialQuestionFormPage.tsx): guarda-se a ASSINATURA da última
+   tentativa; reaproveita o mesmo mutationId só se a tentativa atual for
+   idêntica; qualquer mudança de conteúdo gera um mutationId novo; uma
+   resposta HTTP conhecida (sucesso OU erro 4xx/409 — o servidor decidiu
+   algo sobre aquela tentativa específica) sempre limpa o estado de retry. */
 
 function imageSrc(image: QuestionImageDto): string {
   return image.storageKind === "r2" ? questionMediaUrl(image.id) : localAssetUrl(image.assetRef);
@@ -50,6 +64,8 @@ export function ImageUploadZone({ questionId, placement, alternativeLetter, imag
   const [editingAltDraft, setEditingAltDraft] = useState("");
   const [savingAltId, setSavingAltId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadRetryState = useRef<MutationRetryState | null>(null);
+  const altRetryState = useRef<MutationRetryState | null>(null);
 
   function startEditingAlt(image: QuestionImageDto) {
     setEditingAltId(image.id);
@@ -57,14 +73,21 @@ export function ImageUploadZone({ questionId, placement, alternativeLetter, imag
   }
 
   async function handleSaveAlt(imageId: string) {
-    if (editingAltDraft.trim().length === 0) return;
+    const altText = editingAltDraft.trim();
+    if (altText.length === 0) return;
     setSavingAltId(imageId);
+
+    const payloadSignature = computePayloadSignature({ imageId, altText, caption: null });
+    const mutationId = resolveMutationId(altRetryState.current, payloadSignature);
+
     try {
-      await updateQuestionImageMetadata(questionId, imageId, { mutationId: crypto.randomUUID(), altText: editingAltDraft.trim() });
+      await updateQuestionImageMetadata(questionId, imageId, { mutationId, altText });
+      altRetryState.current = null;
       setEditingAltId(null);
       onChanged();
-    } catch {
+    } catch (err) {
       setError("Não foi possível salvar o texto alternativo. Tente novamente.");
+      altRetryState.current = isNetworkFailure(err) ? { mutationId, payloadSignature } : null;
     } finally {
       setSavingAltId(null);
     }
@@ -105,19 +128,39 @@ export function ImageUploadZone({ questionId, placement, alternativeLetter, imag
     }
     setUploading(true);
     setError(null);
+
+    const altText = altTextDraft.trim();
+    // Assinatura da tentativa: identidade prática do arquivo (nome/tamanho/
+    // data de modificação/tipo — o hash de conteúdo forte de verdade é
+    // responsabilidade do backend, ver questionMediaService.ts) + os demais
+    // campos do formulário. Reenviar exatamente isto depois de uma falha de
+    // rede reaproveita o MESMO mutationId; qualquer mudança gera um novo.
+    const payloadSignature = computePayloadSignature({
+      fileName: pendingFile.name,
+      fileSize: pendingFile.size,
+      fileLastModified: pendingFile.lastModified,
+      fileType: pendingFile.type,
+      altText,
+      placement,
+      alternativeLetter: alternativeLetter ?? null,
+    });
+    const mutationId = resolveMutationId(uploadRetryState.current, payloadSignature);
+
     try {
       await uploadQuestionImage(questionId, {
         file: pendingFile,
-        mutationId: crypto.randomUUID(),
+        mutationId,
         placement,
         alternativeLetter: alternativeLetter ?? null,
-        altText: altTextDraft.trim(),
+        altText,
       });
+      uploadRetryState.current = null;
       setPendingFile(null);
       setAltTextDraft("");
       onChanged();
-    } catch {
+    } catch (err) {
       setError("Não foi possível enviar a imagem. Tente novamente.");
+      uploadRetryState.current = isNetworkFailure(err) ? { mutationId, payloadSignature } : null;
     } finally {
       setUploading(false);
     }

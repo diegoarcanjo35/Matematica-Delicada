@@ -10,7 +10,7 @@ import type { Env } from "../src/env";
 import { handleEditorialQuestionsRequest } from "../src/routes/editorialQuestions";
 import { handleQuestionMediaRequest } from "../src/routes/questionMedia";
 import { isValidR2AssetKey, MAX_IMAGE_MULTIPART_BYTES } from "../src/lib/questionsValidation";
-import { addQuestionImage } from "../src/services/questionMediaService";
+import { addQuestionImage, deleteQuestionImage, updateQuestionImageMetadata } from "../src/services/questionMediaService";
 
 /* Sprint 18, seções 11-13/19 da ordem — upload/delete/serve de imagem.
    Mesmo padrão de worker/testing/questions.test.ts (usuários reais via
@@ -666,5 +666,111 @@ describe("Correção 18.1, seção G — idempotência FORTE do upload (hash de 
     const retry = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId, placement: "enunciado", altText: "Estável" }));
     expect(retry.status).toBe(200);
     expect(((await retry.json()) as { changed: boolean }).changed).toBe(false);
+  });
+});
+
+describe("Correção 18.2, seção 1 — auditoria ACOPLADA à mutação real (races adversariais)", () => {
+  function auditCountFor(eventType: string): number {
+    return (db.sqlite.prepare("SELECT COUNT(*) as total FROM audit_log WHERE event_type = ?").get(eventType) as { total: number }).total;
+  }
+
+  async function seedR2Image(qId: string, token: string, seed: string, altText = "X"): Promise<{ id: string }> {
+    const upload = await callImagesRoute(await uploadRequest(qId, token, { file: PNG_BYTES, mutationId: mutId(seed), placement: "enunciado", altText }));
+    return ((await upload.json()) as { image: { id: string } }).image;
+  }
+
+  it("A — imagem desaparece entre a pré-leitura e o DELETE: nem o delete nem a auditoria acontecem", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const image = await seedR2Image(qId, token, "700");
+    expect(bucket.size()).toBe(1);
+
+    // Pausa a PRIMEIRA leitura de question_images por id (a pré-leitura do
+    // serviço) — o valor já foi lido de verdade nesse instante; só o
+    // RETORNO ao chamador é atrasado (mesmo mecanismo de
+    // dailyTrainingService.ts para provar TOCTOU de forma determinística).
+    const gate = db.pauseReadsMatching(/SELECT \* FROM question_images WHERE id = \?/, 1);
+    const deletePromise = deleteQuestionImage(db as never, bucket as never, qId, image.id, "editor1");
+    await gate.arrived;
+
+    // Corrida real: outra requisição remove a MESMA imagem antes do batch
+    // desta chamada rodar.
+    db.sqlite.exec(`DELETE FROM question_images WHERE id = '${image.id}'`);
+    gate.release();
+
+    const result = await deletePromise;
+    expect(result.ok).toBe(false); // nenhum delete aconteceu POR ESTA chamada.
+    expect(auditCountFor("editorial_question_image_removed")).toBe(0); // nenhuma auditoria "fantasma".
+  });
+
+  it("B — imagem desaparece entre a pré-leitura e o UPDATE de alt text: nem o update nem a auditoria acontecem", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const image = await seedR2Image(qId, token, "710", "Antes");
+
+    const gate = db.pauseReadsMatching(/SELECT \* FROM question_images WHERE id = \?/, 1);
+    const updatePromise = updateQuestionImageMetadata(db as never, qId, image.id, "editor1", {
+      mutationId: mutId("711"),
+      altText: "Depois",
+      caption: null,
+    });
+    await gate.arrived;
+
+    db.sqlite.exec(`DELETE FROM question_images WHERE id = '${image.id}'`);
+    gate.release();
+
+    const result = await updatePromise;
+    expect(result.ok).toBe(false); // nenhum update aconteceu POR ESTA chamada.
+    expect(auditCountFor("editorial_question_image_updated")).toBe(0);
+  });
+
+  it("C — status da questão muda entre a pré-leitura e o batch: nem a mutação nem a auditoria acontecem", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+    const image = await seedR2Image(qId, token, "720");
+
+    // Pausa a leitura de `questions` por id (a checagem de status) — quando
+    // ela "chegar" (já leu 'draft' de verdade), muda o status ANTES do
+    // batch rodar, simulando outra ação de workflow concorrente.
+    const gate = db.pauseReadsMatching(/SELECT \* FROM questions WHERE id = \?/, 1);
+    const deletePromise = deleteQuestionImage(db as never, bucket as never, qId, image.id, "editor1");
+    await gate.arrived;
+
+    db.sqlite.exec(`UPDATE questions SET editorial_status = 'in_review' WHERE id = '${qId}'`);
+    gate.release();
+
+    const result = await deletePromise;
+    expect(result.ok).toBe(false);
+    expect(auditCountFor("editorial_question_image_removed")).toBe(0);
+    // A imagem continua exatamente como estava — nenhuma mutação parcial.
+    expect((db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE id = ?").get(image.id) as { total: number }).total).toBe(1);
+  });
+
+  it("D — sucesso sem corrida: exatamente 1 mutação e exatamente 1 evento de auditoria (delete e update)", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const qId = seedQuestion(db.sqlite, { patternId: "pat-1", status: "draft" });
+
+    const imageForDelete = await seedR2Image(qId, token, "730");
+    const deleteResult = await deleteQuestionImage(db as never, bucket as never, qId, imageForDelete.id, "editor1");
+    expect(deleteResult.ok).toBe(true);
+    expect(deleteResult.changed).toBe(true);
+    expect(auditCountFor("editorial_question_image_removed")).toBe(1);
+    expect((db.sqlite.prepare("SELECT COUNT(*) as total FROM question_images WHERE id = ?").get(imageForDelete.id) as { total: number }).total).toBe(0);
+
+    const imageForUpdate = await seedR2Image(qId, token, "740", "Original");
+    const updateResult = await updateQuestionImageMetadata(db as never, qId, imageForUpdate.id, "editor1", {
+      mutationId: mutId("741"),
+      altText: "Atualizado",
+      caption: null,
+    });
+    expect(updateResult.ok).toBe(true);
+    expect(updateResult.changed).toBe(true);
+    expect(auditCountFor("editorial_question_image_updated")).toBe(1);
+    const row = db.sqlite.prepare("SELECT alt_text FROM question_images WHERE id = ?").get(imageForUpdate.id) as { alt_text: string };
+    expect(row.alt_text).toBe("Atualizado");
   });
 });

@@ -237,7 +237,7 @@ export interface StandaloneImageInsertParams {
  *  pipeline de imagem — nunca depende de versão (este pipeline não
  *  participa do versionamento de `questions`, ver nota acima). Usar o MESMO
  *  texto em toda escrita relacionada (incluindo o evento de auditoria
- *  guardado, ver `buildGuardedQuestionImageAuditStatement`) garante que
+ *  guardado, ver `buildGuardedImageAuditStatement`) garante que
  *  todas só podem concordar sobre "esta questão está editável agora". */
 function imageEditableStatusGuard(): string {
   return `EXISTS (SELECT 1 FROM questions WHERE id = ? AND editorial_status IN ('draft', 'changes_requested'))`;
@@ -302,26 +302,46 @@ export function buildStandaloneUpdateImageMetadataStatement(db: D1Database, para
     .bind(params.altText, params.caption, params.id, params.questionId, params.questionId);
 }
 
-/** Sprint 18.1, seção F da correção — evento de auditoria do pipeline de
- *  imagens, guardado pela MESMA condição de status editável do INSERT/
- *  UPDATE/DELETE que ele acompanha (nunca a versão de `questions` — este
- *  pipeline não versiona). Rodar no MESMO `db.batch()` da mutação real
- *  garante que a auditoria só é gravada quando a mutação de fato aconteceu
- *  nesta chamada: se a condição falhar (corrida perdida entre a checagem no
- *  serviço e o instante do batch), NENHUM dos dois statements afeta
- *  qualquer linha — nunca uma auditoria "fantasma" de uma operação que na
- *  prática não teve efeito. */
-export function buildGuardedQuestionImageAuditStatement(
+/** Sprint 18.2, seção 1 da correção — evento de auditoria do pipeline de
+ *  imagens, ACOPLADO à MUTAÇÃO REAL, nunca só ao status da questão.
+ *
+ *  A versão anterior (Sprint 18.1) guardava a auditoria só por
+ *  `imageEditableStatusGuard()` (status da questão) — a MESMA condição do
+ *  INSERT/UPDATE/DELETE, mas NUNCA a existência da linha específica de
+ *  `question_images` que a mutação afeta. Isso deixava uma corrida real: se
+ *  a imagem desaparecesse (outra requisição a apagou) entre a pré-leitura
+ *  do serviço e o `db.batch()`, o DELETE/UPDATE guardado por
+ *  `id = ? AND question_id = ? AND <status>` corretamente afetava 0 linhas
+ *  — mas a auditoria, checando SÓ o status (ainda editável), inseria um
+ *  evento de qualquer forma: uma auditoria "fantasma" de uma mutação que
+ *  não aconteceu.
+ *
+ *  A correção: a MESMA condição `EXISTS (question_images WHERE id = ? AND
+ *  question_id = ?)` usada pelo UPDATE/DELETE entra também na auditoria,
+ *  além do status. Isso é suficiente para os três casos, desde que a ORDEM
+ *  dentro do `db.batch()` seja a certa (mesma transação, statements
+ *  seguintes enxergam o efeito dos anteriores):
+ *    - DELETE/UPDATE: a auditoria roda ANTES da mutação (vê o estado
+ *      PRÉ-mutação — a imagem ainda existe, se for para existir);
+ *    - INSERT: a auditoria roda DEPOIS (só a existência PÓS-insert prova
+ *      que a linha realmente foi criada nesta chamada).
+ *  O serviço (questionMediaService.ts) sempre lê os DOIS resultados do
+ *  batch (mutação real + auditoria) e trata qualquer divergência entre eles
+ *  como uma violação de invariante (nunca um resultado de negócio comum) —
+ *  estruturalmente, com a mesma condição avaliada no mesmo instante da
+ *  transação, as duas contagens NUNCA podem divergir. */
+export function buildGuardedImageAuditStatement(
   db: D1Database,
-  params: { id: string; questionId: string; eventType: string; userId: string | null; metadata: Record<string, string | number | boolean> }
+  params: { id: string; imageId: string; questionId: string; eventType: string; userId: string | null; metadata: Record<string, string | number | boolean> }
 ): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO audit_log (id, user_id, event_type, metadata)
        SELECT ?, ?, ?, ?
-       WHERE ${imageEditableStatusGuard()}`
+       WHERE EXISTS (SELECT 1 FROM question_images WHERE id = ? AND question_id = ?)
+         AND ${imageEditableStatusGuard()}`
     )
-    .bind(params.id, params.userId, params.eventType, JSON.stringify(params.metadata), params.questionId);
+    .bind(params.id, params.userId, params.eventType, JSON.stringify(params.metadata), params.imageId, params.questionId, params.questionId);
 }
 
 export async function listPatternsForQuestion(db: D1Database, questionId: string): Promise<QuestionPatternRow[]> {
