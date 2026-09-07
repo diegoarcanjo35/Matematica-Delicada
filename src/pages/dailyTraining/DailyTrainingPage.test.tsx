@@ -299,4 +299,91 @@ describe("DailyTrainingPage — resumo pós-treino (Sprint 20, itens 59-64)", ()
     expect(screen.getByText("Vale revisar")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Ver Caderno de Erros" })).toHaveAttribute("href", "/caderno-de-erros");
   });
+
+  it("'Treinar outro padrão' no resumo concluído leva ao Dashboard", async () => {
+    mockApi({ current: { ok: true, list: completedList() } });
+    renderPage("/treino-diario");
+    await waitFor(() => expect(screen.getByText("Treino concluído")).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "Treinar outro padrão" })).toHaveAttribute("href", "/");
+  });
+
+  it("estado abandonado oferece 'Escolher outro padrão' (nunca 'só amanhã', já que o backend permite outra lista hoje)", async () => {
+    mockApi({ current: { ok: true, list: buildList({ status: "abandoned" }) } });
+    renderPage("/treino-diario");
+    await waitFor(() => expect(screen.getByText("Treino abandonado")).toBeInTheDocument());
+    expect(screen.queryByText(/amanhã/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Escolher outro padrão" })).toHaveAttribute("href", "/");
+  });
+});
+
+/* Sprint 20.1, seção 2/4 da ordem — distinção explícita entre lista
+   ACTIVE (sempre soberana sobre qualquer patternId da URL) e lista
+   TERMINAL (completed/abandoned, que preserva o resumo num refresh SEM
+   patternId, mas nunca bloqueia uma escolha explícita de outro padrão
+   feita agora). */
+describe("DailyTrainingPage — ACTIVE vs TERMINAL ao decidir o que carregar (Sprint 20.1)", () => {
+  function completedListOf(patternName: string) {
+    return {
+      id: "list-escala",
+      date: "2026-09-01",
+      timezone: "America/Sao_Paulo",
+      status: "completed",
+      estimatedMinutes: 8,
+      itemCount: 2,
+      version: 2,
+      createdAt: "2026-09-01T10:00:00.000Z",
+      completedAt: "2026-09-01T10:30:00.000Z",
+      focusPattern: { id: "p1", slug: "escala", name: patternName, mainStrategy: "Macete." },
+      items: [
+        { id: "i1", questionId: "q1", questionCode: "C1", patternId: "p1", patternName, origin: "development", reason: "pattern_exploration", reasonLabel: "x", playerMode: "learning", position: 0, estimatedMinutes: 4, status: "completed", questionAttemptId: "a1", isCorrect: true, skipReason: null, version: 1 },
+        { id: "i2", questionId: "q2", questionCode: "C2", patternId: "p1", patternName, origin: "development", reason: "pattern_exploration", reasonLabel: "x", playerMode: "learning", position: 1, estimatedMinutes: 4, status: "completed", questionAttemptId: "a2", isCorrect: true, skipReason: null, version: 1 },
+      ],
+    };
+  }
+
+  it("cenário completo — lista COMPLETED de 'Escala' + escolha explícita de 'Probabilidade': a escolha nova vence, nunca o resumo antigo", async () => {
+    mockApi({
+      current: { ok: true, list: completedListOf("Escala") },
+      preview: (patternId) => ({
+        ok: true,
+        preview: {
+          date: "2026-09-01",
+          timezone: "America/Sao_Paulo",
+          hasAvailabilityToday: true,
+          availableMinutesToday: 60,
+          estimatedMinutes: 8,
+          itemCount: 2,
+          items: [],
+          composition: [],
+          focusPattern: { id: patternId, slug: "probabilidade", name: "Probabilidade", mainStrategy: "Macete de probabilidade." },
+        },
+      }),
+    });
+    renderPage("/treino-diario?patternId=p-prob");
+    await waitFor(() => expect(screen.getByText("Treino de Probabilidade")).toBeInTheDocument());
+    // NUNCA mostra o resumo terminal do padrão anterior.
+    expect(screen.queryByText("Treino concluído")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Começar treino" })).toBeInTheDocument();
+  });
+
+  it("sem patternId, depois de concluir — o resumo terminal sobrevive a um novo carregamento/refresh", async () => {
+    mockApi({ current: { ok: true, list: completedListOf("Escala") } });
+    renderPage("/treino-diario");
+    await waitFor(() => expect(screen.getByText("Treino concluído")).toBeInTheDocument());
+    expect(screen.getByText("Bom trabalho no treino de Escala!")).toBeInTheDocument();
+  });
+
+  it("sem patternId, depois de abandonar — o estado terminal sobrevive a um novo carregamento/refresh", async () => {
+    mockApi({ current: { ok: true, list: { ...completedListOf("Escala"), status: "abandoned" } } });
+    renderPage("/treino-diario");
+    await waitFor(() => expect(screen.getByText("Treino abandonado")).toBeInTheDocument());
+  });
+
+  it("lista ATIVA sempre vence qualquer patternId na URL (mesmo de um padrão diferente)", async () => {
+    mockApi({ current: { ok: true, list: buildList({ status: "active" }) } });
+    renderPage("/treino-diario?patternId=algum-outro-padrao");
+    await waitFor(() => expect(screen.getByText("Treino de Escala")).toBeInTheDocument());
+    // A tela ativa (com itens/ações), nunca um preview focado do padrão da URL.
+    expect(screen.getByRole("button", { name: "Começar questão" })).toBeInTheDocument();
+  });
 });

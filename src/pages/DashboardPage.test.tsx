@@ -60,6 +60,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function buildDailyTrainingList(status: "active" | "completed" | "abandoned") {
+  return {
+    id: "list-1",
+    date: "2026-09-01",
+    timezone: "America/Sao_Paulo",
+    status,
+    estimatedMinutes: 20,
+    itemCount: 4,
+    version: 1,
+    createdAt: "2026-09-01T10:00:00.000Z",
+    completedAt: status === "completed" ? "2026-09-01T11:00:00.000Z" : null,
+    focusPattern: { id: "p1", slug: "escala", name: "Escala", mainStrategy: "Macete." },
+    items: [
+      { id: "i1", questionId: "q1", questionCode: "C1", patternId: "p1", patternName: "Escala", origin: "development", reason: "pattern_exploration", reasonLabel: "x", playerMode: "learning", position: 0, estimatedMinutes: 4, status: "completed", questionAttemptId: "a1", isCorrect: true, skipReason: null, version: 1 },
+      { id: "i2", questionId: "q2", questionCode: "C2", patternId: "p1", patternName: "Escala", origin: "development", reason: "pattern_exploration", reasonLabel: "x", playerMode: "learning", position: 1, estimatedMinutes: 4, status: "pending", questionAttemptId: null, isCorrect: null, skipReason: null, version: 0 },
+    ],
+  };
+}
+
 describe("DashboardPage — 'O que você quer treinar hoje?' (Sprint 20)", () => {
   it("item 43 — aparece em destaque, logo após a saudação", async () => {
     mockApi();
@@ -92,30 +111,48 @@ describe("DashboardPage — 'O que você quer treinar hoje?' (Sprint 20)", () =>
   });
 
   it("item 47/48 — lista ativa troca o seletor por 'Continuar treino', com nome do padrão quando derivável com segurança", async () => {
-    mockApi({
-      ok: true,
-      list: {
-        id: "list-1",
-        date: "2026-09-01",
-        timezone: "America/Sao_Paulo",
-        status: "active",
-        estimatedMinutes: 20,
-        itemCount: 4,
-        version: 1,
-        createdAt: "2026-09-01T10:00:00.000Z",
-        completedAt: null,
-        focusPattern: { id: "p1", slug: "escala", name: "Escala", mainStrategy: "Macete." },
-        items: [
-          { id: "i1", questionId: "q1", questionCode: "C1", patternId: "p1", patternName: "Escala", origin: "development", reason: "pattern_exploration", reasonLabel: "x", playerMode: "learning", position: 0, estimatedMinutes: 4, status: "completed", questionAttemptId: "a1", isCorrect: true, skipReason: null, version: 1 },
-          { id: "i2", questionId: "q2", questionCode: "C2", patternId: "p1", patternName: "Escala", origin: "development", reason: "pattern_exploration", reasonLabel: "x", playerMode: "learning", position: 1, estimatedMinutes: 4, status: "pending", questionAttemptId: null, isCorrect: null, skipReason: null, version: 0 },
-        ],
-      },
-    });
+    mockApi({ ok: true, list: buildDailyTrainingList("active") });
     renderDashboard();
     const heading = await screen.findByRole("heading", { name: "Treino de Escala" });
     const dominantSection = heading.closest("section")!;
     expect(within(dominantSection).getByRole("link", { name: "Continuar treino" })).toHaveAttribute("href", "/treino-diario");
     // Nunca mostra o seletor de padrões ao mesmo tempo que uma lista ativa.
     expect(screen.queryByRole("heading", { name: "O que você quer treinar hoje?" })).not.toBeInTheDocument();
+  });
+});
+
+/* Sprint 20.1, seção 1 da ordem — GET /current também devolve a lista
+   mais recente do dia mesmo quando ela já está completed/abandoned (para
+   o resumo terminal sobreviver a um refresh em DailyTrainingPage); a
+   seção dominante do Dashboard NUNCA pode confundir isso com "há um
+   treino em andamento". Só status === "active" bloqueia o seletor. */
+describe("DashboardPage — só lista ACTIVE bloqueia o seletor (Sprint 20.1)", () => {
+  it("cenário A — status=active mostra 'Continuar treino' e NÃO mostra a grade de padrões", async () => {
+    mockApi({ ok: true, list: buildDailyTrainingList("active") });
+    renderDashboard();
+    const heading = await screen.findByRole("heading", { name: "Treino de Escala" });
+    const dominantSection = heading.closest("section")!;
+    expect(within(dominantSection).getByRole("link", { name: "Continuar treino" })).toHaveAttribute("href", "/treino-diario");
+    expect(screen.queryByRole("heading", { name: "O que você quer treinar hoje?" })).not.toBeInTheDocument();
+  });
+
+  it("cenário B — status=completed mostra a grade de padrões e NÃO mostra 'Continuar treino'", async () => {
+    mockApi({ ok: true, list: buildDailyTrainingList("completed") });
+    renderDashboard();
+    const heading = await screen.findByRole("heading", { name: "O que você quer treinar hoje?" });
+    const dominantSection = heading.closest("section")!;
+    expect(within(dominantSection).getByRole("link", { name: /Escala/ })).toHaveAttribute("href", "/treino-diario?patternId=p1");
+    expect(screen.queryByRole("link", { name: "Continuar treino" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Treino de Escala" })).not.toBeInTheDocument();
+  });
+
+  it("cenário C — status=abandoned mostra a grade de padrões e NÃO mostra 'Continuar treino'", async () => {
+    mockApi({ ok: true, list: buildDailyTrainingList("abandoned") });
+    renderDashboard();
+    const heading = await screen.findByRole("heading", { name: "O que você quer treinar hoje?" });
+    const dominantSection = heading.closest("section")!;
+    expect(within(dominantSection).getByRole("link", { name: /Escala/ })).toHaveAttribute("href", "/treino-diario?patternId=p1");
+    expect(screen.queryByRole("link", { name: "Continuar treino" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Treino de Escala" })).not.toBeInTheDocument();
   });
 });

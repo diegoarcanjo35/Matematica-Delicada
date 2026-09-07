@@ -228,6 +228,21 @@ export function DailyTrainingPage() {
     }
   }, []);
 
+  /* Sprint 20.1, seção 2 da ordem — distinção explícita entre lista ACTIVE
+     e lista TERMINAL (completed/abandoned) ao decidir o que carregar:
+
+       1) lista ACTIVE → SEMPRE vence qualquer patternId da URL (seção
+          6/14 da ordem original) — nunca oferece a escolha de padrão nem
+          finge que o patternId "ganhou" enquanto existe uma lista em
+          andamento;
+       2) sem lista ativa E com patternId → preview focado do padrão
+          escolhido AGORA, mesmo que exista uma lista completed/abandoned
+          anterior no mesmo dia — uma escolha explícita nova nunca fica
+          bloqueada por um resumo antigo;
+       3) sem patternId e lista completed → preserva o resumo terminal
+          (refresh depois de concluir continua mostrando o mesmo resumo);
+       4) sem patternId e lista abandoned → preserva o estado terminal;
+       5) nenhuma lista (de nenhum status) → seletor de padrões normal. */
   const load = useCallback(async () => {
     setPhase("loading");
     try {
@@ -236,20 +251,26 @@ export function DailyTrainingPage() {
         setPhase("unavailable");
         return;
       }
-      if (current.list) {
-        // Seção 6/14 da ordem — já existe lista ativa (deste padrão ou de
-        // outro, aplicada agora ou antes): carrega a lista REAL, nunca
-        // volta a oferecer a escolha de padrão nem finge que o
-        // `patternId` da URL "ganhou".
+      if (current.list && current.list.status === "active") {
         setList(current.list);
-        setPhase(current.list.status === "abandoned" ? "abandoned" : "active");
+        setPhase("active");
         return;
       }
       if (patternId) {
         await loadFocusedPreview(patternId);
-      } else {
-        await loadPicker();
+        return;
       }
+      if (current.list && current.list.status === "completed") {
+        setList(current.list);
+        setPhase("completed");
+        return;
+      }
+      if (current.list && current.list.status === "abandoned") {
+        setList(current.list);
+        setPhase("abandoned");
+        return;
+      }
+      await loadPicker();
     } catch {
       setPhase("error");
     }
@@ -622,6 +643,18 @@ export function DailyTrainingPage() {
                 </Link>
               </section>
             )}
+
+            {/* Sprint 20.1, seção 3 da ordem — o backend já permite uma
+                NOVA lista ativa no mesmo dia depois de uma lista terminal
+                (nenhuma trava de "só amanhã"); o CTA leva ao Dashboard,
+                onde o seletor volta a aparecer porque não há mais lista
+                ativa (Sprint 20.1, seção 1) — nunca um estado novo
+                persistido só para isto. */}
+            <div className="treino-diario__preview-actions">
+              <Link to="/" className="btn btn--primary">
+                <span>Treinar outro padrão</span>
+              </Link>
+            </div>
           </Card>
           {footerNav}
         </div>
@@ -633,8 +666,13 @@ export function DailyTrainingPage() {
         <div className="treino-diario">
           <header className="treino-diario__header">
             <h1>Treino abandonado</h1>
-            <p className="treino-diario__welcome">Sem problema — você pode montar um novo treino amanhã.</p>
+            <p className="treino-diario__welcome">Sem problema — você pode escolher outro padrão para treinar hoje.</p>
           </header>
+          <div className="treino-diario__preview-actions">
+            <Link to="/" className="btn btn--primary">
+              <span>Escolher outro padrão</span>
+            </Link>
+          </div>
           {footerNav}
         </div>
       );

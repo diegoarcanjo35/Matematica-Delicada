@@ -163,7 +163,14 @@ export function DashboardPage() {
       try {
         const current = await fetchDailyTrainingCurrent();
         if (cancelled || current.available === false) return;
-        if (current.list) {
+        // Sprint 20.1, seção 1 da ordem — GET /current também devolve a
+        // lista mais recente do dia mesmo quando ela já está
+        // completed/abandoned (para o resumo terminal sobreviver a um
+        // refresh, ver DailyTrainingPage). "Continuar treino" só faz
+        // sentido para uma lista genuinamente ACTIVE — uma lista terminal
+        // nunca deve bloquear a seção dominante/o card de mostrar o
+        // seletor de padrões de novo.
+        if (current.list && current.list.status === "active") {
           const doneCount = current.list.items.filter((item) => item.status === "completed" || item.status === "skipped" || item.status === "blocked").length;
           setDailyTrainingCard({
             kind: "active",
