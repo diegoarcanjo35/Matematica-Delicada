@@ -40,6 +40,60 @@
   font-size: var(--font-size-sm);
 }
 
+.dashboard__train-today {
+  background: linear-gradient(135deg, var(--color-navy-deep), var(--color-navy-medium));
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6) var(--space-5);
+  margin-bottom: var(--space-6);
+  box-shadow: var(--shadow-lg);
+}
+
+.dashboard__train-today > h2 {
+  font-size: var(--font-size-2xl);
+  margin: 0 0 var(--space-1);
+  color: var(--color-text-inverse);
+}
+
+.dashboard__train-today-subtitle {
+  color: var(--color-pink-support);
+  margin: 0 0 var(--space-5);
+  font-size: var(--font-size-md);
+}
+
+.dashboard__train-today .pattern-grid__card {
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.dashboard__train-today .pattern-grid__card--enabled:hover {
+  border-color: var(--color-pink-brand);
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.dashboard__train-today .pattern-grid__name {
+  color: var(--color-text-inverse);
+}
+
+.dashboard__train-today .pattern-grid__count {
+  color: var(--color-pink-support);
+}
+
+.dashboard__train-today-card {
+  color: var(--color-text-primary);
+}
+
+.dashboard__train-today-card h2 {
+  color: var(--color-text-primary);
+  margin: 0 0 var(--space-2);
+}
+
+@media (max-width: 390px) {
+  .dashboard__train-today {
+    padding: var(--space-4);
+  }
+}
+
 .dashboard__grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

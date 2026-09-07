@@ -1,37 +1,54 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState } from "../../components/ErrorState";
 import { LoadingState } from "../../components/LoadingState";
 import { Modal } from "../../components/Modal";
+import { TrainablePatternGrid } from "../../components/dailyTraining/TrainablePatternGrid";
 import {
+  DailyTrainingApiError,
   SKIP_REASON_LABELS,
   abandonList,
-  applyDailyTraining,
+  applyFocusedTraining,
   completeList,
   fetchCurrent,
-  fetchPreview,
+  fetchFocusedPreview,
+  fetchTrainablePatterns,
   skipItem,
   startItem,
   syncItem,
+  type FocusedTrainingPreview,
+  type TrainablePattern,
   type TrainingItem,
   type TrainingList,
-  type TrainingPreview,
 } from "../../api/dailyTrainingClient";
 import "./DailyTrainingPage.css";
 
-/* Tela /treino-diario — Sprint 11 v1.0, seção 12 da ordem. Estados
-   mínimos exigidos: carregando, sem disponibilidade hoje, sem questões
-   elegíveis, preview disponível, aplicando, lista ativa, item em
-   andamento, progresso salvo, erro recuperável, lista concluída, lista
-   abandonada — todos implementados como uma única máquina de fases
-   (`phase`), mesmo padrão de src/pages/errorNotebook/ErrorNotebookListPage.tsx
-   (`phase: "loading" | "ready" | "unavailable" | "error"`), só que com mais
-   estados por causa do ciclo de vida próprio do treino diário. */
+/* Tela /treino-diario — Sprint 11 v1.0, evoluída pela Sprint 20 ("Treino
+   Diário por Padrão", seção 8 da ordem): sem lista ativa e SEM `patternId`
+   na URL, mostra o MESMO seletor "O que você quer treinar hoje?" do
+   Dashboard (reaproveita `TrainablePatternGrid`, nunca uma segunda
+   implementação); COM `patternId`, mostra o preview focado apenas daquele
+   padrão. A antiga prévia adaptativa genérica deixou de ser o fluxo
+   OFICIAL desta tela (seção 8: "não exibir lista adaptativa genérica como
+   fluxo principal") — os endpoints/serviço antigos continuam existindo no
+   Worker por compatibilidade, só não são mais alcançados por esta UI. */
 
-type Phase = "loading" | "unavailable" | "no_availability" | "empty" | "preview" | "applying" | "active" | "completed" | "abandoned" | "error";
+type Phase =
+  | "loading"
+  | "unavailable"
+  | "picker"
+  | "pattern_not_found"
+  | "no_availability"
+  | "empty"
+  | "focused_preview"
+  | "applying"
+  | "active"
+  | "completed"
+  | "abandoned"
+  | "error";
 
 interface DerivedSummary {
   completedCount: number;
@@ -44,10 +61,10 @@ interface DerivedSummary {
   approxMinutes: number;
 }
 
-/** Resumo factual (seção 11 da ordem) recalculado a partir dos itens da
- *  própria lista — nunca depende só da resposta efêmera de POST .../complete,
- *  para que um refresh depois de concluído mostre exatamente o mesmo
- *  resumo (seção 12: "refresh sem perda de progresso"). */
+/** Resumo factual (seção 11 da ordem original / seção 16 da ordem Sprint
+ *  20) recalculado a partir dos itens da própria lista — nunca depende só
+ *  da resposta efêmera de POST .../complete, para que um refresh depois de
+ *  concluído mostre exatamente o mesmo resumo. */
 function deriveSummary(list: TrainingList): DerivedSummary {
   let completedCount = 0;
   let skippedCount = 0;
@@ -151,8 +168,12 @@ function ItemCard({
 
 export function DailyTrainingPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const patternId = searchParams.get("patternId");
+
   const [phase, setPhase] = useState<Phase>("loading");
-  const [preview, setPreview] = useState<TrainingPreview | null>(null);
+  const [patterns, setPatterns] = useState<TrainablePattern[] | null>(null);
+  const [focusedPreview, setFocusedPreview] = useState<FocusedTrainingPreview | null>(null);
   const [list, setList] = useState<TrainingList | null>(null);
   const [applying, setApplying] = useState(false);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
@@ -163,9 +184,23 @@ export function DailyTrainingPage() {
   const [completing, setCompleting] = useState(false);
   const syncedOnLoad = useRef(false);
 
-  const loadPreview = useCallback(async () => {
+  const loadPicker = useCallback(async () => {
     try {
-      const result = await fetchPreview();
+      const result = await fetchTrainablePatterns();
+      if (result.available === false) {
+        setPhase("unavailable");
+        return;
+      }
+      setPatterns(result.patterns ?? []);
+      setPhase("picker");
+    } catch {
+      setPhase("error");
+    }
+  }, []);
+
+  const loadFocusedPreview = useCallback(async (id: string) => {
+    try {
+      const result = await fetchFocusedPreview(id);
       if (result.available === false) {
         setPhase("unavailable");
         return;
@@ -174,15 +209,21 @@ export function DailyTrainingPage() {
         setPhase("error");
         return;
       }
-      setPreview(result.preview);
+      setFocusedPreview(result.preview);
       if (!result.preview.hasAvailabilityToday) {
         setPhase("no_availability");
       } else if (result.preview.itemCount === 0) {
         setPhase("empty");
       } else {
-        setPhase("preview");
+        setPhase("focused_preview");
       }
-    } catch {
+    } catch (err) {
+      // Seção 7 da ordem — padrão inexistente/não publicado: estado
+      // controlado, NUNCA um fallback silencioso para outro padrão.
+      if (err instanceof DailyTrainingApiError && err.status === 404) {
+        setPhase("pattern_not_found");
+        return;
+      }
       setPhase("error");
     }
   }, []);
@@ -196,19 +237,23 @@ export function DailyTrainingPage() {
         return;
       }
       if (current.list) {
+        // Seção 6/14 da ordem — já existe lista ativa (deste padrão ou de
+        // outro, aplicada agora ou antes): carrega a lista REAL, nunca
+        // volta a oferecer a escolha de padrão nem finge que o
+        // `patternId` da URL "ganhou".
         setList(current.list);
-        if (current.list.status === "abandoned") {
-          setPhase("abandoned");
-        } else {
-          setPhase("active");
-        }
+        setPhase(current.list.status === "abandoned" ? "abandoned" : "active");
         return;
       }
-      await loadPreview();
+      if (patternId) {
+        await loadFocusedPreview(patternId);
+      } else {
+        await loadPicker();
+      }
     } catch {
       setPhase("error");
     }
-  }, [loadPreview]);
+  }, [patternId, loadFocusedPreview, loadPicker]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -254,13 +299,14 @@ export function DailyTrainingPage() {
   }, [list?.id]);
 
   async function handleApply() {
+    if (!patternId) return;
     setApplying(true);
     setPhase("applying");
     setActionError(null);
     try {
-      const result = await applyDailyTraining();
+      const result = await applyFocusedTraining(patternId);
       if (result.empty) {
-        await loadPreview();
+        await loadFocusedPreview(patternId);
         return;
       }
       if (result.listId) {
@@ -274,7 +320,7 @@ export function DailyTrainingPage() {
       }
     } catch {
       setActionError("Não foi possível aplicar o treino de hoje agora. Tente novamente.");
-      setPhase("preview");
+      setPhase("focused_preview");
     } finally {
       setApplying(false);
     }
@@ -381,6 +427,39 @@ export function DailyTrainingPage() {
     return <ErrorState description="Não foi possível carregar o treino de hoje." action={<Button onClick={() => void load()}>Tentar novamente</Button>} />;
   }
 
+  if (phase === "picker") {
+    return (
+      <div className="treino-diario">
+        <header className="treino-diario__header">
+          <h1>O que você quer treinar hoje?</h1>
+          <p className="treino-diario__welcome">Escolha um padrão e faça seu treino de hoje.</p>
+        </header>
+        {patterns && <TrainablePatternGrid patterns={patterns} />}
+        {footerNav}
+      </div>
+    );
+  }
+
+  if (phase === "pattern_not_found") {
+    return (
+      <div className="treino-diario">
+        <header className="treino-diario__header">
+          <h1>Treino Diário</h1>
+        </header>
+        <EmptyState
+          title="Este padrão não está disponível"
+          description="O padrão escolhido não existe ou não está mais publicado."
+          action={
+            <Button type="button" onClick={() => navigate("/treino-diario")}>
+              Escolher outro padrão
+            </Button>
+          }
+        />
+        {footerNav}
+      </div>
+    );
+  }
+
   if (phase === "no_availability") {
     return (
       <div className="treino-diario">
@@ -407,47 +486,40 @@ export function DailyTrainingPage() {
       <div className="treino-diario">
         <header className="treino-diario__header">
           <h1>Treino Diário</h1>
-          <p className="treino-diario__welcome">Foco hoje, vitória no ENEM.</p>
+          {focusedPreview && <p className="treino-diario__welcome">{focusedPreview.focusPattern.name}</p>}
         </header>
         <EmptyState
-          title="Nenhuma questão elegível para hoje"
-          description="Ainda não há questões publicadas suficientes para montar seu treino agora. Volte mais tarde — o catálogo cresce continuamente."
+          title="Este padrão ainda não tem questões disponíveis para treino"
+          description="Ainda não há questões publicadas suficientes para este padrão. Volte mais tarde — o catálogo cresce continuamente."
+          action={
+            <Button type="button" onClick={() => navigate("/treino-diario")}>
+              Escolher outro padrão
+            </Button>
+          }
         />
         {footerNav}
       </div>
     );
   }
 
-  if (phase === "preview" && preview) {
+  if (phase === "focused_preview" && focusedPreview) {
     return (
       <div className="treino-diario">
         <header className="treino-diario__header">
-          <h1>Treino Diário</h1>
-          <p className="treino-diario__welcome">Hoje vamos atacar justamente o que ainda está roubando seus pontos.</p>
+          <h1>Treino de {focusedPreview.focusPattern.name}</h1>
+          <p className="treino-diario__welcome">Foco total neste padrão hoje.</p>
         </header>
 
         <Card className="treino-diario__preview-card">
           <p className="treino-diario__preview-stat">
-            <strong>{preview.itemCount}</strong> {preview.itemCount === 1 ? "questão" : "questões"} — aproximadamente{" "}
-            <strong>{preview.estimatedMinutes} min</strong>
+            <strong>{focusedPreview.itemCount}</strong> {focusedPreview.itemCount === 1 ? "questão" : "questões"} — aproximadamente{" "}
+            <strong>{focusedPreview.estimatedMinutes} min</strong>
           </p>
 
-          <section aria-labelledby="treino-composicao-heading" className="treino-diario__composition">
-            <h2 id="treino-composicao-heading">Composição do treino</h2>
-            <ul>
-              {preview.composition.map((entry) => (
-                <li key={entry.reason}>
-                  <strong>{entry.count}</strong> — {entry.reasonLabel}
-                </li>
-              ))}
-            </ul>
-          </section>
-
           <ul className="treino-diario__preview-items">
-            {preview.items.map((item) => (
+            {focusedPreview.items.map((item) => (
               <li key={item.questionId}>
                 <span className="treino-diario__item-code">{item.questionCode}</span>
-                {item.patternName && <span className="treino-diario__item-pattern"> · {item.patternName}</span>}
                 <p className="treino-diario__item-reason">{item.reasonLabel}</p>
               </li>
             ))}
@@ -459,9 +531,14 @@ export function DailyTrainingPage() {
             </p>
           )}
 
-          <Button type="button" onClick={() => void handleApply()} isLoading={applying} disabled={applying}>
-            Começar treino
-          </Button>
+          <div className="treino-diario__preview-actions">
+            <Button type="button" onClick={() => void handleApply()} isLoading={applying} disabled={applying}>
+              Começar treino
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => navigate("/treino-diario")} disabled={applying}>
+              Escolher outro padrão
+            </Button>
+          </div>
         </Card>
         {footerNav}
       </div>
@@ -479,11 +556,20 @@ export function DailyTrainingPage() {
 
     if (isCompleted) {
       const summary = deriveSummary(list);
+      // Seção 16 da ordem — acurácia só é mostrada com ≥1 resposta
+      // CONFIRMADA (correta ou incorreta); puladas/bloqueadas nunca entram
+      // no denominador. Nunca "0%" quando não há resposta nenhuma.
+      const totalConfirmed = summary.correctCount + summary.incorrectCount;
+      const accuracyPercent = totalConfirmed > 0 ? Math.round((summary.correctCount / totalConfirmed) * 100) : null;
+      const incorrectItems = list.items.filter((item) => item.status === "completed" && item.isCorrect === false);
+
       return (
         <div className="treino-diario">
           <header className="treino-diario__header">
             <h1>Treino concluído</h1>
-            <p className="treino-diario__welcome">Bom trabalho! Aqui está o resumo factual do que você fez hoje.</p>
+            <p className="treino-diario__welcome">
+              {list.focusPattern ? `Bom trabalho no treino de ${list.focusPattern.name}!` : "Bom trabalho! Aqui está o resumo factual do que você fez hoje."}
+            </p>
           </header>
           <Card className="treino-diario__summary-card">
             <p>
@@ -502,15 +588,40 @@ export function DailyTrainingPage() {
             <p>
               Aproximadamente <strong>{summary.approxMinutes} min</strong> registrados.
             </p>
-            <p>
-              <strong>{summary.correctCount}</strong> acertos e <strong>{summary.incorrectCount}</strong> erros confirmados.
-            </p>
+            {totalConfirmed > 0 ? (
+              <p>
+                <strong>{summary.correctCount}</strong> acertos e <strong>{summary.incorrectCount}</strong> erros confirmados — <strong>{accuracyPercent}%</strong> de
+                acerto.
+              </p>
+            ) : (
+              <p>Nenhuma questão respondida foi registrada neste treino.</p>
+            )}
             {summary.reviewsCompleted > 0 && (
               <p>
                 <strong>{summary.reviewsCompleted}</strong> {summary.reviewsCompleted === 1 ? "revisão realizada" : "revisões realizadas"}.
               </p>
             )}
             {summary.patternsPracticed.length > 0 && <p>Padrões praticados: {summary.patternsPracticed.join(", ")}.</p>}
+
+            {list.focusPattern?.mainStrategy && (
+              <section className="treino-diario__macete" aria-labelledby="macete-heading">
+                <h2 id="macete-heading">Macete / Como resolver</h2>
+                <p>{list.focusPattern.mainStrategy}</p>
+              </section>
+            )}
+
+            {incorrectItems.length > 0 && (
+              <section className="treino-diario__review-cta" aria-labelledby="vale-revisar-heading">
+                <h2 id="vale-revisar-heading">Vale revisar</h2>
+                <p>
+                  <strong>{incorrectItems.length}</strong> {incorrectItems.length === 1 ? "questão incorreta" : "questões incorretas"}:{" "}
+                  {incorrectItems.map((item) => item.questionCode).join(", ")}.
+                </p>
+                <Link to="/caderno-de-erros" className="btn btn--secondary">
+                  <span>Ver Caderno de Erros</span>
+                </Link>
+              </section>
+            )}
           </Card>
           {footerNav}
         </div>
@@ -532,7 +643,7 @@ export function DailyTrainingPage() {
     return (
       <div className="treino-diario">
         <header className="treino-diario__header">
-          <h1>Treino Diário</h1>
+          <h1>{list.focusPattern ? `Treino de ${list.focusPattern.name}` : "Treino Diário"}</h1>
           <p className="treino-diario__welcome">Foco hoje, vitória no ENEM.</p>
         </header>
 

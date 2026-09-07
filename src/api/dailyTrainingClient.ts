@@ -36,6 +36,16 @@ export interface TrainingItem {
   version: number;
 }
 
+/** Sprint 20, seção 15 da ordem — só não-nulo quando TODOS os itens da
+ *  lista compartilham o MESMO padrão (uma lista focada). Nunca um ID cru
+ *  exposto — sempre nome/slug/macete já resolvidos pelo Worker. */
+export interface FocusPattern {
+  id: string;
+  slug: string;
+  name: string;
+  mainStrategy: string;
+}
+
 export interface TrainingList {
   id: string;
   date: string;
@@ -47,6 +57,7 @@ export interface TrainingList {
   createdAt: string;
   completedAt: string | null;
   items: TrainingItem[];
+  focusPattern: FocusPattern | null;
 }
 
 export interface TrainingPreview {
@@ -58,6 +69,25 @@ export interface TrainingPreview {
   itemCount: number;
   items: TrainingItem[];
   composition: Array<{ reason: DailyTrainingReasonCode; reasonLabel: string; count: number }>;
+}
+
+/** Sprint 20, seção 9 da ordem — mesmo `TrainingPreview`, mais o padrão
+ *  escolhido pelo aluno. */
+export interface FocusedTrainingPreview extends TrainingPreview {
+  focusPattern: FocusPattern;
+}
+
+/** Sprint 20, seção 4 da ordem — um card do catálogo "O que você quer
+ *  treinar hoje?". `availableQuestionCount = 0`/`canTrain = false` é um
+ *  estado LEGÍTIMO (padrão publicado, ainda sem questão elegível) — a UI
+ *  mostra o card desabilitado, nunca o esconde. */
+export interface TrainablePattern {
+  id: string;
+  slug: string;
+  name: string;
+  mainStrategy: string;
+  availableQuestionCount: number;
+  canTrain: boolean;
 }
 
 export interface CompletionSummary {
@@ -203,6 +233,42 @@ export function completeList(listId: string): Promise<CompleteListResponse> {
 
 export function abandonList(listId: string): Promise<{ ok: true }> {
   return request(`/api/daily-training/${encodeURIComponent(listId)}/abandon`, {
+    method: "POST",
+    body: JSON.stringify({ mutationId: newMutationId() }),
+  });
+}
+
+/* -------------------------- Sprint 20 — Treino por padrão -------------------------- */
+
+export interface TrainablePatternsResponse {
+  ok: true;
+  available?: boolean;
+  message?: string;
+  patterns?: TrainablePattern[];
+}
+
+/** GET /api/daily-training/patterns (seção 4 da ordem) — catálogo dinâmico
+ *  "O que você quer treinar hoje?", nunca hardcoded. */
+export function fetchTrainablePatterns(): Promise<TrainablePatternsResponse> {
+  return request("/api/daily-training/patterns");
+}
+
+export interface FocusedPreviewResponse {
+  ok: true;
+  available?: boolean;
+  message?: string;
+  preview?: FocusedTrainingPreview;
+}
+
+/** GET .../patterns/:patternId/preview (seção 9 da ordem) — 100% leitura,
+ *  escopado a um único padrão. */
+export function fetchFocusedPreview(patternId: string): Promise<FocusedPreviewResponse> {
+  return request(`/api/daily-training/patterns/${encodeURIComponent(patternId)}/preview`);
+}
+
+/** POST .../patterns/:patternId/apply (seção 13 da ordem). */
+export function applyFocusedTraining(patternId: string): Promise<ApplyResponse> {
+  return request(`/api/daily-training/patterns/${encodeURIComponent(patternId)}/apply`, {
     method: "POST",
     body: JSON.stringify({ mutationId: newMutationId() }),
   });

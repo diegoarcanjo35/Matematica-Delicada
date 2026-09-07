@@ -40,6 +40,7 @@ import {
   listScheduleAssignmentIdsInActiveTraining,
   listTodayScheduleCommitments,
   listTrainableQuestionsForPattern,
+  listPublishedPatternsWithTrainableCounts,
   type DailyTrainingItemRow,
   type DailyTrainingListRow,
   type TrainableQuestionRow,
@@ -58,15 +59,17 @@ import {
 import { getTimezone, systemClock, type Clock } from "./scheduleService";
 import { civilDateInTimezone, weekdayCodeForCivilDate, type WeekdayCode } from "../lib/scheduleValidation";
 import { getPatternEvidence } from "../repositories/studentMetricsRepository";
-import { deriveProvisionalState } from "../lib/studentMetricsRules";
+import { deriveProvisionalState, type ProvisionalState } from "../lib/studentMetricsRules";
 import {
   MAX_DAILY_TRAINING_ITEMS,
   REASON_LABELS,
   estimateItemMinutes,
   selectDailyTrainingItems,
   type DailyTrainingCandidate,
+  type DailyTrainingPlayerMode,
   type DailyTrainingReasonCode,
   type DailyTrainingSelectionItem,
+  type DailyTrainingSelectionResult,
 } from "../lib/dailyTrainingRules";
 
 function newId(): string {
@@ -108,6 +111,13 @@ export interface TrainingItemDto {
   version: number;
 }
 
+export interface FocusPatternDto {
+  id: string;
+  slug: string;
+  name: string;
+  mainStrategy: string;
+}
+
 export interface TrainingListDto {
   id: string;
   date: string;
@@ -119,6 +129,14 @@ export interface TrainingListDto {
   createdAt: string;
   completedAt: string | null;
   items: TrainingItemDto[];
+  /** Sprint 20, seção 15 da ordem — derivado EM MEMÓRIA a partir dos
+   *  próprios itens da lista, nunca de uma coluna nova (sem migration):
+   *  só não-nulo quando TODOS os itens compartilham o MESMO
+   *  `primary_pattern_id` (uma lista focada, seção 13). Uma lista
+   *  histórica/adaptativa com múltiplos padrões — ou vazia — sempre
+   *  devolve `null` aqui; nunca inferido pelo primeiro item quando os
+   *  demais divergem. */
+  focusPattern: FocusPatternDto | null;
 }
 
 export interface PreviewDto {
@@ -130,6 +148,27 @@ export interface PreviewDto {
   itemCount: number;
   items: TrainingItemDto[];
   composition: Array<{ reason: DailyTrainingReasonCode; reasonLabel: string; count: number }>;
+}
+
+/** Sprint 20, seção 9 da ordem — mesmo `PreviewDto` do treino adaptativo,
+ *  mais o padrão escolhido pelo aluno (nome/slug/macete já resolvidos —
+ *  nunca um ID cru exposto à UI). */
+export interface FocusedPreviewDto extends PreviewDto {
+  focusPattern: FocusPatternDto;
+}
+
+/** Sprint 20, seção 4 da ordem — um item do catálogo "O que você quer
+ *  treinar hoje?". `availableQuestionCount = 0` é um estado LEGÍTIMO
+ *  (padrão publicado, mas editorialmente ainda sem questão elegível) —
+ *  nunca omitido do catálogo, só marcado `canTrain: false` para a UI
+ *  desabilitar o card com uma mensagem amigável, nunca escondê-lo. */
+export interface TrainablePatternDto {
+  id: string;
+  slug: string;
+  name: string;
+  mainStrategy: string;
+  availableQuestionCount: number;
+  canTrain: boolean;
 }
 
 /* ------------------------------ Construção dos candidatos ------------------------------ */
@@ -355,10 +394,27 @@ function isUniqueEventIdViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message) && error.message.includes("daily_training_events");
 }
 
+/** Sprint 20, seção 15 da ordem — "identificar foco sem migration": só
+ *  não-nulo quando a lista tem pelo menos um item e TODOS compartilham o
+ *  MESMO `primary_pattern_id` não-nulo. Nunca infere pelo primeiro item
+ *  quando os demais divergem (lista adaptativa histórica com múltiplos
+ *  padrões) — compatibilidade total com listas criadas antes desta
+ *  sprint, que continuam a devolver `null` aqui sem quebrar nada. */
+async function deriveFocusPattern(db: D1Database, rows: DailyTrainingItemRow[]): Promise<FocusPatternDto | null> {
+  if (rows.length === 0) return null;
+  const firstPatternId = rows[0].primary_pattern_id;
+  if (!firstPatternId) return null;
+  if (!rows.every((row) => row.primary_pattern_id === firstPatternId)) return null;
+  const pattern = await findPublishedPatternById(db, firstPatternId);
+  if (!pattern) return null;
+  return { id: pattern.id, slug: pattern.slug, name: pattern.name, mainStrategy: pattern.main_strategy };
+}
+
 async function toListDto(db: D1Database, list: DailyTrainingListRow, fixturesAllowed: boolean): Promise<TrainingListDto> {
   const rows = await listItemsForList(db, list.id);
   const items: TrainingItemDto[] = [];
   for (const row of rows) items.push(await itemRowToDto(db, row, fixturesAllowed));
+  const focusPattern = await deriveFocusPattern(db, rows);
   return {
     id: list.id,
     date: list.training_date,
@@ -370,6 +426,7 @@ async function toListDto(db: D1Database, list: DailyTrainingListRow, fixturesAll
     createdAt: list.created_at,
     completedAt: list.completed_at,
     items,
+    focusPattern,
   };
 }
 
@@ -401,6 +458,55 @@ async function itemRowToDto(db: D1Database, row: DailyTrainingItemRow, fixturesA
   };
 }
 
+/** Núcleo de persistência compartilhado entre `applyList` (adaptativo,
+ *  múltiplos padrões) e `applyFocusedByPattern` (Sprint 20 — um único
+ *  padrão escolhido pelo aluno): monta lista+itens+evento num único
+ *  `db.batch()` atômico. Idêntico byte a byte ao corpo que `applyList`
+ *  sempre teve — extraído aqui só para nunca duplicar a composição do
+ *  lote entre os dois fluxos (seção 2 da ordem: "não duplicar lifecycle"). */
+async function persistNewList(
+  db: D1Database,
+  userId: string,
+  todayCivil: string,
+  timezone: string,
+  result: DailyTrainingSelectionResult,
+  mutationId: string
+): Promise<{ listId: string }> {
+  const listId = newId();
+  const statements = [
+    buildInsertListStatement(db, {
+      id: listId,
+      userId,
+      trainingDate: todayCivil,
+      timezone,
+      estimatedMinutes: result.totalMinutes,
+      itemCount: result.items.length,
+      mutationId,
+    }),
+  ];
+  for (const item of result.items) {
+    statements.push(
+      buildInsertItemStatement(db, {
+        id: newId(),
+        listId,
+        userId,
+        questionId: item.questionId,
+        patternId: item.patternId,
+        origin: item.origin,
+        reason: item.reason,
+        playerMode: item.playerMode,
+        position: item.position,
+        estimatedMinutes: item.estimatedMinutes,
+        errorEntryId: item.errorEntryId ?? null,
+        sourceScheduleAssignmentId: item.sourceScheduleAssignmentId ?? null,
+      })
+    );
+  }
+  statements.push(buildListEventInsertStatement(db, { id: mutationId, listId, userId, eventType: "list_created" }));
+  await db.batch(statements);
+  return { listId };
+}
+
 /** POST — mutação explícita e idempotente (seção 6 da ordem). Recomputa os
  *  MESMOS candidatos que `preview` (nunca reaproveita uma prévia
  *  armazenada) e persiste lista+itens ATOMICAMENTE, num único db.batch()
@@ -429,53 +535,229 @@ export async function applyList(
     return { ok: false, empty: true };
   }
 
-  const listId = newId();
-  const statements = [
-    buildInsertListStatement(db, {
-      id: listId,
-      userId,
-      trainingDate: built.todayCivil,
-      timezone: built.timezone,
-      estimatedMinutes: result.totalMinutes,
-      itemCount: result.items.length,
-      mutationId,
-    }),
-  ];
-  for (const item of result.items) {
-    statements.push(
-      buildInsertItemStatement(db, {
-        id: newId(),
-        listId,
-        userId,
-        questionId: item.questionId,
-        patternId: item.patternId,
-        origin: item.origin,
-        reason: item.reason,
-        playerMode: item.playerMode,
-        position: item.position,
-        estimatedMinutes: item.estimatedMinutes,
-        errorEntryId: item.errorEntryId ?? null,
-        sourceScheduleAssignmentId: item.sourceScheduleAssignmentId ?? null,
-      })
-    );
-  }
-  statements.push(buildListEventInsertStatement(db, { id: mutationId, listId, userId, eventType: "list_created" }));
-
   try {
-    await db.batch(statements);
+    const persisted = await persistNewList(db, userId, built.todayCivil, built.timezone, result, mutationId);
+    return { ok: true, changed: true, value: persisted };
   } catch (error) {
     if (isUniqueActiveListViolation(error)) {
       // Corrida real: outra chamada (mesmo aluno, mesma data) venceu entre
       // a leitura acima e este INSERT — a garantia de banco (índice único
       // parcial, migrations/0016) decide, nunca uma checagem em JS que
-      // poderia perder a corrida.
+      // poderia perder a corrida. Vale também quando o vencedor foi uma
+      // chamada de `applyFocusedByPattern` (Sprint 20) — o índice único é o
+      // mesmo, cego a qual fluxo escreveu primeiro.
       const stillActive = await findActiveListForUserDate(db, userId, built.todayCivil);
       if (stillActive) return { ok: true, changed: false, value: { listId: stillActive.id } };
     }
     throw error;
   }
+}
 
-  return { ok: true, changed: true, value: { listId } };
+/* ------------------------- Treino focado por padrão (Sprint 20) ------------------------- */
+
+/** Sprint 20, seção 12 da ordem — mapeamento FIXO estado→(reason,
+ *  playerMode) para o treino focado, reaproveitando os MESMOS reason
+ *  codes/player modes já usados pelo motor adaptativo (nunca uma enum
+ *  nova). Idêntico ao mapeamento já aplicado por `buildCandidates` acima
+ *  para os quatro primeiros estados. `revisao_pendente` é o único estado
+ *  que `buildCandidates` NUNCA mapeia (ali, é coberto pela camada 1 de
+ *  revisão vencida) — como o treino focado não tem essa camada separada
+ *  (é só o pool do padrão escolhido, seção 10 da ordem), a regra simples e
+ *  factual adotada aqui é: `revisao_pendente` significa que o aluno JÁ tem
+ *  evidência real neste padrão (confirmedAttempts > 0) mais uma revisão
+ *  específica vencida no Caderno de Erros — mais próximo, em espírito, de
+ *  "manutenção" (evidência real e sustentada) do que de "sem evidência" ou
+ *  "evidência inicial". Mapeado para `pattern_maintenance`/`practice`. A
+ *  revisão espaçada em si continua tratada exclusivamente pelo Caderno de
+ *  Erros/motor adaptativo geral — esta escolha NUNCA bloqueia ou redireciona
+ *  a escolha livre do aluno por este padrão. */
+function mapStateToFocusedReason(state: ProvisionalState): { reason: DailyTrainingReasonCode; playerMode: DailyTrainingPlayerMode } {
+  switch (state) {
+    case "sem_evidencias":
+      return { reason: "pattern_exploration", playerMode: "learning" };
+    case "evidencias_iniciais":
+      return { reason: "pattern_initial_evidence", playerMode: "recognition" };
+    case "em_desenvolvimento":
+      return { reason: "pattern_in_development", playerMode: "learning" };
+    case "consistente_no_recorte":
+      return { reason: "pattern_maintenance", playerMode: "practice" };
+    case "revisao_pendente":
+      return { reason: "pattern_maintenance", playerMode: "practice" };
+  }
+}
+
+/** Sprint 20, seção 10 da ordem — candidatos para o treino de UM ÚNICO
+ *  padrão escolhido livremente pelo aluno. Deliberadamente mais simples que
+ *  `buildCandidates`: nunca mistura revisão vencida/compromisso de
+ *  cronograma/outros padrões — só o pool REAL de questões publicadas deste
+ *  padrão, ordenado com as ainda não vistas recentemente PRIMEIRO e as
+ *  vistas recentemente (últimos `RECENT_COMPLETION_EXCLUSION_DAYS` dias)
+ *  DEPOIS, como preenchimento honesto de capacidade (seção 11 da ordem:
+ *  "nunca preencher com outro padrão só porque faltaram questões" — se só
+ *  sobrarem questões recentes, elas SÃO o treino). Devolve um único grupo/
+ *  camada de candidatos — como todos compartilham o MESMO patternId,
+ *  `selectDailyTrainingItems` relaxa automaticamente o cap de concentração
+ *  por padrão (só um padrão distinto existe no pool inteiro), sem precisar
+ *  de nenhuma regra nova aqui. */
+async function buildFocusedCandidates(db: D1Database, userId: string, clock: Clock, fixturesAllowed: boolean, patternId: string): Promise<BuiltCandidates> {
+  const timezone = await getTimezone(db, userId);
+  const now = clock.now();
+  const nowIso = now.toISOString();
+  const todayCivil = civilDateInTimezone(now, timezone);
+
+  const profile = await findProfile(db, userId);
+  const availableDays = ((profile?.available_days ? JSON.parse(profile.available_days) : []) as string[]).filter(
+    (day): day is WeekdayCode => (["dom", "seg", "ter", "qua", "qui", "sex", "sab"] as string[]).includes(day)
+  );
+  const dailyMinutes = profile?.daily_minutes ?? 0;
+  const todayWeekday = weekdayCodeForCivilDate(todayCivil);
+  const availableMinutes = availableDays.includes(todayWeekday) ? dailyMinutes : 0;
+
+  const recentlyCompleted = await listRecentlyCompletedQuestionIds(
+    db,
+    userId,
+    new Date(now.getTime() - RECENT_COMPLETION_EXCLUSION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+  );
+
+  const evidence = await getPatternEvidence(db, userId, patternId);
+  const hasOverdueActiveReview = evidence.activeErrorEntryStatus === "scheduled" && evidence.nextReviewAt !== null && evidence.nextReviewAt <= nowIso;
+  const state = deriveProvisionalState({
+    confirmedAttempts: evidence.confirmedAttempts,
+    correctCount: evidence.correctCount,
+    distinctQuestionsUsed: evidence.distinctQuestionsUsed,
+    distinctSessionDates: evidence.distinctPracticeDays,
+    hasCorrectReview: evidence.reviewsCorrect > 0,
+    firstConfirmedAt: evidence.firstConfirmedAt,
+    lastConfirmedAt: evidence.lastPracticeAt,
+    attemptsWithHelp: evidence.attemptsWithHelp,
+    hasOverdueActiveReview,
+  });
+  const { reason, playerMode } = mapStateToFocusedReason(state);
+
+  const trainable = await listTrainableQuestionsForPattern(db, patternId, fixturesAllowed);
+  const fresh = trainable.filter((q) => !recentlyCompleted.has(q.id));
+  const recent = trainable.filter((q) => recentlyCompleted.has(q.id));
+  const ordered = [...fresh, ...recent];
+
+  const tier: DailyTrainingCandidate[] = ordered.map((q) => ({
+    questionId: q.id,
+    patternId,
+    reason,
+    playerMode,
+    estimatedMinutes: estimateItemMinutes(q.tempo_estimado_segundos),
+  }));
+
+  return { timezone, todayCivil, availableMinutes, candidatesByTier: [tier] };
+}
+
+/** Sprint 20, seção 4 da ordem — catálogo "O que você quer treinar hoje?".
+ *  100% somente leitura, uma única consulta agregada (sem N+1). */
+export async function listTrainablePatterns(db: D1Database, fixturesAllowed: boolean): Promise<TrainablePatternDto[]> {
+  const rows = await listPublishedPatternsWithTrainableCounts(db, fixturesAllowed);
+  return rows.map((row) => ({
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    mainStrategy: row.main_strategy,
+    availableQuestionCount: row.available_count,
+    canTrain: row.available_count > 0,
+  }));
+}
+
+export type FocusedPreviewResult = { ok: true; value: FocusedPreviewDto } | { ok: false; notFound: true };
+
+/** GET .../patterns/:patternId/preview (seção 9 da ordem) — 100% somente
+ *  leitura: nunca cria lista, item, tentativa, progresso ou auditoria. Um
+ *  `patternId` inexistente e um de padrão NÃO publicado (rascunho/
+ *  arquivado) devolvem exatamente o mesmo `notFound` — nunca revela a
+ *  existência de um padrão não publicado (mesma convenção de
+ *  `findPublishedPatternById`/`findPublishedPatternBySlug` em todo o
+ *  projeto). */
+export async function previewFocusedByPattern(
+  db: D1Database,
+  userId: string,
+  patternId: string,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<FocusedPreviewResult> {
+  const pattern = await findPublishedPatternById(db, patternId);
+  if (!pattern) return { ok: false, notFound: true };
+
+  const built = await buildFocusedCandidates(db, userId, clock, fixturesAllowed, patternId);
+  const result = selectDailyTrainingItems({ candidatesByTier: built.candidatesByTier, availableMinutes: built.availableMinutes });
+
+  const items: TrainingItemDto[] = [];
+  for (const item of result.items) items.push(await selectionItemToDto(db, item, fixturesAllowed));
+
+  const compositionMap = new Map<DailyTrainingReasonCode, number>();
+  for (const item of result.items) compositionMap.set(item.reason, (compositionMap.get(item.reason) ?? 0) + 1);
+  const composition = Array.from(compositionMap.entries()).map(([reason, count]) => ({ reason, reasonLabel: REASON_LABELS[reason], count }));
+
+  return {
+    ok: true,
+    value: {
+      date: built.todayCivil,
+      timezone: built.timezone,
+      hasAvailabilityToday: built.availableMinutes > 0,
+      availableMinutesToday: built.availableMinutes,
+      estimatedMinutes: result.totalMinutes,
+      itemCount: items.length,
+      items,
+      composition,
+      focusPattern: { id: pattern.id, slug: pattern.slug, name: pattern.name, mainStrategy: pattern.main_strategy },
+    },
+  };
+}
+
+export type ApplyFocusedResult = MutationResult<{ listId: string }> & { notFound?: boolean };
+
+/** POST .../patterns/:patternId/apply (seção 13 da ordem) — mesmo desenho
+ *  de atomicidade/idempotência/concorrência de `applyList` (mesmo índice
+ *  único parcial `idx_daily_training_lists_one_active_per_day` decide quem
+ *  vence quando dois padrões diferentes são aplicados ao mesmo tempo,
+ *  seção 14 da ordem), só trocando `buildCandidates` por
+ *  `buildFocusedCandidates`. TODOS os itens criados carregam
+ *  `primary_pattern_id = patternId` (garantido por `buildFocusedCandidates`
+ *  atribuir o mesmo `patternId` a cada candidato). */
+export async function applyFocusedByPattern(
+  db: D1Database,
+  userId: string,
+  patternId: string,
+  mutationId: string,
+  fixturesAllowed: boolean,
+  clock: Clock = systemClock
+): Promise<ApplyFocusedResult> {
+  const pattern = await findPublishedPatternById(db, patternId);
+  if (!pattern) return { ok: false, notFound: true };
+
+  const built = await buildFocusedCandidates(db, userId, clock, fixturesAllowed, patternId);
+
+  const existing = await findActiveListForUserDate(db, userId, built.todayCivil);
+  if (existing) {
+    // Seção 6/14 da ordem: já existe lista ativa hoje (desta escolha ou de
+    // uma concorrente, inclusive de OUTRO padrão) — devolve a existente,
+    // nunca cria uma segunda. O frontend precisa carregar a lista REAL
+    // devolvida, nunca assumir que o padrão clicado "ganhou".
+    return { ok: true, changed: false, value: { listId: existing.id } };
+  }
+
+  const result = selectDailyTrainingItems({ candidatesByTier: built.candidatesByTier, availableMinutes: built.availableMinutes });
+  if (result.items.length === 0) {
+    // Seção 8/23 da ordem: nunca persiste lista vazia — inclusive quando o
+    // padrão escolhido tem questões reais mas 0 minutos disponíveis hoje.
+    return { ok: false, empty: true };
+  }
+
+  try {
+    const persisted = await persistNewList(db, userId, built.todayCivil, built.timezone, result, mutationId);
+    return { ok: true, changed: true, value: persisted };
+  } catch (error) {
+    if (isUniqueActiveListViolation(error)) {
+      const stillActive = await findActiveListForUserDate(db, userId, built.todayCivil);
+      if (stillActive) return { ok: true, changed: false, value: { listId: stillActive.id } };
+    }
+    throw error;
+  }
 }
 
 /* ---------------------------------- Leitura de lista ---------------------------------- */

@@ -10,7 +10,13 @@ import { fetchScheduleSummary, type ScheduleSummary } from "../api/scheduleClien
 import { fetchPatterns } from "../api/patternsClient";
 import { fetchSummary as fetchErrorNotebookSummary } from "../api/errorNotebookClient";
 import { fetchStudentMetricsSummary, type StudentMetricsSummary } from "../api/studentMetricsClient";
-import { fetchCurrent as fetchDailyTrainingCurrent, fetchPreview as fetchDailyTrainingPreview } from "../api/dailyTrainingClient";
+import {
+  fetchCurrent as fetchDailyTrainingCurrent,
+  fetchPreview as fetchDailyTrainingPreview,
+  fetchTrainablePatterns,
+  type TrainablePattern,
+} from "../api/dailyTrainingClient";
+import { TrainablePatternGrid } from "../components/dailyTraining/TrainablePatternGrid";
 import { fetchCurrent as fetchSimulationsCurrent, fetchHistory as fetchSimulationsHistory } from "../api/simulationsClient";
 import { fetchCurrentReport as fetchWeeklyReviewCurrent } from "../api/weeklyReviewClient";
 import {
@@ -58,8 +64,14 @@ export function DashboardPage() {
      disponível"). Nenhuma leitura cria lista — GET /current e GET
      /preview são 100% somente leitura. */
   const [dailyTrainingCard, setDailyTrainingCard] = useState<
-    { kind: "active"; itemCount: number; estimatedMinutes: number; doneCount: number } | { kind: "preview"; itemCount: number; estimatedMinutes: number } | { kind: "empty" } | null
+    | { kind: "active"; itemCount: number; estimatedMinutes: number; doneCount: number; focusPatternName: string | null }
+    | { kind: "preview"; itemCount: number; estimatedMinutes: number }
+    | { kind: "empty" }
+    | null
   >(null);
+  /* Sprint 20 — catálogo dinâmico "O que você quer treinar hoje?" (seção 5
+   *  da ordem). `null` enquanto carrega; nunca hardcoded. */
+  const [trainablePatterns, setTrainablePatterns] = useState<TrainablePattern[] | null>(null);
   /* Sprint 12 — card real dos Simulados em Blocos (seção 16 da ordem:
      "Dashboard pode mostrar bloco ativo ou último bloco concluído"; "nenhum
      card pode inventar nota, evolução ou desempenho"; "nenhuma leitura do
@@ -153,7 +165,13 @@ export function DashboardPage() {
         if (cancelled || current.available === false) return;
         if (current.list) {
           const doneCount = current.list.items.filter((item) => item.status === "completed" || item.status === "skipped" || item.status === "blocked").length;
-          setDailyTrainingCard({ kind: "active", itemCount: current.list.itemCount, estimatedMinutes: current.list.estimatedMinutes, doneCount });
+          setDailyTrainingCard({
+            kind: "active",
+            itemCount: current.list.itemCount,
+            estimatedMinutes: current.list.estimatedMinutes,
+            doneCount,
+            focusPatternName: current.list.focusPattern?.name ?? null,
+          });
           return;
         }
         const previewResult = await fetchDailyTrainingPreview();
@@ -167,6 +185,20 @@ export function DashboardPage() {
         // Sem Treino Diário disponível — o card mostra o estado "em preparação".
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTrainablePatterns()
+      .then((result) => {
+        if (!cancelled && result.available !== false && result.patterns) setTrainablePatterns(result.patterns);
+      })
+      .catch(() => {
+        // Sem catálogo de treino disponível — a seção mostra "carregando".
+      });
     return () => {
       cancelled = true;
     };
@@ -262,6 +294,35 @@ export function DashboardPage() {
           </p>
         )}
       </header>
+
+      {/* Sprint 20, seção 5/6 da ordem — elemento DOMINANTE, logo após a
+          saudação: "O que você quer treinar hoje?" quando não há lista
+          ativa, ou destaque "Continuar treino" quando já existe (nunca as
+          duas coisas ao mesmo tempo — nunca permite escolher um segundo
+          padrão enquanto uma lista está ativa). */}
+      <section aria-labelledby="train-today-heading" className="dashboard__train-today">
+        {dailyTrainingCard?.kind === "active" ? (
+          <Card className="dashboard__train-today-card">
+            <h2 id="train-today-heading">{dailyTrainingCard.focusPatternName ? `Treino de ${dailyTrainingCard.focusPatternName}` : "Continuar treino"}</h2>
+            <p className="dashboard__stat">
+              {dailyTrainingCard.doneCount} de {dailyTrainingCard.itemCount} questões — aproximadamente {dailyTrainingCard.estimatedMinutes} min
+            </p>
+            <Link to="/treino-diario" className="btn btn--primary">
+              <span>Continuar treino</span>
+            </Link>
+          </Card>
+        ) : (
+          <>
+            <h2 id="train-today-heading">O que você quer treinar hoje?</h2>
+            <p className="dashboard__train-today-subtitle">Escolha um padrão e faça seu treino de hoje.</p>
+            {trainablePatterns ? (
+              <TrainablePatternGrid patterns={trainablePatterns} />
+            ) : (
+              <p className="dashboard__message">Carregando padrões disponíveis…</p>
+            )}
+          </>
+        )}
+      </section>
 
       <div className="dashboard__grid">
         <Card className="dashboard__card">

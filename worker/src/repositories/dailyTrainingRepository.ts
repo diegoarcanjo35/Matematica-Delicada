@@ -203,6 +203,42 @@ export async function listTrainableQuestionsForPattern(db: D1Database, patternId
   return result.results ?? [];
 }
 
+export interface TrainablePatternCatalogRow {
+  id: string;
+  slug: string;
+  name: string;
+  main_strategy: string;
+  available_count: number;
+}
+
+/** Sprint 20, seção 4 da ordem — catálogo de padrões treináveis, para
+ *  "O que você quer treinar hoje?": todos os padrões PUBLICADOS, cada um
+ *  já com a contagem REAL de questões elegíveis (publicada, vínculo
+ *  PRINCIPAL, mesmo gate de fixture local do resto do módulo) — numa
+ *  ÚNICA consulta agregada (LEFT JOIN + GROUP BY), nunca uma consulta por
+ *  padrão (nunca N+1). Um padrão publicado com ZERO questões elegíveis
+ *  continua na lista (`available_count = 0`) — a ordem exige mostrá-lo
+ *  desabilitado na UI, nunca escondê-lo silenciosamente. Ordenação
+ *  determinística (nome, depois código, depois id) — nunca ordem física/
+ *  de inserção. */
+export async function listPublishedPatternsWithTrainableCounts(db: D1Database, includeFixtures: boolean): Promise<TrainablePatternCatalogRow[]> {
+  const patternFixtureClause = includeFixtures ? "" : " AND p.is_local_fixture = 0";
+  const questionFixtureClause = includeFixtures ? "" : " AND q.is_local_fixture = 0";
+  const result = await db
+    .prepare(
+      `SELECT p.id, p.slug, p.name, p.main_strategy,
+              COUNT(DISTINCT q.id) as available_count
+       FROM patterns p
+       LEFT JOIN question_patterns qp ON qp.pattern_id = p.id AND qp.role = 'principal'
+       LEFT JOIN questions q ON q.id = qp.question_id AND q.editorial_status = 'published'${questionFixtureClause}
+       WHERE p.editorial_status = 'published'${patternFixtureClause}
+       GROUP BY p.id, p.code, p.slug, p.name, p.main_strategy
+       ORDER BY p.name ASC, p.code ASC, p.id ASC`
+    )
+    .all<TrainablePatternCatalogRow>();
+  return result.results ?? [];
+}
+
 /** Questões com tentativa CONFIRMADA (completed) por este aluno desde
  *  `sinceIso` — usada para preterir (nunca proibir) reoferecer a mesma
  *  questão logo em seguida (seção 7 da ordem). */

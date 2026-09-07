@@ -172,11 +172,32 @@
   margin-top: var(--space-2);
 }
 
-.treino-diario__list-actions {
+.treino-diario__list-actions,
+.treino-diario__preview-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
+}
+
+/* Sprint 20 — resumo pós-treino (seções 17/18 da ordem): "Macete / Como
+   resolver" e "Vale revisar" nunca são comunicados só por posição/cor —
+   cada um tem seu próprio título de seção. */
+.treino-diario__macete,
+.treino-diario__review-cta {
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--color-border);
+}
+
+.treino-diario__macete h2,
+.treino-diario__review-cta h2 {
+  font-size: var(--font-size-md);
+  margin: 0 0 var(--space-2);
+}
+
+.treino-diario__review-cta .btn {
+  margin-top: var(--space-2);
 }
 
 .treino-diario__error-indicator {
@@ -230,6 +251,7 @@
 
   .treino-diario__item-actions,
   .treino-diario__list-actions,
+  .treino-diario__preview-actions,
   .treino-diario__skip-actions {
     flex-direction: column;
     align-items: stretch;

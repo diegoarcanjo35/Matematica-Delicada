@@ -7,15 +7,19 @@ import { recordAuditEvent, type AuditEventType } from "../repositories/auditRepo
 import { isQuestionBankAvailable } from "../repositories/questionRepository";
 import {
   abandonList,
+  applyFocusedByPattern,
   applyList,
   completeList,
   getCurrent,
   getListDetail,
+  listTrainablePatterns,
   preview,
+  previewFocusedByPattern,
   skipItem,
   startItem,
   syncItem,
 } from "../services/dailyTrainingService";
+import { isValidQuestionId } from "../lib/questionsValidation";
 
 /* Rotas do Treino Diário — Sprint 11 v1.0.
 
@@ -77,6 +81,11 @@ const SYNC_RE = /^\/api\/daily-training\/([^/]+)\/items\/([^/]+)\/sync$/;
 const SKIP_RE = /^\/api\/daily-training\/([^/]+)\/items\/([^/]+)\/skip$/;
 const COMPLETE_RE = /^\/api\/daily-training\/([^/]+)\/complete$/;
 const ABANDON_RE = /^\/api\/daily-training\/([^/]+)\/abandon$/;
+// Sprint 20 — Treino Diário por Padrão (seções 4/9/13 da ordem). Checadas
+// ANTES de LIST_ID_RE abaixo (que, sozinha, casaria
+// "/api/daily-training/patterns" como se "patterns" fosse um listId).
+const PATTERN_PREVIEW_RE = /^\/api\/daily-training\/patterns\/([^/]+)\/preview$/;
+const PATTERN_APPLY_RE = /^\/api\/daily-training\/patterns\/([^/]+)\/apply$/;
 
 export async function handleDailyTrainingRequest(request: Request, env: Env, url: URL): Promise<Response | null> {
   const path = url.pathname;
@@ -117,6 +126,44 @@ export async function handleDailyTrainingRequest(request: Request, env: Env, url
     if (method !== "GET") return Errors.methodNotAllowed();
     const list = await getCurrent(env.DB, user.id, fixturesAllowed);
     return json({ ok: true, list });
+  }
+
+  // Sprint 20, seção 4 da ordem — "O que você quer treinar hoje?": catálogo
+  // dinâmico de padrões publicados, cada um já com a contagem real de
+  // questões elegíveis. Nunca cria nada (100% leitura), por isso nunca
+  // audita (mesmo critério do resto deste arquivo).
+  if (path === "/api/daily-training/patterns") {
+    if (method !== "GET") return Errors.methodNotAllowed();
+    const patterns = await listTrainablePatterns(env.DB, fixturesAllowed);
+    return json({ ok: true, patterns });
+  }
+
+  const patternPreviewMatch = path.match(PATTERN_PREVIEW_RE);
+  if (patternPreviewMatch) {
+    if (method !== "GET") return Errors.methodNotAllowed();
+    const patternId = patternPreviewMatch[1];
+    if (!isValidQuestionId(patternId)) return Errors.notFound();
+    const result = await previewFocusedByPattern(env.DB, user.id, patternId, fixturesAllowed);
+    if (!result.ok) return Errors.notFound();
+    return json({ ok: true, preview: result.value });
+  }
+
+  const patternApplyMatch = path.match(PATTERN_APPLY_RE);
+  if (patternApplyMatch) {
+    if (method !== "POST") return Errors.methodNotAllowed();
+    const patternId = patternApplyMatch[1];
+    if (!isValidQuestionId(patternId)) return Errors.notFound();
+    const body = await readJsonBody<{ mutationId?: unknown }>(request);
+    const mutationId = readMutationId(body);
+    if (!mutationId) return fieldErrorResponse("mutationId é obrigatório.", { mutationId: "mutationId é obrigatório." });
+    const result = await applyFocusedByPattern(env.DB, user.id, patternId, mutationId, fixturesAllowed);
+    if (!result.ok) {
+      if (result.notFound) return Errors.notFound();
+      if (result.empty) return json({ ok: true, empty: true });
+      return fieldErrorResponse("Não foi possível aplicar o treino deste padrão.", result.fieldErrors);
+    }
+    if (result.changed) await audit(env, "daily_training_applied", user.id, { listId: result.value!.listId, patternId });
+    return json({ ok: true, listId: result.value!.listId });
   }
 
   const completeMatch = path.match(COMPLETE_RE);
