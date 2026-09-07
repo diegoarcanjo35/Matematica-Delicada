@@ -12,6 +12,15 @@ import {
   previewImport,
   undoImport,
 } from "../services/questionImportService";
+import { buildTemplateCsvV2 } from "../lib/questionImportV2";
+import { applyPackage, previewPackage, PACKAGE_MAX_FILE_BYTES } from "../services/questionPackageImportService";
+
+/* Sprint 19, seção 8/17 da ordem — teto do CORPO multipart do apply de
+   pacote ZIP (arquivo ZIP + boundary/campos ao redor). Mesma disciplina de
+   Content-Length obrigatório e fail-closed validada na Sprint 18.1/18.2
+   (worker/src/routes/editorialQuestions.ts) — nunca um cheque "só se o
+   cabeçalho existir". */
+const PACKAGE_MAX_MULTIPART_BYTES = PACKAGE_MAX_FILE_BYTES + 1024 * 1024; // 1 MB de margem de overhead multipart.
 
 /* Rotas de importação CSV — Sprint 7 v1.0, seção 8.2 da ordem.
 
@@ -96,6 +105,22 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
     });
   }
 
+  // Sprint 19, seção 3 da ordem — template V2, agora o padrão oferecido
+  // pela UI (o V1 acima continua existindo só por compatibilidade — nunca
+  // mais o recomendado).
+  if (path === "/api/editorial/question-imports/template-v2") {
+    if (request.method !== "GET") return Errors.methodNotAllowed();
+    const actor = await requireEditorialActor(request, env);
+    if (!actor) return Errors.forbidden("Sem permissão editorial.");
+    return new Response(buildTemplateCsvV2(), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="questoes-importacao-v2.csv"',
+      },
+    });
+  }
+
   const actor = await requireEditorialActor(request, env);
   if (!actor) {
     const token = readSessionToken(request);
@@ -150,6 +175,94 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
     return json({ ok: true, appliedCount: result.appliedCount ?? 0, alreadyApplied: result.alreadyApplied ?? false, questionIds: result.questionIds ?? [] });
   }
 
+  // Sprint 19, seções 5-13/17 da ordem — Pacote ZIP (CSV V2 + imagens +
+  // manifest), endpoints SEPARADOS dos de CSV puro acima (nunca reaproveita
+  // /preview ou /apply genéricos) — reduz risco e mantém compatibilidade
+  // total com o fluxo CSV já em produção.
+  if (path === "/api/editorial/question-imports/package/preview") {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+
+    // Mesma disciplina fail-closed de Content-Length da Sprint 18.1 —
+    // corpo é o ZIP bruto (nunca multipart aqui: preview não precisa de
+    // nenhum campo além do arquivo em si).
+    const contentLengthRaw = request.headers.get("content-length");
+    if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
+      return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido para upload de pacote.");
+    }
+    if (Number(contentLengthRaw) > PACKAGE_MAX_FILE_BYTES) {
+      return Errors.payloadTooLarge(`Pacote excede o limite de ${PACKAGE_MAX_FILE_BYTES} bytes.`);
+    }
+
+    const buffer = await request.arrayBuffer();
+    if (buffer.byteLength > PACKAGE_MAX_FILE_BYTES) {
+      return Errors.payloadTooLarge(`Pacote excede o limite de ${PACKAGE_MAX_FILE_BYTES} bytes.`);
+    }
+
+    const result = await previewPackage(env.DB, actor.userId, new Uint8Array(buffer));
+    if (!result.ok) {
+      return json({ error: { code: "package_invalid", message: result.message ?? "Pacote inválido.", errors: result.errors ?? [] } }, { status: 400 });
+    }
+    return json({
+      ok: true,
+      batchId: result.batchId,
+      rowCount: result.rowCount,
+      validRowCount: result.validRowCount,
+      imageCount: result.imageCount,
+      errorCount: result.errorCount,
+      questions: result.questions,
+      expiresAt: result.expiresAt,
+      canApply: (result.errorCount ?? 0) === 0,
+    });
+  }
+
+  if (path === "/api/editorial/question-imports/package/apply") {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+    if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
+
+    const contentLengthRaw = request.headers.get("content-length");
+    if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
+      return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido para upload de pacote.");
+    }
+    if (Number(contentLengthRaw) > PACKAGE_MAX_MULTIPART_BYTES) {
+      return Errors.payloadTooLarge(`Corpo da requisição excede o limite permitido para aplicar o pacote.`);
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return Errors.badRequest("Corpo multipart/form-data inválido.");
+    }
+    const batchId = form.get("batchId");
+    if (!isValidQuestionId(batchId)) return Errors.badRequest("Informe batchId.");
+    const file = form.get("arquivo");
+    if (!(file instanceof File)) return Errors.badRequest("Campo 'arquivo' é obrigatório (o mesmo pacote ZIP selecionado no preview).");
+    const zipBytes = new Uint8Array(await file.arrayBuffer());
+    if (zipBytes.byteLength > PACKAGE_MAX_FILE_BYTES) {
+      return Errors.payloadTooLarge(`Pacote excede o limite de ${PACKAGE_MAX_FILE_BYTES} bytes.`);
+    }
+
+    const result = await applyPackage(env.DB, env.QUESTION_MEDIA, actor.userId, batchId, zipBytes);
+    if (!result.ok) {
+      if (result.notFound) return Errors.notFound();
+      if (result.expired) return json({ error: { code: "preview_expired", message: "A prévia expirou. Gere uma nova." } }, { status: 409 });
+      if (result.fingerprintMismatch) {
+        return json({ error: { code: "package_fingerprint_mismatch", message: "O pacote reenviado é diferente do que gerou esta prévia. Gere uma nova prévia." } }, { status: 409 });
+      }
+      if (result.conflict) {
+        return json({ error: { code: "package_conflict", message: result.conflictReason ?? "Um ou mais itens já existem. Gere uma nova prévia." } }, { status: 409 });
+      }
+      return json({ error: { code: "package_invalid", message: "Prévia inválida ou com erros pendentes." } }, { status: 400 });
+    }
+    return json({
+      ok: true,
+      appliedCount: result.appliedCount ?? 0,
+      imageCount: result.imageCount ?? 0,
+      alreadyApplied: result.alreadyApplied ?? false,
+      questionIds: result.questionIds ?? [],
+    });
+  }
+
   const undoMatch = path.match(BATCH_UNDO_RE);
   if (undoMatch) {
     if (request.method !== "POST") return Errors.methodNotAllowed();
@@ -157,7 +270,10 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
     const batchId = undoMatch[1];
     if (!isValidQuestionId(batchId)) return Errors.notFound();
 
-    const result = await undoImport(env.DB, actor.userId, batchId);
+    // Sprint 19, seção 15 da ordem — undo GENÉRICO continua servindo tanto
+    // lotes CSV quanto de Pacote ZIP; `bucket` é opcional (só usado se o
+    // lote realmente tiver imagens R2, ver undoImport).
+    const result = await undoImport(env.DB, actor.userId, batchId, env.QUESTION_MEDIA);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.blocked) {

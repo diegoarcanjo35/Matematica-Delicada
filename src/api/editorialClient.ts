@@ -7,18 +7,24 @@ export interface ApiFieldError {
   code: string;
   message: string;
   fields?: Record<string, string>;
+  /** Sprint 19 — erros do Pacote ZIP não cabem num `Record<string,string>`
+   *  simples (podem ter code/file/row/field simultaneamente); a rota de
+   *  package/preview devolve esta lista estruturada em vez de `fields`. */
+  errors?: PackageError[];
 }
 
 export class EditorialApiError extends Error {
   readonly fields: Record<string, string>;
   readonly status: number;
   readonly code: string;
+  readonly packageErrors: PackageError[];
 
   constructor(apiError: ApiFieldError, status: number) {
     super(apiError.message);
     this.fields = apiError.fields ?? {};
     this.status = status;
     this.code = apiError.code;
+    this.packageErrors = apiError.errors ?? [];
   }
 }
 
@@ -360,4 +366,73 @@ export function fetchImportBatch(batchId: string): Promise<{ ok: true; batch: Re
 
 export function templateDownloadUrl(): string {
   return "/api/editorial/question-imports/template";
+}
+
+/* ----------------------------- Pacote ZIP (Sprint 19) -----------------------
+   Seções 2/17 da ordem — endpoints SEPARADOS dos de CSV puro acima. Andreia
+   nunca vê asset_ref/object key/storage_kind/manifest técnico — só
+   código/enunciado/padrão/imagens por questão. */
+
+export function templateV2DownloadUrl(): string {
+  return "/api/editorial/question-imports/template-v2";
+}
+
+export interface PackageError {
+  code?: string;
+  file?: string;
+  row?: number;
+  field?: string;
+  message: string;
+}
+
+export interface PackagePreviewImage {
+  imageId: string;
+  path: string;
+  placement: "enunciado" | "alternativa";
+  alternativeLetter: string | null;
+  altText: string;
+}
+
+export interface PackagePreviewQuestion {
+  code: string;
+  enunciadoPreview: string;
+  patternName: string | null;
+  images: PackagePreviewImage[];
+  status: "ready" | "error";
+}
+
+export interface PreviewPackageResponse {
+  ok: true;
+  batchId: string;
+  rowCount: number;
+  validRowCount: number;
+  imageCount: number;
+  errorCount: number;
+  questions: PackagePreviewQuestion[];
+  expiresAt: string;
+  canApply: boolean;
+}
+
+/** Preview do pacote — corpo é o ZIP BRUTO (mesma convenção do preview de
+ *  CSV acima), nunca JSON. */
+export async function previewPackageFile(file: File): Promise<PreviewPackageResponse> {
+  const buffer = await file.arrayBuffer();
+  return request("/api/editorial/question-imports/package/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/zip" },
+    body: buffer,
+  });
+}
+
+/** Apply do pacote — seção 10 da ordem: Andreia NUNCA seleciona o arquivo
+ *  de novo; o MESMO `File` já escolhido no preview é reenviado
+ *  automaticamente pelo componente, junto do `batchId`. */
+export function applyPackageBatch(
+  batchId: string,
+  file: File
+): Promise<{ ok: true; appliedCount: number; imageCount: number; alreadyApplied: boolean; questionIds: string[] }> {
+  const form = new FormData();
+  form.set("batchId", batchId);
+  form.set("arquivo", file);
+  return request("/api/editorial/question-imports/package/apply", { method: "POST", body: form });
 }

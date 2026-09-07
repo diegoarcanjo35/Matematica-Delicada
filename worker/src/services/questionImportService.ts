@@ -25,6 +25,7 @@ import {
   type QuestionPatternInput,
 } from "../lib/questionsValidation";
 import { computeQuestionFingerprint } from "../lib/fingerprint";
+import { IMPORT_CSV_V2_HEADERS, parseAndValidateRowV2 } from "../lib/questionImportV2";
 import { recordAuditEvent } from "../repositories/auditRepository";
 import {
   buildDeleteQuestionChildrenForUndoStatements,
@@ -40,7 +41,6 @@ import {
 import {
   buildConditionalHistoryStatement,
   buildInsertAlternativeStatement,
-  buildInsertImageStatement,
   buildInsertPatternLinkStatement,
   buildInsertQuestionStatement,
   buildInsertTagStatement,
@@ -56,6 +56,10 @@ function newId(): string {
 export const IMPORT_MAX_FILE_BYTES = 300 * 1024; // 300KB
 export const IMPORT_MAX_ROWS = 500;
 export const IMPORT_PREVIEW_TTL_MS = 1000 * 60 * 30; // 30min
+
+/** Sprint 19, seção 14 da ordem — usado na metadata de auditoria dos
+ *  eventos de importação (nunca conteúdo, só a origem técnica do lote). */
+export type ImportSourceKind = "csv_v1" | "csv_v2" | "zip";
 
 export const IMPORT_CSV_HEADERS = [
   "codigo",
@@ -281,10 +285,21 @@ async function parseAndValidateRow(
     if (dbDuplicates.length > 0) errors.push({ row: rowNumber, field: "enunciado", message: "Enunciado equivalente a uma questão já existente no banco (fingerprint duplicada)." });
   }
 
+  // Sprint 19, seção 4 da ordem — importação de imagem por REFERÊNCIA
+  // (imagem local pré-existente no repositório, nunca um upload) foi
+  // descontinuada: nenhuma linha nova pode mais criar
+  // `question_images.storage_kind='local'` através de importação. Bloqueia
+  // no PREVIEW (nunca silenciosamente ignorado) com uma mensagem que
+  // orienta o caminho correto — o Pacote ZIP (seção 5-13). Dados legados já
+  // existentes no banco não são afetados por esta checagem.
   const imagemRef = cell(row, headerIndex, "imagem_ref") || null;
   const imagemAlt = cell(row, headerIndex, "imagem_alt") || null;
-  if (imagemRef && !imagemAlt) {
-    errors.push({ row: rowNumber, field: "imagem_alt", message: "Texto alternativo obrigatório quando há referência de imagem." });
+  if (imagemRef) {
+    errors.push({
+      row: rowNumber,
+      field: "imagem_ref",
+      message: "Importação de imagem por referência foi descontinuada. Use o Pacote ZIP com imagens.",
+    });
   }
 
   if (errors.length > 0) {
@@ -374,10 +389,24 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
   const headerIndex: Record<string, number> = {};
   headerRow.forEach((h, i) => (headerIndex[h.trim()] = i));
 
-  const missingHeaders = IMPORT_CSV_HEADERS.filter((h) => !(h in headerIndex));
-  if (missingHeaders.length > 0) {
-    return { ok: false, reason: "bad_header", message: `Cabeçalho ausente: ${missingHeaders.join(", ")}.` };
+  // Sprint 19, seção 2/3/4 da ordem — detecção automática V1/V2 pelo
+  // próprio cabeçalho: a UI oferece um único seletor "[ CSV ]" (nunca dois
+  // sub-modos de CSV para Andreia escolher) — o mesmo endpoint reconhece
+  // qual template foi enviado. V2 (recomendado) é tentado primeiro só para
+  // a mensagem de erro favorecer o template atual quando NENHUM dos dois
+  // bate; a detecção em si não depende de ordem (cada um exige TODOS os
+  // seus próprios cabeçalhos).
+  const isV1 = IMPORT_CSV_HEADERS.every((h) => h in headerIndex);
+  const isV2 = IMPORT_CSV_V2_HEADERS.every((h) => h in headerIndex);
+  if (!isV1 && !isV2) {
+    const missingV2 = IMPORT_CSV_V2_HEADERS.filter((h) => !(h in headerIndex));
+    return {
+      ok: false,
+      reason: "bad_header",
+      message: `Cabeçalho não reconhecido. Use o template atual (V2) — faltando: ${missingV2.join(", ")}.`,
+    };
   }
+  const sourceKind: ImportSourceKind = isV1 ? "csv_v1" : "csv_v2";
 
   if (dataRows.length === 0) return { ok: false, reason: "empty", message: "Arquivo sem linhas de dados." };
 
@@ -393,7 +422,9 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
       errors.push({ row: rowNumber, field: "_linha", message: `Número de colunas (${dataRows[i].length}) difere do cabeçalho (${headerRow.length}).` });
       continue;
     }
-    const { parsed, errors: rowErrors } = await parseAndValidateRow(db, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile);
+    const { parsed, errors: rowErrors } = isV1
+      ? await parseAndValidateRow(db, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile)
+      : await parseAndValidateRowV2(db, dataRows[i], headerIndex, rowNumber, seenCodesInFile, seenFingerprintsInFile);
     if (rowErrors.length > 0) {
       // Nunca ecoa o conteúdo completo da LINHA — só campo+mensagem+valor da
       // célula responsável (nunca as outras ~30 colunas da linha).
@@ -422,7 +453,9 @@ export async function previewImport(db: D1Database, actorUserId: string, fileByt
 
   await recordAuditEvent(db, newId(), "editorial_question_import_previewed", actorUserId, {
     batchId,
+    sourceKind,
     rowCount: dataRows.length,
+    imageCount: 0,
     errorCount: errors.length,
   });
 
@@ -529,18 +562,12 @@ export async function applyImport(db: D1Database, actorUserId: string, batchId: 
     row.alternativas.forEach((alt, index) => statements.push(buildInsertAlternativeStatement(db, questionId, newId(), alt, index)));
     row.padroes.forEach((link) => statements.push(buildInsertPatternLinkStatement(db, questionId, newId(), link)));
     row.tags.forEach((tag, index) => statements.push(buildInsertTagStatement(db, questionId, newId(), tag, index)));
-    if (row.imagemRef && row.imagemAlt) {
-      statements.push(
-        buildInsertImageStatement(db, questionId, newId(), {
-          assetRef: row.imagemRef,
-          altText: row.imagemAlt,
-          caption: null,
-          position: 0,
-          titularDireitos: null,
-          baseLicenca: null,
-        })
-      );
-    }
+    // Sprint 19, seção 4 da ordem — importação nunca mais cria
+    // `question_images` por referência local: `row.imagemRef` chega aqui
+    // sempre `null` (preview já rejeita qualquer linha com o campo
+    // preenchido, ver `parseAndValidateRow` acima); nenhum INSERT de imagem
+    // acontece neste fluxo. Upload de imagem via importação agora é
+    // exclusividade do Pacote ZIP (questionPackageImportService.ts).
     statements.push(
       buildConditionalHistoryStatement(db, {
         id: newId(),
@@ -571,7 +598,12 @@ export async function applyImport(db: D1Database, actorUserId: string, batchId: 
     return { ok: true, alreadyApplied: true, questionIds: items.map((i) => i.question_id).filter((id): id is string => id !== null) };
   }
 
-  await recordAuditEvent(db, newId(), "editorial_question_import_applied", actorUserId, { batchId, appliedCount: rows.length });
+  await recordAuditEvent(db, newId(), "editorial_question_import_applied", actorUserId, {
+    batchId,
+    sourceKind: "csv",
+    appliedCount: rows.length,
+    imageCount: 0,
+  });
 
   return { ok: true, appliedCount: rows.length, questionIds };
 }
@@ -585,7 +617,12 @@ export interface UndoResult {
   undoneCount?: number;
 }
 
-export async function undoImport(db: D1Database, actorUserId: string, batchId: string): Promise<UndoResult> {
+/** `bucket` é OPCIONAL — só necessário quando o lote pode ter imagens R2
+ *  (lote de Pacote ZIP, Sprint 19 seção 15 da ordem). Lotes CSV nunca têm
+ *  imagem nenhuma associada (Sprint 19, seção 4: importação por referência
+ *  descontinuada), então passá-lo é inofensivo mas nunca obrigatório —
+ *  mantém as chamadas existentes (rota `/undo` genérica) compatíveis. */
+export async function undoImport(db: D1Database, actorUserId: string, batchId: string, bucket?: R2Bucket): Promise<UndoResult> {
   const batch = await findImportBatch(db, batchId);
   if (!batch) return { ok: false, notFound: true };
 
@@ -603,6 +640,22 @@ export async function undoImport(db: D1Database, actorUserId: string, batchId: s
       .all<{ id: string; editorial_status: string }>();
     const nonDraft = (rows.results ?? []).filter((r) => r.editorial_status !== "draft");
     if (nonDraft.length > 0) return { ok: false, blocked: true };
+  }
+
+  // Sprint 19, seção 15 da ordem — ANTES de qualquer exclusão D1, coleta as
+  // object keys R2 pertencentes SÓ às questões deste lote (nunca de outra
+  // questão). Precisa acontecer ANTES do DELETE de `question_images` abaixo
+  // — depois dele as linhas não existem mais para consultar. R2 só é
+  // efetivamente apagado depois de o D1 confirmar o undo (mais abaixo) —
+  // nunca antes.
+  let r2KeysToClean: string[] = [];
+  if (bucket && questionIds.length > 0) {
+    const placeholders = questionIds.map(() => "?").join(", ");
+    const imageRows = await db
+      .prepare(`SELECT asset_ref FROM question_images WHERE question_id IN (${placeholders}) AND storage_kind = 'r2'`)
+      .bind(...questionIds)
+      .all<{ asset_ref: string }>();
+    r2KeysToClean = (imageRows.results ?? []).map((r) => r.asset_ref);
   }
 
   // ORDEM IMPORTA: cada DELETE/UPDATE guardado abaixo checa, DENTRO da
@@ -628,6 +681,21 @@ export async function undoImport(db: D1Database, actorUserId: string, batchId: s
   if (markResult.meta.changes !== 1) {
     // Corrida: outra requisição já desfez o mesmo lote.
     return { ok: true, alreadyUndone: true, undoneCount: 0 };
+  }
+
+  // Só DEPOIS de o D1 confirmar o undo: melhor esforço para limpar os
+  // objetos R2 correspondentes (nunca antes — D1 já não aponta mais para
+  // eles nesse instante, então uma falha aqui deixa NO MÁXIMO um objeto
+  // órfão, jamais uma questão apontando para algo inexistente). Falha de
+  // limpeza é registrada tecnicamente (nunca conteúdo sensível) e NUNCA
+  // impede o undo de ser considerado bem-sucedido — o resultado do usuário
+  // ("as questões do lote sumiram") já foi alcançado e confirmado no D1.
+  for (const key of r2KeysToClean) {
+    try {
+      await bucket!.delete(key);
+    } catch (error) {
+      console.error("questionImportService: falha ao limpar objeto R2 órfão no undo", { key, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   await recordAuditEvent(db, newId(), "editorial_question_import_undone", actorUserId, { batchId, undoneCount: questionIds.length });

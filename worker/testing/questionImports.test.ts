@@ -422,3 +422,24 @@ describe("undoImport", () => {
     expect(result.blocked).toBe(true);
   });
 });
+
+/* Sprint 19, seção 4/19 da ordem (itens 7/8) — o CSV V1 histórico continua
+   aceito para dados sem imagem; `imagem_ref` preenchida agora é SEMPRE
+   rejeitada no preview, orientando o Pacote ZIP. */
+describe("Sprint 19 — compatibilidade V1 (itens 7/8 da política de testes)", () => {
+  it("item 7 — V1 continua funcionando normalmente sem imagem", async () => {
+    const csv = toCsv([buildCsvRow({ codigo: "V1-SEM-IMAGEM" })]);
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    expect(preview.ok).toBe(true);
+    expect(preview.errorCount).toBe(0);
+  });
+
+  it("item 8 — V1 com imagem_ref preenchida é bloqueado e orienta usar o Pacote ZIP", async () => {
+    const csv = toCsv([buildCsvRow({ codigo: "V1-COM-IMAGEM", imagem_ref: "assets/questoes/antiga.png", imagem_alt: "Alt" })]);
+    const preview = await previewImport(db as never, "editor1", bytes(csv));
+    expect(preview.ok).toBe(true);
+    expect(preview.errorCount).toBe(1);
+    expect(preview.errors![0].field).toBe("imagem_ref");
+    expect(preview.errors![0].message).toMatch(/Pacote ZIP/);
+  });
+});
