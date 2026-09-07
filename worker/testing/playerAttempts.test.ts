@@ -230,6 +230,46 @@ describe("início e retomada de tentativa", () => {
 });
 
 /* ---------------------------------------------------------------------- */
+/* Hotfix pós-Sprint 20 — attempt.question.isLocalFixture                  */
+/* ---------------------------------------------------------------------- */
+
+/* Fonte de verdade única para o aviso "conteúdo técnico provisório" do
+   Player (frontend, AttemptPage.tsx): `questions.is_local_fixture`,
+   propagado 1:1 pelo DTO — nunca inferido no cliente por code/origin/texto/
+   environment/URL. `findQuestionForStudent` (questionRepository.ts) já
+   bloqueia fixture fora do dev local com a flag; este bloco prova que,
+   QUANDO uma questão chega ao DTO (real ou fixture autorizada em dev
+   local), o boolean exposto bate exatamente com a coluna do banco. */
+describe("attempt.question.isLocalFixture (hotfix pós-Sprint 20)", () => {
+  it("questão real (is_local_fixture=0) → isLocalFixture: false no DTO", async () => {
+    const qId = seedPublishedQuestion({ isLocalFixture: false });
+    const token = await seedUserWithSession("u1");
+    const create = await callRoute("/api/player/attempts", token, { method: "POST", body: JSON.stringify({ questionId: qId, mode: "learning" }) });
+    const { attemptId } = (await create.json()) as { attemptId: string };
+    const response = (await (await callRoute(`/api/player/attempts/${attemptId}`, token, { method: "GET" })).json()) as {
+      attempt: { question: { isLocalFixture: boolean } };
+    };
+    expect(response.attempt.question.isLocalFixture).toBe(false);
+  });
+
+  it("fixture local autorizada (is_local_fixture=1, dev local com a flag) → isLocalFixture: true no DTO", async () => {
+    const qId = seedPublishedQuestion({ isLocalFixture: true });
+    const token = await seedUserWithSession("u1");
+    const create = await callRoute("/api/player/attempts", token, { method: "POST", body: JSON.stringify({ questionId: qId, mode: "learning" }) });
+    const { attemptId } = (await create.json()) as { attemptId: string };
+    const response = (await (await callRoute(`/api/player/attempts/${attemptId}`, token, { method: "GET" })).json()) as {
+      attempt: { question: { isLocalFixture: boolean } };
+    };
+    expect(response.attempt.question.isLocalFixture).toBe(true);
+  });
+
+  // O bloqueio de fixture remota fora do dev local com a flag (defesa em
+  // profundidade da Seção 4 do hotfix) já é coberto por
+  // "gate de disponibilidade do módulo" acima (linha 102) — não duplicado
+  // aqui.
+});
+
+/* ---------------------------------------------------------------------- */
 /* Reconhecimento                                                          */
 /* ---------------------------------------------------------------------- */
 

@@ -61,7 +61,14 @@ const REPORT_CATEGORY_LABELS: Record<ProblemReportCategory, string> = {
   other: "Outro",
 };
 
-function ProvisionalContentNotice() {
+/* Hotfix pós-Sprint 20 — este aviso só pode aparecer quando a questão É
+   realmente uma fixture local de desenvolvimento. A fonte de verdade é
+   `attempt.question.isLocalFixture` (derivado no servidor de
+   `questions.is_local_fixture`, nunca inferido no cliente por code/origin/
+   texto/environment/URL). Ausência do campo (payload histórico em cache)
+   trata fail-closed: NÃO mostra o aviso por padrão. */
+function ProvisionalContentNotice({ isLocalFixture }: { isLocalFixture: boolean | undefined }) {
+  if (!isLocalFixture) return null;
   return (
     <p className="player__provisional-notice" role="note">
       CONTEÚDO TÉCNICO PROVISÓRIO — NÃO PUBLICAR. Esta questão é uma fixture local de
@@ -315,7 +322,7 @@ export function AttemptPage() {
     return (
       <div className="player">
         <Card className="player__card">
-          <ProvisionalContentNotice />
+          <ProvisionalContentNotice isLocalFixture={attempt.question.isLocalFixture} />
           <h1 ref={headingRef} tabIndex={-1} className="player__heading">
             Resultado
           </h1>
@@ -433,7 +440,7 @@ export function AttemptPage() {
     return (
       <div className="player">
         <Card className="player__card">
-          <ProvisionalContentNotice />
+          <ProvisionalContentNotice isLocalFixture={attempt.question.isLocalFixture} />
           <header className="player__header">
             <span className="player__mode-badge">{modeLabel(attempt)}</span>
             <span className="player__elapsed">Tempo decorrido: {formatElapsed(attempt.startedAt)}</span>
@@ -511,7 +518,7 @@ export function AttemptPage() {
   return (
     <div className="player">
       <Card className="player__card">
-        <ProvisionalContentNotice />
+        <ProvisionalContentNotice isLocalFixture={attempt.question.isLocalFixture} />
         <header className="player__header">
           <span className="player__mode-badge">{modeLabel(attempt)}</span>
           <span>{attempt.selectedAlternative ? "Resposta selecionada" : "Aguardando resposta"}</span>

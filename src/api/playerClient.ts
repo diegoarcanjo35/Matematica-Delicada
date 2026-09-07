@@ -14,6 +14,9 @@ export interface AttemptQuestion {
   alternativas: Array<{ letter: string; text: string }>;
   imagens: Array<{ id: string; assetRef: string; altText: string; caption: string | null; position: number }>;
   principalPatternId: string | null;
+  /** Hotfix pós-Sprint 20 — fonte de verdade única para o aviso de conteúdo
+   *  provisório: `questions.is_local_fixture`, derivado no servidor. */
+  isLocalFixture: boolean;
 }
 
 export interface AttemptFeedback {

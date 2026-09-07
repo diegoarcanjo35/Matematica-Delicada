@@ -120,6 +120,11 @@ export interface AttemptQuestionDto {
   alternativas: Array<{ letter: string; text: string }>;
   imagens: Array<{ id: string; assetRef: string; altText: string; caption: string | null; position: number }>;
   principalPatternId: string | null;
+  /** Hotfix pós-Sprint 20 — único boolean derivado de `questions.is_local_fixture`
+   *  (nunca inferido por code/origin/texto/environment/URL no cliente). Fonte de
+   *  verdade para o Player decidir se mostra o aviso "conteúdo técnico
+   *  provisório" — nunca aparece para uma questão real publicada. */
+  isLocalFixture: boolean;
 }
 
 export interface AttemptStateDto {
@@ -195,6 +200,7 @@ async function buildQuestionDto(db: D1Database, questionId: string, fixturesAllo
     alternativas: alternatives.map((a) => ({ letter: a.letter, text: a.text })),
     imagens: images.map((i) => ({ id: i.id, assetRef: i.asset_ref, altText: i.alt_text, caption: i.caption, position: i.position })),
     principalPatternId: principal?.pattern_id ?? null,
+    isLocalFixture: question.is_local_fixture === 1,
   };
 }
 
