@@ -19,6 +19,7 @@ import {
   type PdfApplySelectionEntry,
   type PdfExamIdentityInput,
   type PdfPreviewQuestion,
+  type PdfVisualConfirmation,
   type PreviewImportResponse,
   type PreviewPackageResponse,
   type PreviewPdfResponse,
@@ -480,9 +481,22 @@ function pdfQuestionBadge(q: PdfPreviewQuestion): string {
   if (q.correctAlternative === null) return "Gabarito ausente";
   if (q.warnings.some((w) => /alternativa|ordem/i.test(w))) return "Estrutura ambígua";
   if (q.visualReviewRequired) return "Imagem precisa revisão";
+  // Sprint 23 — imagem extraída com sucesso, mas SEMPRE exige confirmação
+  // do editor (posicionamento + texto alternativo) antes de poder aplicar
+  // (seção 8/10/11 da ordem) — nunca "pronta" sozinha.
+  if (q.hasPendingVisualConfirmation) return "Imagem extraída — confirme antes de aplicar";
   if (q.status === "needs_review") return "Precisa revisão";
   return "Pronta";
 }
+
+const PLACEMENT_LABELS: Record<string, string> = {
+  statement: "Imagem do enunciado",
+  option_A: "Imagem da alternativa A",
+  option_B: "Imagem da alternativa B",
+  option_C: "Imagem da alternativa C",
+  option_D: "Imagem da alternativa D",
+  option_E: "Imagem da alternativa E",
+};
 
 interface PdfSelectionState {
   included: boolean;
@@ -493,6 +507,11 @@ interface PdfSelectionState {
   editing: boolean;
   editedStatement: string;
   editedAlternatives: Record<"A" | "B" | "C" | "D" | "E", string>;
+  /** Sprint 23, seção 8/10 da ordem — confirmação por elemento visual
+   *  (chave = `PdfVisualElement.hash`). Nunca preenchido automaticamente
+   *  pelo sistema (nem placement nem alt text) — sempre uma ação
+   *  explícita da Andreia. */
+  visualConfirmations: Record<string, { placement: string; altText: string }>;
 }
 
 /** Seção 5 da ordem — edição só faz sentido quando o PROBLEMA é
@@ -501,6 +520,21 @@ interface PdfSelectionState {
  *  duplicidade exata. */
 function isStructurallyEditable(q: PdfPreviewQuestion): boolean {
   return !q.canApply && !q.visualReviewRequired && q.duplicateStatus !== "exact" && q.correctAlternative !== null;
+}
+
+/** Sprint 23 — só as imagens raster REALMENTE extraídas (nunca vetor
+ *  detectado, nunca ambíguo/decorativo) exigem confirmação individual. */
+function pendingImagesFor(q: PdfPreviewQuestion) {
+  return q.visualElements.filter((el) => el.kind === "raster" && el.extractionStatus === "extracted");
+}
+
+function hasAllVisualConfirmations(q: PdfPreviewQuestion, sel: PdfSelectionState): boolean {
+  const pending = pendingImagesFor(q);
+  if (pending.length === 0) return true;
+  return pending.every((el) => {
+    const c = sel.visualConfirmations[el.hash];
+    return !!c && c.placement.length > 0 && c.altText.trim().length > 0;
+  });
 }
 
 function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
@@ -516,7 +550,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   const [preview, setPreview] = useState<PreviewPdfResponse | null>(null);
   const [selection, setSelection] = useState<Map<number, PdfSelectionState>>(new Map());
   const [finalConfirmChecked, setFinalConfirmChecked] = useState(false);
-  const [applyResult, setApplyResult] = useState<{ appliedCount: number; alreadyApplied: boolean } | null>(null);
+  const [applyResult, setApplyResult] = useState<{ appliedCount: number; alreadyApplied: boolean; imageUploadFailures: string[] } | null>(null);
   const [undoResult, setUndoResult] = useState<{ undoneCount: number; alreadyUndone: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -553,11 +587,12 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
         const editedAlternatives: PdfSelectionState["editedAlternatives"] = { A: "", B: "", C: "", D: "", E: "" };
         for (const a of q.alternatives) editedAlternatives[a.letter] = a.text;
         initialSelection.set(q.originalNumber, {
-          included: q.canApply,
+          included: q.canApply && !q.hasPendingVisualConfirmation,
           patternPrincipalId: "",
           editing: false,
           editedStatement: q.statement,
           editedAlternatives,
+          visualConfirmations: {},
         });
       }
       setSelection(initialSelection);
@@ -569,7 +604,17 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   }
 
   function emptySelectionState(): PdfSelectionState {
-    return { included: false, patternPrincipalId: "", editing: false, editedStatement: "", editedAlternatives: { A: "", B: "", C: "", D: "", E: "" } };
+    return { included: false, patternPrincipalId: "", editing: false, editedStatement: "", editedAlternatives: { A: "", B: "", C: "", D: "", E: "" }, visualConfirmations: {} };
+  }
+
+  function updateVisualConfirmation(originalNumber: number, elementHash: string, patch: Partial<{ placement: string; altText: string }>) {
+    setSelection((prev) => {
+      const next = new Map(prev);
+      const current = next.get(originalNumber) ?? emptySelectionState();
+      const existing = current.visualConfirmations[elementHash] ?? { placement: "", altText: "" };
+      next.set(originalNumber, { ...current, visualConfirmations: { ...current.visualConfirmations, [elementHash]: { ...existing, ...patch } } });
+      return next;
+    });
   }
 
   function updateSelection(originalNumber: number, patch: Partial<PdfSelectionState>) {
@@ -596,7 +641,16 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   // exclui, nunca só um dos dois.
   const visibleQuestions = (preview?.questions ?? []).filter((q) => !mathOnlyFilter || (q.originalNumber >= 136 && q.originalNumber <= 180));
   const visibleNumbers = new Set(visibleQuestions.map((q) => q.originalNumber));
-  const includedEntries = Array.from(selection.entries()).filter(([originalNumber, s]) => s.included && visibleNumbers.has(originalNumber));
+  const questionByNumber = new Map((preview?.questions ?? []).map((q) => [q.originalNumber, q] as const));
+  const includedEntries = Array.from(selection.entries()).filter(([originalNumber, s]) => {
+    if (!s.included || !visibleNumbers.has(originalNumber)) return false;
+    const q = questionByNumber.get(originalNumber);
+    // Sprint 23 — mesmo já marcada, uma questão com imagem pendente NUNCA
+    // entra no apply se a confirmação (placement + alt text) ficou
+    // incompleta depois de marcada (ex.: editor apagou o alt text) — nunca
+    // silenciosamente ignorada, simplesmente não conta como incluída.
+    return !q || hasAllVisualConfirmations(q, s);
+  });
   const includedCount = includedEntries.length;
   const allIncludedHavePattern = includedEntries.every(([, s]) => s.patternPrincipalId.length > 0);
   const canSubmitApply = includedCount > 0 && allIncludedHavePattern && finalConfirmChecked;
@@ -616,6 +670,18 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           ? {
               reviewedStatement: s.editedStatement,
               reviewedAlternatives: (["A", "B", "C", "D", "E"] as const).map((letter) => ({ letter, text: s.editedAlternatives[letter] })),
+            }
+          : {}),
+        // Sprint 23, seção 8/10 — só manda confirmação para as imagens
+        // REALMENTE pendentes desta questão (nunca um objeto vazio quando
+        // não há imagem nenhuma).
+        ...(pendingImagesFor(questionByNumber.get(originalNumber)!).length > 0
+          ? {
+              visualConfirmations: pendingImagesFor(questionByNumber.get(originalNumber)!).map((el) => ({
+                elementHash: el.hash,
+                placement: s.visualConfirmations[el.hash]!.placement as PdfVisualConfirmation["placement"],
+                altText: s.visualConfirmations[el.hash]!.altText,
+              })),
             }
           : {}),
       }));
@@ -742,7 +808,8 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
               const sel = selection.get(q.originalNumber) ?? emptySelectionState();
               const badge = pdfQuestionBadge(q);
               const editable = isStructurallyEditable(q);
-              const canBeIncluded = q.canApply || (editable && sel.editing);
+              const pendingImages = pendingImagesFor(q);
+              const canBeIncluded = (q.canApply || (editable && sel.editing)) && hasAllVisualConfirmations(q, sel);
               return (
                 <li key={q.tempId} className="editorial__package-question">
                   <p className="editorial__package-question-header">
@@ -821,6 +888,54 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
                     </p>
                   )}
 
+                  {pendingImages.length > 0 && (
+                    <div className="editorial__pdf-pending-images">
+                      <p>
+                        {pendingImages.length} imagem(ns) extraída(s) automaticamente. Confirme onde cada uma pertence e descreva o que aparece —
+                        obrigatório antes de aplicar.
+                      </p>
+                      <ul>
+                        {pendingImages.map((el) => {
+                          const confirmation = sel.visualConfirmations[el.hash] ?? { placement: "", altText: "" };
+                          return (
+                            <li key={el.hash}>
+                              {el.thumbnailDataUri && <img src={el.thumbnailDataUri} alt="Miniatura da imagem extraída" className="editorial__pdf-thumbnail" />}
+                              <label htmlFor={`pdf-visual-placement-${q.originalNumber}-${el.hash}`} className="editorial__field-label">
+                                Onde esta imagem pertence
+                              </label>
+                              <select
+                                id={`pdf-visual-placement-${q.originalNumber}-${el.hash}`}
+                                value={confirmation.placement}
+                                onChange={(e) => updateVisualConfirmation(q.originalNumber, el.hash, { placement: e.target.value })}
+                                disabled={busy}
+                              >
+                                <option value="">Não sei identificar</option>
+                                {Object.entries(PLACEMENT_LABELS).map(([value, label]) => (
+                                  <option key={value} value={value}>
+                                    {label}
+                                  </option>
+                                ))}
+                              </select>
+                              <label htmlFor={`pdf-visual-alttext-${q.originalNumber}-${el.hash}`} className="editorial__field-label">
+                                Descreva o que aparece na imagem
+                              </label>
+                              <input
+                                id={`pdf-visual-alttext-${q.originalNumber}-${el.hash}`}
+                                type="text"
+                                value={confirmation.altText}
+                                onChange={(e) => updateVisualConfirmation(q.originalNumber, el.hash, { altText: e.target.value })}
+                                disabled={busy}
+                              />
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {!hasAllVisualConfirmations(q, sel) && (
+                        <p role="alert">Confirme posicionamento e descrição de todas as imagens acima para poder selecionar esta questão.</p>
+                      )}
+                    </div>
+                  )}
+
                   <label htmlFor={`pdf-pattern-${q.originalNumber}`} className="editorial__field-label">
                     Padrão principal
                   </label>
@@ -869,6 +984,13 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           <p role="status">
             {applyResult.alreadyApplied ? "Este lote já havia sido aplicado anteriormente." : `${applyResult.appliedCount} questão(ões) criada(s) como rascunho.`}
           </p>
+          {applyResult.imageUploadFailures.length > 0 && (
+            <ul role="alert">
+              {applyResult.imageUploadFailures.map((msg, i) => (
+                <li key={i}>{msg} Anexe manualmente pelo editor de questão.</li>
+              ))}
+            </ul>
+          )}
           {isAdmin && preview && !undoResult && (
             <Button type="button" variant="secondary" onClick={() => void handleUndo()} isLoading={busy}>
               Desfazer lote

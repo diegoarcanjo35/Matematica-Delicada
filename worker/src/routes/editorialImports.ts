@@ -21,6 +21,7 @@ import {
   PDF_EXAM_MAX_BYTES,
   type PdfApplySelectionEntry,
 } from "../services/questionPdfImportService";
+import type { VisualPlacementCandidate } from "../lib/pdfEnemVisualModel";
 
 /* Sprint 19, seção 8/17 da ordem — teto do CORPO multipart do apply de
    pacote ZIP (arquivo ZIP + boundary/campos ao redor). Mesma disciplina de
@@ -394,6 +395,7 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
           patternPrincipalId?: unknown;
           reviewedStatement?: unknown;
           reviewedAlternatives?: unknown;
+          visualConfirmations?: unknown;
         };
         if (typeof e.originalNumber !== "number" || typeof e.patternPrincipalId !== "string" || !e.patternPrincipalId) {
           throw new Error("invalid entry");
@@ -418,13 +420,29 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
             return { letter: a.letter as "A" | "B" | "C" | "D" | "E", text: a.text };
           });
         }
+        // Sprint 23, seção 8/10 da ordem — confirmação editorial OPCIONAL
+        // (só existe quando a questão tem imagem(ns) raster pendente) de
+        // posicionamento + texto alternativo. Validação estrutural
+        // completa (contagem, hash conhecido, placement != unknown, alt
+        // text não vazio) acontece no serviço — aqui só a forma do JSON.
+        if (e.visualConfirmations !== undefined) {
+          if (!Array.isArray(e.visualConfirmations)) throw new Error("invalid visualConfirmations");
+          result.visualConfirmations = e.visualConfirmations.map((vc) => {
+            const v = vc as { elementHash?: unknown; placement?: unknown; altText?: unknown };
+            if (typeof v.elementHash !== "string" || !v.elementHash || typeof v.placement !== "string" || typeof v.altText !== "string") {
+              throw new Error("invalid visual confirmation");
+            }
+            return { elementHash: v.elementHash, placement: v.placement as VisualPlacementCandidate, altText: v.altText };
+          });
+        }
         return result;
       });
     } catch {
       return Errors.badRequest("Campo 'selection' inválido.");
     }
 
-    const result = await applyPdf(env.DB, actor.userId, batchId, examBytes, answerKeyBytes, identityInput, selection);
+    if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
+    const result = await applyPdf(env.DB, env.QUESTION_MEDIA, actor.userId, batchId, examBytes, answerKeyBytes, identityInput, selection);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.expired) return json({ error: { code: "preview_expired", message: "A prévia expirou. Gere uma nova." } }, { status: 409 });
@@ -447,6 +465,7 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       appliedCount: result.appliedCount ?? 0,
       alreadyApplied: result.alreadyApplied ?? false,
       questionIds: result.questionIds ?? [],
+      imageUploadFailures: result.imageUploadFailures ?? [],
     });
   }
 

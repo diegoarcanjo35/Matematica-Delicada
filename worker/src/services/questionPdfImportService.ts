@@ -55,6 +55,9 @@ import {
   buildUpsertDnaStatement,
 } from "../repositories/questionRepository";
 import type { AlternativeInput } from "../lib/questionsValidation";
+import { validateImageAltText } from "../lib/questionsValidation";
+import type { RawVisualElement, VisualPlacementCandidate } from "../lib/pdfEnemVisualModel";
+import { addQuestionImage } from "./questionMediaService";
 
 function newId(): string {
   return crypto.randomUUID();
@@ -65,12 +68,58 @@ export const PDF_EXAM_MAX_BYTES = PDF_MAX_BYTES; // 40MB
 export const PDF_ANSWER_KEY_MAX_BYTES = 5 * 1024 * 1024; // 5MB — gabarito é um documento pequeno.
 export const PDF_MAX_QUESTIONS_PER_BATCH = MAX_QUESTION_NUMBER; // mesmo teto estrutural do segmentador (200).
 
+/* Sprint 23, seção 3 da ordem — `RawVisualElement.pngBytes` NUNCA é
+ *  serializado no payload persistido (`question_import_batches.payload`
+ *  precisa continuar leve — ver `isPayloadWithinBatchLimit`) nem reaproveitado
+ *  como fonte de verdade depois do preview: o apply sempre re-deriva os
+ *  bytes do zero a partir dos PDFs reenviados (mesmo princípio já usado
+ *  para texto/gabarito). Os bytes só existem, brevemente, em memória:
+ *  (a) dentro da resposta HTTP do preview, como thumbnail base64 (nunca
+ *  gravados); (b) durante o apply, para upload real via
+ *  `addQuestionImage` (mesmo pipeline R2/D1 do resto do Banco de
+ *  Questões). */
+export type PersistableVisualElement = Omit<RawVisualElement, "pngBytes">;
+export type HttpVisualElement = Omit<RawVisualElement, "pngBytes"> & { thumbnailDataUri?: string };
+
+function toPersistableVisualElement(el: RawVisualElement): PersistableVisualElement {
+  const { pngBytes: _pngBytes, ...rest } = el;
+  return rest;
+}
+
+/** Só para a RESPOSTA HTTP do preview — nunca persistido. Imagens de
+ *  questão real do ENEM são pequenas (a maior observada no PDF oficial
+ *  usado nesta sprint: ~39KB de PNG) — v1 não faz miniaturização/resize
+ *  (escopo reduzido e divulgado no relatório final), envia o PNG completo
+ *  como data URI. */
+function toHttpVisualElement(el: RawVisualElement): HttpVisualElement {
+  const { pngBytes, ...rest } = el;
+  if (!pngBytes) return rest;
+  let binary = "";
+  for (let i = 0; i < pngBytes.length; i++) binary += String.fromCharCode(pngBytes[i]);
+  const base64 = btoa(binary);
+  return { ...rest, thumbnailDataUri: `data:image/png;base64,${base64}` };
+}
+
+export interface PersistablePreviewQuestion extends Omit<PdfEnemPreviewQuestion, "visualElements"> {
+  visualElements: PersistableVisualElement[];
+}
+export interface HttpPreviewQuestion extends Omit<PdfEnemPreviewQuestion, "visualElements"> {
+  visualElements: HttpVisualElement[];
+}
+
+function toPersistablePreviewQuestion(item: PdfEnemPreviewQuestion): PersistablePreviewQuestion {
+  return { ...item, visualElements: item.visualElements.map(toPersistableVisualElement) };
+}
+function toHttpPreviewQuestion(item: PdfEnemPreviewQuestion): HttpPreviewQuestion {
+  return { ...item, visualElements: item.visualElements.map(toHttpVisualElement) };
+}
+
 export interface PdfBatchPayload {
   sourceKind: "pdf_enem";
   identity: ExamIdentity;
   examFingerprint: string;
   answerKeyFingerprint: string;
-  questions: PdfEnemPreviewQuestion[];
+  questions: PersistablePreviewQuestion[];
   /** Seção 2/3 da ordem — identidade DETECTADA no texto dos dois PDFs,
    *  persistida para o apply poder revalidar a MESMA comparação (nunca
    *  confiando só no resultado do preview). */
@@ -85,7 +134,7 @@ export interface PdfPreviewResult {
   pageCount?: number;
   detectedQuestionCount?: number;
   matchedAnswerCount?: number;
-  questions?: PdfEnemPreviewQuestion[];
+  questions?: HttpPreviewQuestion[];
   globalWarnings?: string[];
   canApply?: boolean;
   expiresAt?: string;
@@ -174,11 +223,11 @@ export async function previewPdf(
   // buildPreviewQuestions) — para o PREVIEW, carregamos o conjunto de
   // fingerprints existentes sob demanda dentro da própria função, via uma
   // segunda consulta cujo filtro reaproveita os fingerprints calculados.
-  const { items, globalWarnings: matchWarnings } = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, new Set());
+  const { items, globalWarnings: matchWarnings } = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, new Set(), examExtract.visualElements);
   const existingFingerprints = await queryExistingFingerprints(db, items.map((i) => i.fingerprint));
   // Segunda passada — agora com os fingerprints existentes reais — nunca
   // uma consulta por questão, sempre 1 consulta em lote adicional.
-  const finalResult = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, existingFingerprints);
+  const finalResult = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, existingFingerprints, examExtract.visualElements);
 
   const globalWarnings = [...segmentationWarnings, ...matchWarnings, ...answerKeyParse.errors, ...documentIdentityCheck.messages];
 
@@ -187,7 +236,7 @@ export async function previewPdf(
     identity,
     examFingerprint,
     answerKeyFingerprint,
-    questions: finalResult.items,
+    questions: finalResult.items.map(toPersistablePreviewQuestion),
     documentIdentityCheck,
   };
 
@@ -242,7 +291,7 @@ export async function previewPdf(
     pageCount: examExtract.pageCount,
     detectedQuestionCount: finalResult.items.length,
     matchedAnswerCount: finalResult.items.filter((q) => q.correctAlternative !== null).length,
-    questions: finalResult.items,
+    questions: finalResult.items.map(toHttpPreviewQuestion),
     globalWarnings,
     // Seção 3 da ordem — divergência documental real (ok=false) derruba
     // canApply do LOTE INTEIRO, mesmo com questões individualmente
@@ -267,11 +316,32 @@ export interface PdfReviewedAlternative {
   text: string;
 }
 
+/** Sprint 23, seção 8/9/10/11 da ordem — confirmação editorial de UMA
+ *  imagem raster extraída automaticamente. `elementHash` identifica o
+ *  elemento pelo hash dos PIXELS (`RawVisualElement.hash`, SHA-256 —
+ *  nunca pelo `id` técnico, que é só um contador local à extração, não
+ *  uma identidade de conteúdo). `placement` é a posição CONFIRMADA pelo
+ *  editor (pode coincidir ou corrigir o palpite automático — nunca
+ *  `"unknown"`: se o editor não sabe onde a imagem vai, a questão
+ *  simplesmente não é selecionada para este apply). Alt text SEMPRE
+ *  obrigatório e revalidado no backend (seção 10: "nunca aceitar 'imagem'/
+ *  'figura'/'gráfico' como preenchimento automático NOSSO" — aqui não
+ *  preenchemos nada automaticamente, só validamos o que o editor digitou). */
+export interface PdfVisualConfirmationEntry {
+  elementHash: string;
+  /** Tipada com o universo COMPLETO (inclui "unknown") porque chega de
+   *  entrada de rede não confiável — a rejeição explícita de "unknown"
+   *  acontece em runtime no laço de validação abaixo, nunca só no tipo. */
+  placement: VisualPlacementCandidate;
+  altText: string;
+}
+
 export interface PdfApplySelectionEntry {
   originalNumber: number;
   patternPrincipalId: string;
   reviewedStatement?: string;
   reviewedAlternatives?: PdfReviewedAlternative[];
+  visualConfirmations?: PdfVisualConfirmationEntry[];
 }
 
 export interface PdfApplyResult {
@@ -288,6 +358,13 @@ export interface PdfApplyResult {
   message?: string;
   appliedCount?: number;
   questionIds?: string[];
+  /** Seção 14 da ordem — melhor esforço, best-effort: se o lote de
+   *  questões já foi criado (D1 comprometido) mas o upload de alguma
+   *  imagem confirmada falhou depois, a resposta continua `ok:true`
+   *  (as questões existem, nada foi perdido) mas lista aqui quais
+   *  falharam — a Andreia pode anexar manualmente pelo editor de questão
+   *  já existente. Nunca um estado silencioso: o cliente sempre sabe. */
+  imageUploadFailures?: string[];
 }
 
 function logPotentialConflict(context: string, error: unknown): void {
@@ -355,6 +432,7 @@ export async function applyReviewEdit(item: PdfEnemPreviewQuestion, entry: PdfAp
 
 export async function applyPdf(
   db: D1Database,
+  bucket: R2Bucket,
   actorUserId: string,
   batchId: string,
   examBytes: Uint8Array,
@@ -421,9 +499,9 @@ export async function applyPdf(
 
   const candidateCodes = rawQuestions.map((q) => buildPdfEnemQuestionCode(payload.identity, q.originalNumber));
   const existingCodes = await queryExistingCodes(db, candidateCodes);
-  const preliminary = await buildPreviewQuestions(rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, new Set());
+  const preliminary = await buildPreviewQuestions(rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, new Set(), examExtract.visualElements);
   const existingFingerprints = await queryExistingFingerprints(db, preliminary.items.map((i) => i.fingerprint));
-  const revalidated = await buildPreviewQuestions(rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, existingFingerprints);
+  const revalidated = await buildPreviewQuestions(rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, existingFingerprints, examExtract.visualElements);
 
   const byNumber = new Map(revalidated.items.map((q) => [q.originalNumber, q] as const));
 
@@ -477,6 +555,38 @@ export async function applyPdf(
     }
     if (item.visualReviewRequired) {
       return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: conteúdo visual não extraído — precisa ser criada manualmente com a imagem anexada.` };
+    }
+    // Seção 8/10/11 da ordem — uma questão com imagem raster extraída com
+    // sucesso NUNCA aplica sem confirmação editorial explícita: exatamente
+    // UMA `visualConfirmations` por imagem pendente (mesmo hash de
+    // conteúdo), placement nunca "unknown", alt text validado do zero
+    // (nunca confia em texto vindo do cliente sem checar de novo — mesmo
+    // padrão de `validateImageAltText` usado pelo resto do pipeline de
+    // mídia). Nenhuma imagem "sobrando" nem "faltando" é aceita.
+    if (item.hasPendingVisualConfirmation) {
+      const pendingHashes = item.visualElements.filter((v) => v.kind === "raster" && v.extractionStatus === "extracted").map((v) => v.hash);
+      const confirmations = entry.visualConfirmations ?? [];
+      if (confirmations.length !== pendingHashes.length) {
+        return {
+          ok: false,
+          conflict: true,
+          conflictReason: `Questão ${entry.originalNumber}: são ${pendingHashes.length} imagem(ns) pendente(s) de confirmação, ${confirmations.length} foram enviadas.`,
+        };
+      }
+      const seenHashes = new Set<string>();
+      for (const confirmation of confirmations) {
+        if (!pendingHashes.includes(confirmation.elementHash) || seenHashes.has(confirmation.elementHash)) {
+          return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: confirmação de imagem não corresponde a nenhuma imagem pendente desta questão.` };
+        }
+        seenHashes.add(confirmation.elementHash);
+        if (confirmation.placement === "unknown" || !confirmation.placement) {
+          return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: toda imagem confirmada precisa de um posicionamento (enunciado ou alternativa) — nunca "unknown".` };
+        }
+        const altTextResult = validateImageAltText(confirmation.altText);
+        if (!altTextResult.ok) {
+          return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: ${altTextResult.error}` };
+        }
+      }
     }
     if (existingCodes.has(item.code) || allExistingFingerprints.has(item.fingerprint) || seenFingerprintsInSelection.has(item.fingerprint)) {
       return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: duplicidade (código ou enunciado equivalente já existente).` };
@@ -608,5 +718,45 @@ export async function applyPdf(
     questionIds: questionIds.join(","),
   });
 
-  return { ok: true, appliedCount: selectedRows.length, questionIds };
+  // Seção 9/14 da ordem — SÓ AGORA (questões já existem, D1 comprometido)
+  // sobe as imagens confirmadas, reaproveitando o MESMO pipeline R2/D1 do
+  // resto do Banco de Questões (`addQuestionImage` — sniff de MIME real,
+  // SHA-256, chave determinística, limites, R2-antes-de-D1). Preview NUNCA
+  // grava nada no R2 (seção 9) — este é o único ponto do fluxo de PDF que
+  // escreve no bucket. Melhor esforço DEPOIS do batch principal: uma falha
+  // aqui nunca desfaz as questões já criadas (impossível — D1 já
+  // comprometeu), só é reportada em `imageUploadFailures` para a Andreia
+  // resolver manualmente pelo editor de questão existente.
+  const imageUploadFailures: string[] = [];
+  for (let i = 0; i < selection.length; i++) {
+    const entry = selection[i];
+    const confirmations = entry.visualConfirmations;
+    if (!confirmations || confirmations.length === 0) continue;
+    const questionId = questionIds[i];
+    const item = effectiveByNumber.get(entry.originalNumber)!;
+    const elementsByHash = new Map(item.visualElements.map((el) => [el.hash, el] as const));
+
+    for (const confirmation of confirmations) {
+      const element = elementsByHash.get(confirmation.elementHash);
+      if (!element || !element.pngBytes) {
+        imageUploadFailures.push(`Questão ${entry.originalNumber}: imagem confirmada não foi re-derivada na aplicação (divergência entre PDF revisado e reenviado).`);
+        continue;
+      }
+      const [placementKind, letter] = confirmation.placement === "statement" ? (["enunciado", undefined] as const) : (["alternativa", confirmation.placement.replace("option_", "")] as const);
+      const result = await addQuestionImage(db, bucket, questionId, actorUserId, {
+        mutationId: newId(),
+        placement: placementKind,
+        alternativeLetter: letter ?? null,
+        altText: confirmation.altText,
+        caption: null,
+        fileBytes: element.pngBytes,
+        declaredMimeType: "image/png",
+      });
+      if (!result.ok) {
+        imageUploadFailures.push(`Questão ${entry.originalNumber}: falha ao anexar imagem (${Object.values(result.fieldErrors ?? {}).join("; ") || "erro desconhecido"}).`);
+      }
+    }
+  }
+
+  return { ok: true, appliedCount: selectedRows.length, questionIds, ...(imageUploadFailures.length > 0 ? { imageUploadFailures } : {}) };
 }

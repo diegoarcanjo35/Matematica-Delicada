@@ -10,6 +10,8 @@ import type { RawQuestionCandidate } from "./pdfEnemSegmenter";
 import type { AnswerLetter } from "./pdfEnemAnswerKey";
 import type { ExamIdentity } from "./pdfEnemExamIdentity";
 import { computeQuestionFingerprint } from "./fingerprint";
+import { placeVisualElement } from "./pdfEnemVisualPlacement";
+import type { RawVisualElement } from "./pdfEnemVisualModel";
 
 export type PdfEnemQuestionStatus = "ready" | "needs_review";
 export type PdfEnemDuplicateStatus = "none" | "exact";
@@ -25,7 +27,27 @@ export interface PdfEnemPreviewQuestion {
   warnings: string[];
   status: PdfEnemQuestionStatus;
   duplicateStatus: PdfEnemDuplicateStatus;
+  /** Sprint 23 — agora computado por ASSOCIAÇÃO REAL (posição) a elementos
+   *  visuais, nunca mais o sinal grosseiro "a página tem algum traço"
+   *  (Sprint 22). `true` quando há, associado a ESTA questão, qualquer
+   *  elemento vetorial real (não-decorativo — seção 6, sempre bloqueia,
+   *  mesmo sem bitmap) OU qualquer imagem raster que não extraiu/não
+   *  posicionou com confiança (seção 11/12 — nunca aplicável
+   *  automaticamente sem prova positiva de que TODO elemento relevante foi
+   *  tratado). */
   visualReviewRequired: boolean;
+  /** Sprint 23 — `true` quando a questão tem pelo menos UMA imagem raster
+   *  extraída com sucesso e posicionada (nunca `unknown`) associada a ela.
+   *  Mesmo assim a questão NUNCA fica `ready` sozinha: a seção 11 exige
+   *  confirmação explícita do editor (placement + alt text) antes do
+   *  apply — ver `PdfApplySelectionEntry.visualConfirmations` em
+   *  questionPdfImportService.ts. */
+  hasPendingVisualConfirmation: boolean;
+  /** Elementos visuais ASSOCIADOS a esta questão (raster extraído ou
+   *  vetorial não-extraível) — metadado leve, NUNCA inclui `pngBytes` aqui
+   *  (ver `toPersistableVisualElement`/resposta HTTP separada em
+   *  questionPdfImportService.ts). */
+  visualElements: RawVisualElement[];
   /** Seção 14 da ordem — SEMPRE `null` nesta extração inicial; o parser
    *  nunca classifica padrão. Selecionado pelo editor na revisão, e
    *  revalidado (published, existente) no apply. */
@@ -70,12 +92,34 @@ export function buildPdfEnemQuestionCode(identity: ExamIdentity, originalNumber:
   return `${prefix}${suffix}`;
 }
 
+/** Sprint 23 — associa CADA elemento visual (já classificado como
+ *  decorativo/não-decorativo pelo extrator) à questão dona, por posição
+ *  (`placeVisualElement`), agrupando por `originalNumber`. Elementos
+ *  `ignored_decorative` nunca entram no mapa (nunca associados a
+ *  nenhuma questão — seção 5 da ordem). Roda UMA vez para o documento
+ *  inteiro (nunca por questão), reaproveitado por preview e apply. */
+function groupVisualElementsByOwner(allVisualElements: RawVisualElement[], examQuestions: RawQuestionCandidate[]): Map<number, RawVisualElement[]> {
+  const byOwner = new Map<number, RawVisualElement[]>();
+  for (const element of allVisualElements) {
+    if (element.extractionStatus === "ignored_decorative") continue;
+    const centerY = element.y + element.height / 2;
+    const { ownerQuestionNumber, placement } = placeVisualElement(element.pageNumber, centerY, examQuestions);
+    if (ownerQuestionNumber === null) continue;
+    const placed: RawVisualElement = { ...element, placementCandidate: placement };
+    const list = byOwner.get(ownerQuestionNumber) ?? [];
+    list.push(placed);
+    byOwner.set(ownerQuestionNumber, list);
+  }
+  return byOwner;
+}
+
 export async function buildPreviewQuestions(
   examQuestions: RawQuestionCandidate[],
   answerKey: Map<number, AnswerLetter>,
   identity: ExamIdentity,
   existingCodes: Set<string>,
-  existingFingerprints: Set<string>
+  existingFingerprints: Set<string>,
+  allVisualElements: RawVisualElement[] = []
 ): Promise<BuildPreviewQuestionsResult> {
   const globalWarnings: string[] = [];
   const seenFingerprintsInBatch = new Map<string, number>(); // fingerprint -> originalNumber da primeira ocorrência
@@ -85,6 +129,8 @@ export async function buildPreviewQuestions(
   for (const n of answeredNumbers) {
     if (!examNumbers.has(n)) globalWarnings.push(`Gabarito traz resposta para a questão ${n}, que não foi reconhecida na prova.`);
   }
+
+  const visualsByOwner = groupVisualElementsByOwner(allVisualElements, examQuestions);
 
   const items: PdfEnemPreviewQuestion[] = [];
   for (const q of examQuestions) {
@@ -115,11 +161,35 @@ export async function buildPreviewQuestions(
       seenFingerprintsInBatch.set(fingerprint, q.originalNumber);
     }
 
-    const visualReviewRequired = q.hasVisualContentOnPages;
-    if (visualReviewRequired) warnings.push("Possível elemento visual não extraído automaticamente.");
+    // Sprint 23, seções 6/11/12 da ordem — associação real por posição
+    // (nunca mais "a página tem algum traço"). Um elemento vetorial real
+    // (não-decorativo) SEMPRE bloqueia, mesmo sem nenhum bitmap. Uma
+    // imagem raster com falha de extração/posicionamento ambíguo também
+    // bloqueia — só uma imagem raster `extracted` com placement conhecido
+    // vira `hasPendingVisualConfirmation` (bloqueia `ready` automático,
+    // mas pode ser confirmada pelo editor antes do apply — nunca bloqueada
+    // permanentemente como o caso vetorial).
+    const ownedVisuals = visualsByOwner.get(q.originalNumber) ?? [];
+    const hasUnresolvedVisual = ownedVisuals.some(
+      (v) => v.kind === "vector_diagram" || v.extractionStatus !== "extracted" || v.placementCandidate === "unknown"
+    );
+    const hasPendingVisualConfirmation = !hasUnresolvedVisual && ownedVisuals.some((v) => v.kind === "raster" && v.extractionStatus === "extracted");
+    const visualReviewRequired = hasUnresolvedVisual;
+    if (visualReviewRequired) {
+      warnings.push("Conteúdo visual detectado (imagem ou diagrama vetorial) que não pôde ser extraído/posicionado com confiança — crie esta questão manualmente com a imagem anexada.");
+    } else if (hasPendingVisualConfirmation) {
+      warnings.push(`${ownedVisuals.length} imagem(ns) extraída(s) automaticamente — revise o posicionamento e preencha o texto alternativo antes de aplicar.`);
+    }
 
-    const status: PdfEnemQuestionStatus = structuralOk && correctAlternative !== null && duplicateStatus === "none" && !visualReviewRequired ? "ready" : "needs_review";
-    const canApply = status === "ready";
+    const status: PdfEnemQuestionStatus =
+      structuralOk && correctAlternative !== null && duplicateStatus === "none" && !visualReviewRequired && !hasPendingVisualConfirmation ? "ready" : "needs_review";
+    // `canApply` seção 11 — pendência de confirmação visual NUNCA impede o
+    // apply em si (o editor confirma NO PRÓPRIO fluxo de apply, seção 8/10
+    // da ordem), só `visualReviewRequired` (vetor/raster não resolvido)
+    // bloqueia de fato. `status==='ready'` continua controlando o rótulo
+    // exibido/o comportamento padrão de seleção — `canApply` é o que a
+    // rota realmente usa para permitir a seleção.
+    const canApply = structuralOk && correctAlternative !== null && duplicateStatus === "none" && !visualReviewRequired;
 
     items.push({
       // Determinístico (nunca aleatório) — o apply precisa correlacionar a
@@ -137,6 +207,8 @@ export async function buildPreviewQuestions(
       status,
       duplicateStatus,
       visualReviewRequired,
+      hasPendingVisualConfirmation,
+      visualElements: ownedVisuals,
       patternPrincipalId: null,
       canApply,
       code,

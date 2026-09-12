@@ -46,6 +46,8 @@ function buildPreviewResponse(overrides: Partial<{ questions: unknown[]; globalW
         status: "ready",
         duplicateStatus: "none",
         visualReviewRequired: false,
+        hasPendingVisualConfirmation: false,
+        visualElements: [],
         patternPrincipalId: null,
         canApply: true,
         code: "ENEM-2019-APLICACAO-REGULA-001",
@@ -69,6 +71,8 @@ function buildPreviewResponse(overrides: Partial<{ questions: unknown[]; globalW
         status: "needs_review",
         duplicateStatus: "none",
         visualReviewRequired: false,
+        hasPendingVisualConfirmation: false,
+        visualElements: [],
         patternPrincipalId: null,
         canApply: false,
         code: "ENEM-2019-APLICACAO-REGULA-002",
@@ -92,7 +96,7 @@ function mockApi(previewBody: unknown = buildPreviewResponse()) {
       if (url.includes("/api/editorial/patterns")) return new Response(JSON.stringify(PATTERNS_RESPONSE), { status: 200 });
       if (url.includes("/question-imports/pdf/preview")) return new Response(JSON.stringify(previewBody), { status: 200 });
       if (url.includes("/question-imports/pdf/apply")) {
-        return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-1"] }), { status: 200 });
+        return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-1"], imageUploadFailures: [] }), { status: 200 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     })
@@ -336,6 +340,8 @@ describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
       status: "needs_review",
       duplicateStatus: "none",
       visualReviewRequired: false,
+      hasPendingVisualConfirmation: false,
+      visualElements: [],
       patternPrincipalId: null,
       canApply: false,
       code: "ENEM-2019-APLICACAO-REGULA-003",
@@ -353,7 +359,7 @@ describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
         if (url.includes("/question-imports/pdf/apply")) {
           const form = init!.body as FormData;
           capturedApplyBody = form.get("selection") as string;
-          return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-3"] }), { status: 200 });
+          return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-3"], imageUploadFailures: [] }), { status: 200 });
         }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       })

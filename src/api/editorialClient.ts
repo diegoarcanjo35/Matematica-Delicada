@@ -464,6 +464,20 @@ export interface PdfPreviewAlternative {
   text: string;
 }
 
+/** Sprint 23 — metadado leve de UM elemento visual associado à questão
+ *  (imagem raster extraída OU diagrama vetorial detectado, nunca ambos
+ *  confundidos — `kind` distingue). `thumbnailDataUri` só existe na
+ *  RESPOSTA do preview (nunca persistido) — usado para a miniatura na UI.
+ *  Andreia NUNCA vê `sourceObjectId`/coordenadas técnicas (seção 8 da
+ *  ordem) — este tipo já omite tudo isso por não os incluir. */
+export interface PdfVisualElement {
+  hash: string;
+  kind: "raster" | "vector_diagram";
+  extractionStatus: "extracted" | "detected_not_extractable" | "ambiguous" | "ignored_decorative";
+  placementCandidate: "statement" | "option_A" | "option_B" | "option_C" | "option_D" | "option_E" | "unknown";
+  thumbnailDataUri?: string;
+}
+
 export interface PdfPreviewQuestion {
   tempId: string;
   originalNumber: number;
@@ -476,6 +490,12 @@ export interface PdfPreviewQuestion {
   status: "ready" | "needs_review";
   duplicateStatus: "none" | "exact";
   visualReviewRequired: boolean;
+  /** Sprint 23 — `true` quando há imagem(ns) raster extraída(s) com
+   *  sucesso aguardando confirmação de posicionamento + texto alternativo
+   *  antes do apply (ver `PdfVisualConfirmation`). Nunca junto com
+   *  `visualReviewRequired=true` — são mutuamente exclusivos. */
+  hasPendingVisualConfirmation: boolean;
+  visualElements: PdfVisualElement[];
   patternPrincipalId: string | null;
   canApply: boolean;
   code: string;
@@ -539,6 +559,17 @@ export async function previewPdfEnem(
   return request("/api/editorial/question-imports/pdf/preview", { method: "POST", body: form });
 }
 
+/** Sprint 23, seção 8/10 da ordem — confirmação editorial de UMA imagem
+ *  raster extraída. `elementHash` identifica o elemento (ver
+ *  `PdfVisualElement.hash`); `placement` NUNCA "unknown" aqui (o editor
+ *  escolhe uma posição real, ou a questão simplesmente não é
+ *  selecionada); `altText` sempre obrigatório e revalidado no backend. */
+export interface PdfVisualConfirmation {
+  elementHash: string;
+  placement: "statement" | "option_A" | "option_B" | "option_C" | "option_D" | "option_E";
+  altText: string;
+}
+
 export interface PdfApplySelectionEntry {
   originalNumber: number;
   patternPrincipalId: string;
@@ -547,6 +578,7 @@ export interface PdfApplySelectionEntry {
    *  aqui, propositalmente). */
   reviewedStatement?: string;
   reviewedAlternatives?: PdfPreviewAlternative[];
+  visualConfirmations?: PdfVisualConfirmation[];
 }
 
 /** Apply do PDF — mesma convenção do Pacote ZIP: os MESMOS dois `File`s já
@@ -558,7 +590,7 @@ export function applyPdfEnem(
   answerKeyPdf: File,
   identity: PdfExamIdentityInput,
   selection: PdfApplySelectionEntry[]
-): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[] }> {
+): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[]; imageUploadFailures: string[] }> {
   const form = new FormData();
   form.set("batchId", batchId);
   form.set("examPdf", examPdf);

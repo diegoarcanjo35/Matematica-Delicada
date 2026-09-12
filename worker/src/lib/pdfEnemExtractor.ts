@@ -35,6 +35,8 @@
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import "pdfjs-dist/legacy/build/pdf.worker.mjs";
+import { extractPageVisualElements, classifyDecorativeRasterElements, classifyDecorativeVectorCandidates, type RawVectorCandidate } from "./pdfEnemVisualExtractor";
+import type { RawVisualElement } from "./pdfEnemVisualModel";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.mjs";
 
@@ -72,7 +74,7 @@ export interface PdfPageText {
 }
 
 export type PdfExtractResult =
-  | { ok: true; pageCount: number; pages: PdfPageText[] }
+  | { ok: true; pageCount: number; pages: PdfPageText[]; visualElements: RawVisualElement[] }
   | { ok: false; reason: "invalid" | "too_large" | "too_many_pages" | "needs_ocr"; message: string };
 
 const VISUAL_OPS_TO_DETECT: number[] = [
@@ -199,6 +201,8 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
 
     const pages: PdfPageText[] = [];
     let totalNonWhitespaceChars = 0;
+    const rasterElements: RawVisualElement[] = [];
+    const vectorCandidates: RawVectorCandidate[] = [];
 
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
       const page = await doc.getPage(pageNumber);
@@ -221,6 +225,18 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
         for (const line of lines) totalNonWhitespaceChars += line.text.replace(/\s/g, "").length;
 
         pages.push({ pageNumber, width: viewport.width, height: viewport.height, lines, hasVisualContent });
+
+        // Sprint 23, seção 1 da ordem — extração visual roda NA MESMA
+        // passada, usando o MESMO `page`/`operatorList` já obtidos acima,
+        // ANTES de `page.cleanup()` (obrigatório: `page.objs` deixa de
+        // funcionar depois do cleanup). Uma segunda chamada a
+        // `doc.getPage()` funcionaria, mas reabrir o documento inteiro
+        // (`getDocument()` de novo) NÃO — o `data` de entrada é
+        // transferido/esvaziado pela primeira chamada (mesmo bug de buffer
+        // detachment documentado na Sprint 22 para o fingerprint SHA-256).
+        const visual = await extractPageVisualElements(page, operatorList, pageNumber);
+        rasterElements.push(...visual.rasterElements);
+        vectorCandidates.push(...visual.vectorCandidates);
       } finally {
         page.cleanup();
       }
@@ -234,7 +250,34 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
       };
     }
 
-    return { ok: true, pageCount: doc.numPages, pages };
+    // Seção 5/6 da ordem — decisão de "decorativo/estrutural" só é possível
+    // com o DOCUMENTO INTEIRO já extraído (precisa comparar entre páginas).
+    classifyDecorativeRasterElements(rasterElements, doc.numPages);
+    const decorativeVectorFingerprints = classifyDecorativeVectorCandidates(vectorCandidates, doc.numPages);
+    for (let vectorIndex = 0; vectorIndex < vectorCandidates.length; vectorIndex++) {
+      const candidate = vectorCandidates[vectorIndex];
+      if (decorativeVectorFingerprints.get(candidate.fingerprint)) continue;
+      // Candidatos vetoriais REAIS (não-decorativos) viram um elemento
+      // visual de baixa-fidelidade (sem pixels, sem PNG — seção 6: mesmo
+      // sem bitmap, força revisão) para poderem ser associados a uma
+      // questão pelo MESMO mecanismo de posição usado para raster
+      // (`pdfEnemVisualPlacement.ts`).
+      rasterElements.push({
+        id: `p${candidate.pageNumber}_vec_${vectorIndex}`,
+        pageNumber: candidate.pageNumber,
+        kind: "vector_diagram",
+        x: candidate.x,
+        y: candidate.y,
+        width: candidate.width,
+        height: candidate.height,
+        hash: candidate.fingerprint,
+        extractionStatus: "detected_not_extractable",
+        placementCandidate: "unknown",
+        warnings: [],
+      });
+    }
+
+    return { ok: true, pageCount: doc.numPages, pages, visualElements: rasterElements };
   } finally {
     await loadingTask.destroy();
   }

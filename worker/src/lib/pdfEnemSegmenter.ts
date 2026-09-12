@@ -37,6 +37,19 @@ const QUESTION_INLINE_RE = /^0*([1-9]\d{0,2})\s*[.\-–)]\s+(.*)$/;
    com outros formatos), mas nunca exigida. */
 const ALTERNATIVE_RE = /^([A-E])(?:\s*[.\-–)])?\s+(.+)$/;
 
+/** Sprint 23, seção 4 da ordem — extensão do modelo (texto puro,
+ *  `RawQuestionCandidate.statement`/`alternatives`, não muda) para também
+ *  reter ONDE (página + faixa Y) cada parte (enunciado ou UMA alternativa)
+ *  apareceu no PDF original — necessário para associar um elemento visual
+ *  (`pdfEnemVisualExtractor.ts`) à questão/alternativa certa por posição,
+ *  nunca por proximidade de página só. `minY`/`maxY` em espaço de página
+ *  PDF nativo (Y cresce para cima — mesma convenção de `PdfTextLine.y`). */
+export interface QuestionSlotLocation {
+  pageNumber: number;
+  minY: number;
+  maxY: number;
+}
+
 export interface RawQuestionCandidate {
   originalNumber: number;
   pageStart: number;
@@ -48,6 +61,12 @@ export interface RawQuestionCandidate {
   /** Seção 7 da ordem — preservado só para auditoria da prévia (nunca
    *  gravado em `questions`). */
   rawLineCount: number;
+  /** Uma ou mais entradas por página que o ENUNCIADO ocupa (pode ser vazio
+   *  se, por algum motivo, nenhuma linha de enunciado foi reconhecida). */
+  statementLocations: QuestionSlotLocation[];
+  /** Mesma ideia, por letra de alternativa — só letras efetivamente
+   *  reconhecidas em `alternatives` aparecem aqui. */
+  alternativeLocations: Partial<Record<(typeof EXPECTED_LETTERS)[number], QuestionSlotLocation[]>>;
 }
 
 export interface SegmentationResult {
@@ -58,6 +77,7 @@ export interface SegmentationResult {
 interface FlatLine {
   pageNumber: number;
   text: string;
+  y: number;
   hasVisualContent: boolean;
 }
 
@@ -65,10 +85,29 @@ function flattenPages(pages: PdfPageText[]): FlatLine[] {
   const flat: FlatLine[] = [];
   for (const page of pages) {
     for (const line of page.lines) {
-      flat.push({ pageNumber: page.pageNumber, text: line.text, hasVisualContent: page.hasVisualContent });
+      flat.push({ pageNumber: page.pageNumber, text: line.text, y: line.y, hasVisualContent: page.hasVisualContent });
     }
   }
   return flat;
+}
+
+/** Acumula (pageNumber -> [minY, maxY]) a partir de uma sequência de linhas
+ *  — usado para derivar `QuestionSlotLocation[]` de um "slot" (enunciado ou
+ *  UMA alternativa) que pode cruzar páginas. */
+function locationsFromLines(lines: FlatLine[]): QuestionSlotLocation[] {
+  const byPage = new Map<number, { minY: number; maxY: number }>();
+  for (const line of lines) {
+    const existing = byPage.get(line.pageNumber);
+    if (existing) {
+      existing.minY = Math.min(existing.minY, line.y);
+      existing.maxY = Math.max(existing.maxY, line.y);
+    } else {
+      byPage.set(line.pageNumber, { minY: line.y, maxY: line.y });
+    }
+  }
+  return Array.from(byPage.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([pageNumber, range]) => ({ pageNumber, minY: range.minY, maxY: range.maxY }));
 }
 
 /** `allowInline` — Sprint 22.1: o fallback "N." inline SÓ é considerado
@@ -105,23 +144,32 @@ function detectQuestionStart(text: string, allowInline: boolean): { number: numb
  *  cinco frases reais começarem, em sequência, exatamente com "A", "B",
  *  "C", "D" e "E" isolados é praticamente impossível em português
  *  corrido. */
-function splitStatementAndAlternatives(lines: string[]): {
+function splitStatementAndAlternatives(lines: FlatLine[]): {
   statement: string;
   alternatives: Array<{ letter: (typeof EXPECTED_LETTERS)[number]; text: string }>;
   warnings: string[];
+  statementLocations: QuestionSlotLocation[];
+  alternativeLocations: Partial<Record<(typeof EXPECTED_LETTERS)[number], QuestionSlotLocation[]>>;
 } {
   const warnings: string[] = [];
-  const statementLines: string[] = [];
+  const statementLines: FlatLine[] = [];
   const alternatives: Array<{ letter: (typeof EXPECTED_LETTERS)[number]; text: string }> = [];
-  let current: { letter: (typeof EXPECTED_LETTERS)[number]; parts: string[] } | null = null;
+  const alternativeLineGroups: Partial<Record<(typeof EXPECTED_LETTERS)[number], FlatLine[]>> = {};
+  let current: { letter: (typeof EXPECTED_LETTERS)[number]; parts: string[]; ownLines: FlatLine[] } | null = null;
   let nextExpectedIndex = 0; // índice em EXPECTED_LETTERS da próxima letra aceitável
 
+  const flushCurrent = () => {
+    if (!current) return;
+    alternatives.push({ letter: current.letter, text: current.parts.join(" ").trim() });
+    alternativeLineGroups[current.letter] = current.ownLines;
+  };
+
   for (const line of lines) {
-    const match = line.match(ALTERNATIVE_RE);
+    const match = line.text.match(ALTERNATIVE_RE);
     const letter = match ? (match[1] as (typeof EXPECTED_LETTERS)[number]) : null;
     if (letter && nextExpectedIndex < EXPECTED_LETTERS.length && letter === EXPECTED_LETTERS[nextExpectedIndex]) {
-      if (current) alternatives.push({ letter: current.letter, text: current.parts.join(" ").trim() });
-      current = { letter, parts: [match![2]] };
+      flushCurrent();
+      current = { letter, parts: [match![2]], ownLines: [line] };
       nextExpectedIndex += 1;
       continue;
     }
@@ -132,12 +180,17 @@ function splitStatementAndAlternatives(lines: string[]): {
     if (letter && current && letter === current.letter) {
       warnings.push("Letra de alternativa duplicada detectada.");
       current.parts.push(match![2]);
+      current.ownLines.push(line);
       continue;
     }
-    if (current) current.parts.push(line);
-    else statementLines.push(line);
+    if (current) {
+      current.parts.push(line.text);
+      current.ownLines.push(line);
+    } else {
+      statementLines.push(line);
+    }
   }
-  if (current) alternatives.push({ letter: current.letter, text: current.parts.join(" ").trim() });
+  flushCurrent();
 
   // Duplicata (mesma letra da alternativa em andamento) já foi detectada
   // e avisada dentro do laço acima. Construção por sequência estrita
@@ -147,7 +200,23 @@ function splitStatementAndAlternatives(lines: string[]): {
   if (alternatives.length !== 5) warnings.push(`Detectadas ${alternatives.length} alternativas (esperado exatamente 5).`);
   if (alternatives.some((a) => a.text.length === 0)) warnings.push("Uma ou mais alternativas ficaram com texto vazio.");
 
-  return { statement: statementLines.join(" ").replace(/\s+/g, " ").trim(), alternatives, warnings };
+  const alternativeLocations: Partial<Record<(typeof EXPECTED_LETTERS)[number], QuestionSlotLocation[]>> = {};
+  for (const letter of EXPECTED_LETTERS) {
+    const group = alternativeLineGroups[letter];
+    if (group) alternativeLocations[letter] = locationsFromLines(group);
+  }
+
+  return {
+    statement: statementLines
+      .map((l) => l.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim(),
+    alternatives,
+    warnings,
+    statementLocations: locationsFromLines(statementLines),
+    alternativeLocations,
+  };
 }
 
 /** Seção 7/8 da ordem — pipeline puro: linhas já extraídas por página →
@@ -164,7 +233,7 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
   // instruções da capa como se fossem questões).
   const hasAnyHeadingStyle = flat.some((line) => QUESTION_HEADING_RE.test(line.text));
 
-  type Block = { number: number; pageStart: number; lines: string[]; pages: Set<number> };
+  type Block = { number: number; pageStart: number; lines: FlatLine[]; pages: Set<number> };
   const blocks: Block[] = [];
   let current: Block | null = null;
 
@@ -172,11 +241,12 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
     const start = detectQuestionStart(line.text, !hasAnyHeadingStyle);
     if (start) {
       if (current) blocks.push(current);
-      current = { number: start.number, pageStart: line.pageNumber, lines: start.remainder ? [start.remainder] : [], pages: new Set([line.pageNumber]) };
+      const remainderLine: FlatLine[] = start.remainder ? [{ pageNumber: line.pageNumber, text: start.remainder, y: line.y, hasVisualContent: line.hasVisualContent }] : [];
+      current = { number: start.number, pageStart: line.pageNumber, lines: remainderLine, pages: new Set([line.pageNumber]) };
       continue;
     }
     if (current) {
-      current.lines.push(line.text);
+      current.lines.push(line);
       current.pages.add(line.pageNumber);
     }
     // Linhas ANTES da primeira questão detectada (capa, instruções) são
@@ -193,7 +263,7 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
   for (const b of blocks) seenNumbers.set(b.number, (seenNumbers.get(b.number) ?? 0) + 1);
 
   const questions: RawQuestionCandidate[] = blocks.map((block) => {
-    const { statement, alternatives, warnings } = splitStatementAndAlternatives(block.lines);
+    const { statement, alternatives, warnings, statementLocations, alternativeLocations } = splitStatementAndAlternatives(block.lines);
     const pageNumbers = Array.from(block.pages).sort((a, b) => a - b);
     const hasVisualContentOnPages = pageNumbers.some((p) => flat.some((l) => l.pageNumber === p && l.hasVisualContent));
 
@@ -214,6 +284,8 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
       hasVisualContentOnPages,
       warnings,
       rawLineCount: block.lines.length,
+      statementLocations,
+      alternativeLocations,
     };
   });
 

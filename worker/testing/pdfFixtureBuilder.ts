@@ -19,6 +19,51 @@ function pdfEscape(text: string): string {
  *  de texto (topo -> rodapé). Uma linha vazia ("") insere um espaçamento
  *  extra sem texto (nunca produz um TextItem). */
 export function buildFixturePdf(pages: string[][]): Uint8Array {
+  return buildFixturePdfWithVisuals(pages.map((lines) => ({ lines })));
+}
+
+/** Sprint 23 — imagem raster técnica embutida numa página (XObject
+ *  `/Subtype/Image`, sem filtro/compressão — bytes RGB crus, mais simples
+ *  de montar à mão e suficiente para o pdfjs-dist decodificar via
+ *  `page.objs`). `rgbBytes` precisa ter `width*height*3` valores, TODOS no
+ *  intervalo 0-127 (ASCII puro) — o builder inteiro monta o PDF como uma
+ *  STRING (`TextEncoder().encode` no final), então qualquer byte >= 128
+ *  seria reescrito como multi-byte UTF-8 e corromperia o stream; para uma
+ *  imagem técnica de teste isso nunca importa (não precisa ser uma cor
+ *  "real"). `afterLineIndex` posiciona o `Do` (comando de pintura) logo
+ *  após aquela linha de texto ser escrita — a imagem aparece na MESMA
+ *  vizinhança Y daquela linha, para testar associação por posição. */
+export interface FixtureImageSpec {
+  afterLineIndex: number;
+  width: number;
+  height: number;
+  rgbBytes: number[];
+  /** Deslocamento horizontal (pontos) a partir da margem padrão de texto
+   *  (x=40) — default 0. Tamanho de exibição = width/height em pontos
+   *  (escala 1:1, cada "pixel" ocupa 1pt — suficiente para testes). */
+  xOffset?: number;
+}
+
+/** Vetor técnico (retângulo com traçado) embutido numa página — gera um
+ *  `constructPath` real no operatorList do pdfjs-dist (mesma família de op
+ *  usada pelo detector de vetor). `afterLineIndex` mesma semântica de
+ *  `FixtureImageSpec`. */
+export interface FixtureVectorSpec {
+  afterLineIndex: number;
+  width: number;
+  height: number;
+  xOffset?: number;
+}
+
+export interface FixturePageSpec {
+  lines: string[];
+  images?: FixtureImageSpec[];
+  vectors?: FixtureVectorSpec[];
+}
+
+/** Versão completa do builder — `buildFixturePdf` é um atalho para quando
+ *  nenhuma página precisa de imagem/vetor embutido. */
+export function buildFixturePdfWithVisuals(pages: FixturePageSpec[]): Uint8Array {
   let objNum = 1;
   const catalogObj = objNum++;
   const pagesObj = objNum++;
@@ -26,6 +71,7 @@ export function buildFixturePdf(pages: string[][]): Uint8Array {
   const pageObjNums: number[] = [];
   const contentObjNums: number[] = [];
   const pageStreams: string[] = [];
+  const pageImageObjNums: number[][] = []; // por página: lista de objNums de imagem, na ordem de `images`
 
   for (const page of pages) {
     pageObjNums.push(objNum++);
@@ -33,12 +79,34 @@ export function buildFixturePdf(pages: string[][]): Uint8Array {
 
     let y = 780;
     const lines: string[] = ["BT", "/F1 10 Tf"];
-    for (const line of page) {
+    const imageObjNumsForPage: number[] = [];
+    for (let i = 0; i < page.lines.length; i++) {
+      const line = page.lines[i];
       if (line.length > 0) lines.push(`1 0 0 1 40 ${y} Tm (${pdfEscape(line)}) Tj`);
+
+      for (const img of page.images ?? []) {
+        if (img.afterLineIndex === i) {
+          const imgObjNum = objNum++; // reservado agora, objeto real emitido abaixo
+          imageObjNumsForPage.push(imgObjNum);
+          const imgIndex = imageObjNumsForPage.length - 1;
+          const x = 40 + (img.xOffset ?? 0);
+          const imgY = y - 2; // um pouco abaixo da linha, dentro da faixa da MESMA vizinhança Y.
+          lines.push(`ET\nq ${img.width} 0 0 ${img.height} ${x} ${imgY} cm /Im${imgIndex} Do Q\nBT\n/F1 10 Tf`);
+        }
+      }
+      for (const vec of page.vectors ?? []) {
+        if (vec.afterLineIndex === i) {
+          const x = 40 + (vec.xOffset ?? 0);
+          const vecY = y - 2;
+          lines.push(`ET\n${x} ${vecY} ${vec.width} ${vec.height} re S\nBT\n/F1 10 Tf`);
+        }
+      }
+
       y -= 14;
     }
     lines.push("ET");
     pageStreams.push(lines.join("\n"));
+    pageImageObjNums.push(imageObjNumsForPage);
   }
 
   let body = "";
@@ -46,11 +114,30 @@ export function buildFixturePdf(pages: string[][]): Uint8Array {
   const kids = pageObjNums.map((n) => `${n} 0 R`).join(" ");
   body += `${pagesObj} 0 obj<</Type/Pages/Kids[${kids}]/Count ${pageObjNums.length}>>endobj\n`;
   body += `${fontObj} 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n`;
+
   for (let i = 0; i < pageObjNums.length; i++) {
-    body += `${pageObjNums[i]} 0 obj<</Type/Page/Parent ${pagesObj} 0 R/Resources<</Font<</F1 ${fontObj} 0 R>>>>/MediaBox[0 0 612 842]/Contents ${contentObjNums[i]} 0 R>>endobj\n`;
+    const images = pages[i].images ?? [];
+    const imageObjNums = pageImageObjNums[i];
+    const xObjectEntries = imageObjNums.map((n, idx) => `/Im${idx} ${n} 0 R`).join(" ");
+    const resources = xObjectEntries.length > 0 ? `/Resources<</Font<</F1 ${fontObj} 0 R>>/XObject<<${xObjectEntries}>>>>` : `/Resources<</Font<</F1 ${fontObj} 0 R>>>>`;
+    body += `${pageObjNums[i]} 0 obj<</Type/Page/Parent ${pagesObj} 0 R${resources}/MediaBox[0 0 612 842]/Contents ${contentObjNums[i]} 0 R>>endobj\n`;
     const content = pageStreams[i];
     body += `${contentObjNums[i]} 0 obj<</Length ${content.length}>>\nstream\n${content}\nendstream\nendobj\n`;
+
+    for (let imgIdx = 0; imgIdx < images.length; imgIdx++) {
+      const img = images[imgIdx];
+      const objN = imageObjNums[imgIdx];
+      if (img.rgbBytes.length !== img.width * img.height * 3) {
+        throw new Error(`FixtureImageSpec: rgbBytes deve ter width*height*3 = ${img.width * img.height * 3} valores (recebeu ${img.rgbBytes.length}).`);
+      }
+      if (img.rgbBytes.some((b) => b < 0 || b > 127)) {
+        throw new Error("FixtureImageSpec: rgbBytes deve conter só valores 0-127 (ASCII puro — ver comentário do tipo).");
+      }
+      const pixelStream = String.fromCharCode(...img.rgbBytes);
+      body += `${objN} 0 obj<</Type/XObject/Subtype/Image/Width ${img.width}/Height ${img.height}/ColorSpace/DeviceRGB/BitsPerComponent 8/Length ${pixelStream.length}>>\nstream\n${pixelStream}\nendstream\nendobj\n`;
+    }
   }
+
   const pdf = `%PDF-1.4\n${body}trailer<</Size ${objNum}/Root ${catalogObj} 0 R>>\n%%EOF\n`;
   return new TextEncoder().encode(pdf);
 }
