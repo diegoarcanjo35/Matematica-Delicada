@@ -37,6 +37,9 @@ import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import { extractPageVisualElements, classifyDecorativeRasterElements, classifyDecorativeVectorCandidates, type RawVectorCandidate } from "./pdfEnemVisualExtractor";
 import type { RawVisualElement } from "./pdfEnemVisualModel";
+import { fusePageLines, looksTabularOcrRegion } from "./pdfEnemOcrFusion";
+import { MAX_OCR_PAGES_PER_BATCH, MAX_OCR_LINES_PER_PAGE, MAX_OCR_TEXT_LENGTH_PER_LINE } from "./pdfEnemOcrModel";
+import type { OcrPageInput, PageQualityDiagnostic, PageTextQualityState } from "./pdfEnemOcrModel";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.mjs";
 
@@ -44,19 +47,41 @@ export const PDF_MAX_BYTES = 40 * 1024 * 1024; // 40MB — generoso para um cade
 export const PDF_MAX_PAGES = 220; // ENEM tem no máximo ~90 páginas por caderno; folga ampla, nunca ilimitado.
 export const PDF_MAX_TEXT_ITEMS_PER_PAGE = 4000; // proteção contra PDF hostil com milhões de glifos por página.
 
-/** Seção 4 da ordem — limiar mínimo de texto REAL, em caracteres não-
- *  espaço, ACUMULADO no documento inteiro (nunca dividido por página) —
- *  um gabarito real e legítimo pode ser muito curto (poucas dezenas de
- *  linhas "136 C") e nunca deve disparar falso-positivo de needs_ocr só
- *  por ser um documento pequeno. Um PDF puramente escaneado (imagem da
- *  página, sem OCR) produz ZERO ou pouquíssimos caracteres via
- *  `getTextContent()`, não importa quantas páginas tenha — esse é o sinal
- *  real. Nunca usado por questão — só para o veredito GLOBAL needs_ocr. */
-const MIN_NON_WHITESPACE_CHARS_TOTAL = 10;
+/** Sprint 24, seção 3 da ordem — um glifo solto (ex.: um número de página
+ *  isolado, um artefato de fonte) nunca conta como "esta página tem texto
+ *  nativo real" — evita que uma página quase-em-branco-mas-tecnicamente-
+ *  com-um-caractere passe como `text_layer_good` por acidente. */
+const PAGE_TEXT_NOISE_FLOOR_CHARS = 2;
+
+/** Sprint 24, seção 3 da ordem — proporção mínima de páginas com texto real
+ *  (acima do piso de ruído acima) para o documento inteiro ser considerado
+ *  "nativo, funcionando" — páginas isoladas com zero/pouco texto nesse
+ *  contexto são tratadas como capa/folha em branco/página só-gráfica
+ *  LEGÍTIMAS (seção 3: "não exigir que toda página tenha texto"), nunca
+ *  disparam OCR sozinhas. Um documento ONDE A MAIORIA das páginas está
+ *  vazia é, ao contrário, o sinal real de PDF escaneado sem camada de
+ *  texto. Substitui o limiar antigo (Sprint 22), que olhava só o total
+ *  acumulado do documento inteiro — preserva o mesmo comportamento para um
+ *  gabarito curto e 100% nativo (qualquer página com texto real, por menor
+ *  que seja, nunca precisa de OCR) e para um PDF totalmente escaneado
+ *  (nenhuma página tem texto real → nenhuma passa), mas agora também
+ *  resolve OCR por página individual em documentos híbridos (seção 4). */
+const DOCUMENT_NATIVE_PROPORTION_THRESHOLD = 0.5;
 
 export interface PdfTextLine {
   y: number;
   text: string;
+  /** Sprint 24 — origem da linha. Ausente/`"native"` para todo o texto já
+   *  extraído nativamente (comportamento de todas as sprints anteriores,
+   *  nunca alterado); `"ocr"` só existe em linhas fundidas a partir de
+   *  `OcrPageInput` fornecido pelo cliente (seção 4/9/12 da ordem). Campo
+   *  OPCIONAL deliberadamente — nenhum código/teste existente que construía
+   *  `PdfTextLine` sem este campo precisa mudar. */
+  source?: "native" | "ocr";
+  /** Só presente quando `source==='ocr'` — confiança bruta do engine
+   *  (0-100). Nunca inventada para linhas nativas (ausência = confiança
+   *  total implícita do texto vetorial real do PDF). */
+  confidencePercent?: number;
 }
 
 export interface PdfPageText {
@@ -74,8 +99,8 @@ export interface PdfPageText {
 }
 
 export type PdfExtractResult =
-  | { ok: true; pageCount: number; pages: PdfPageText[]; visualElements: RawVisualElement[] }
-  | { ok: false; reason: "invalid" | "too_large" | "too_many_pages" | "needs_ocr"; message: string };
+  | { ok: true; pageCount: number; pages: PdfPageText[]; visualElements: RawVisualElement[]; pageDiagnostics: PageQualityDiagnostic[]; ocrWarnings: string[]; tabularPageNumbers: number[] }
+  | { ok: false; reason: "invalid" | "too_large" | "too_many_pages" | "needs_ocr"; message: string; pagesNeedingOcr?: number[] };
 
 const VISUAL_OPS_TO_DETECT: number[] = [
   pdfjsLib.OPS.paintImageXObject,
@@ -105,10 +130,34 @@ const VISUAL_OPS_TO_DETECT: number[] = [
  *  da coluna direita inteira — nunca misturado por Y global. Páginas sem
  *  vão central detectável (capa/instruções, que usam largura cheia)
  *  continuam no modo de coluna única anterior — nunca forçamos um corte
- *  onde não existe. */
+ *  onde não existe.
+ *
+ *  Sprint 24, seção 10 da ordem — investigação contra o PDF oficial 2019
+ *  (Caderno 7 Azul) encontrou um segundo bug real: em algumas páginas, um
+ *  valor solto de uma TABELA vizinha (ex.: um potencial de redução de uma
+ *  questão de química anterior) cai, por coincidência de arredondamento,
+ *  na MESMA faixa Y do item de cabeçalho "Questão N" seguinte — os dois
+ *  acabam no MESMO bucket e viram uma única linha fundida ("− −0,73
+ *  Questão 93"), que nunca bate no início com "QUESTÃO" e faz o cabeçalho
+ *  ser engolido pelo enunciado da questão anterior (mesma família de
+ *  sintoma de "QUESTÃO 149"/"QUESTÃO 172", mas causada por uma fusão
+ *  DENTRO da mesma coluna, não entre colunas). Corrigido na ORIGEM: um
+ *  item de texto cujo conteúdo PRÓPRIO (antes de qualquer fusão) já é
+ *  EXATAMENTE "Questão N" (nada mais — o formato real de heading do ENEM,
+ *  sempre um run de texto isolado) nunca entra no bucket compartilhado —
+ *  sempre vira sua própria linha, imune a qualquer colisão de Y com
+ *  conteúdo de outra origem. Nunca aplicado ao restante do texto (só ao
+ *  item que JÁ é, sozinho, um cabeçalho completo). */
+const ISOLATED_HEADING_RE = /^QUEST(?:ÃO|AO)\s+0*[1-9]\d{0,2}$/i;
+
 function groupItemsByY(items: Array<{ x: number; y: number; str: string }>): PdfTextLine[] {
   const buckets = new Map<number, Array<{ x: number; str: string }>>();
+  const isolatedHeadingLines: PdfTextLine[] = [];
   for (const item of items) {
+    if (ISOLATED_HEADING_RE.test(item.str.trim())) {
+      isolatedHeadingLines.push({ y: item.y, text: item.str.trim() });
+      continue;
+    }
     const y = item.y;
     let bucketKey = y;
     for (const existingKey of buckets.keys()) {
@@ -121,7 +170,7 @@ function groupItemsByY(items: Array<{ x: number; y: number; str: string }>): Pdf
     if (bucket) bucket.push(item);
     else buckets.set(bucketKey, [item]);
   }
-  const lines: PdfTextLine[] = [];
+  const lines: PdfTextLine[] = [...isolatedHeadingLines];
   for (const [y, parts] of buckets.entries()) {
     parts.sort((a, b) => a.x - b.x);
     const text = parts
@@ -135,25 +184,73 @@ function groupItemsByY(items: Array<{ x: number; y: number; str: string }>): Pdf
   return lines;
 }
 
-/** Procura o maior vão vazio de posições X no terço central da página —
- *  sinal de um gutter real entre duas colunas impressas. `null` quando
- *  nenhum vão suficientemente largo existe (página de coluna única).
- *  Nunca um corte fixo hardcoded — sempre derivado dos dados reais da
- *  própria página. */
+/** Sprint 24, seção 10 da ordem — investigação real contra o PDF oficial
+ *  ENEM 2019 (Caderno 7 Azul) encontrou a causa raiz de "QUESTÃO 149" e
+ *  "QUESTÃO 172" nunca serem detectadas: a versão anterior (Sprint 22.1)
+ *  procurava o MAIOR VÃO VAZIO entre posições X adjacentes na faixa
+ *  central da página. Na página real, um diagrama embutido na questão
+ *  ANTERIOR (rótulos como "d = 40 cm", "sendo que", "π.") tem suas
+ *  legendas de texto espalhadas horizontalmente exatamente na faixa onde
+ *  o gutter deveria estar — isso fragmenta qualquer vão único grande o
+ *  bastante para passar do limiar, e o algoritmo concluía "página de
+ *  coluna única", fundindo o cabeçalho "Questão 149" (coluna direita) na
+ *  MESMA linha lida do cabeçalho "Questão 147" (coluna esquerda) — a causa
+ *  exata do cabeçalho nunca ser reconhecido como início de questão.
+ *
+ *  Correção estrutural (nunca por página/conteúdo específico, nunca uma
+ *  lista de exceções): em vez do maior vão isolado, procura a posição X
+ *  que MAIS SE REPETE em cada metade da página. A margem de uma coluna de
+ *  texto corrido real é usada por DEZENAS de linhas (cada nova linha da
+ *  mesma coluna começa exatamente no mesmo X); uma legenda de diagrama
+ *  aparece isolada, quase sempre num X que nunca se repete. Um rótulo
+ *  perdido no meio da página nunca vence duas margens de coluna genuínas
+ *  nesta contagem de frequência — robusto a ruído sem precisar conhecer o
+ *  conteúdo da página. `null` quando nenhuma das duas metades tem uma
+ *  margem repetida com confiança (página de coluna única). */
 function detectColumnGutter(xs: number[], pageWidth: number): number | null {
   if (xs.length < 10 || pageWidth <= 0) return null;
-  const sorted = [...xs].sort((a, b) => a - b);
-  let bestGapMid: number | null = null;
-  let bestGapSize = 0;
-  for (let i = 1; i < sorted.length; i++) {
-    const gap = sorted[i] - sorted[i - 1];
-    const mid = (sorted[i] + sorted[i - 1]) / 2;
-    if (mid > pageWidth * 0.35 && mid < pageWidth * 0.65 && gap > bestGapSize) {
-      bestGapSize = gap;
-      bestGapMid = mid;
+
+  const frequency = new Map<number, number>();
+  for (const x of xs) {
+    const bucket = Math.round(x); // tolera jitter de sub-ponto do PDF; nunca agrupa margens realmente distintas.
+    frequency.set(bucket, (frequency.get(bucket) ?? 0) + 1);
+  }
+
+  const half = pageWidth / 2;
+  let leftX: number | null = null;
+  let leftCount = 0;
+  let rightX: number | null = null;
+  let rightCount = 0;
+  for (const [x, count] of frequency.entries()) {
+    if (x < half && count > leftCount) {
+      leftCount = count;
+      leftX = x;
+    }
+    if (x >= half && count > rightCount) {
+      rightCount = count;
+      rightX = x;
     }
   }
-  return bestGapSize > pageWidth * 0.03 ? bestGapMid : null;
+
+  // Exige repetição real (uma margem de coluna genuína é usada por várias
+  // linhas) — descarta qualquer "moda" acidental de 1-2 itens soltos (ex.:
+  // uma legenda de diagrama que por acaso repete um X duas vezes).
+  const MIN_MARGIN_REPETITION = 3;
+  if (leftX === null || rightX === null || leftCount < MIN_MARGIN_REPETITION || rightCount < MIN_MARGIN_REPETITION) return null;
+
+  // Sprint 24 — a margem esquerda "real" de uma coluna pode ter mais de um
+  // valor legítimo (texto corrido vs. marcador de alternativa indentado
+  // diferente, por exemplo x=30 vs x=40) — o ponto médio entre as duas
+  // MARGENS INICIAIS (nunca entre onde o texto "termina") não precisa cair
+  // perto do centro geométrico da página; só precisa separar corretamente
+  // os itens de cada lado. `leftX`/`rightX` já são, por construção, um de
+  // cada metade da página — só resta uma checagem ampla contra um split
+  // absurdo (ex.: bem na margem física da página) e uma separação mínima
+  // real entre as duas margens.
+  if (rightX - leftX <= pageWidth * 0.03) return null; // margens grudadas demais para serem duas colunas reais.
+  const mid = (leftX + rightX) / 2;
+  if (mid <= pageWidth * 0.1 || mid >= pageWidth * 0.9) return null;
+  return mid;
 }
 
 function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>, pageWidth: number): PdfTextLine[] {
@@ -166,11 +263,69 @@ function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>,
   return [...groupItemsByY(left), ...groupItemsByY(right)];
 }
 
-export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResult> {
+function nonWhitespaceCharCount(lines: PdfTextLine[]): number {
+  let total = 0;
+  for (const line of lines) total += line.text.replace(/\s/g, "").length;
+  return total;
+}
+
+/** Sprint 24, seção 3 da ordem — classifica CADA página do documento já
+ *  extraído (só camada nativa) em um estado de qualidade de texto, usando
+ *  o CONTEXTO do documento inteiro (nunca um limiar isolado por página) —
+ *  ver comentário de `DOCUMENT_NATIVE_PROPORTION_THRESHOLD` acima. Função
+ *  pura, sem I/O — testável isoladamente. */
+export function classifyPageTextQuality(pages: PdfPageText[]): PageQualityDiagnostic[] {
+  const raw = pages.map((p) => ({ pageNumber: p.pageNumber, chars: nonWhitespaceCharCount(p.lines), hasVisualContent: p.hasVisualContent }));
+  const totalPages = raw.length;
+  const substantivePages = raw.filter((p) => p.chars > PAGE_TEXT_NOISE_FLOOR_CHARS).length;
+  const documentLooksNative = totalPages > 0 && substantivePages / totalPages >= DOCUMENT_NATIVE_PROPORTION_THRESHOLD;
+
+  return raw.map((p) => {
+    if (p.chars > PAGE_TEXT_NOISE_FLOOR_CHARS) {
+      return { pageNumber: p.pageNumber, state: "text_layer_good" as const, nonWhitespaceChars: p.chars, hasVisualContent: p.hasVisualContent, ocrApplied: false };
+    }
+    // Seção 3 da ordem — "existência de conteúdo visual/renderizado sem
+    // texto correspondente" é sinal FORTE de página fotografada/escaneada
+    // (uma imagem cheia de página, sem nenhum texto real) — sempre
+    // `needs_ocr`, mesmo num documento cujas outras páginas estejam ótimas
+    // (nunca "diluído" pela proporção do documento: ao contrário de uma
+    // capa/página em branco de verdade, aqui HÁ conteúdo renderizado, só
+    // não tem texto — exatamente o padrão que esta sprint existe para
+    // tratar). Só a ausência de QUALQUER conteúdo (nem texto, nem visual)
+    // é que pode ser uma página legitimamente em branco/divisória — aí sim
+    // o contexto do documento decide.
+    if (p.hasVisualContent) {
+      return { pageNumber: p.pageNumber, state: "needs_ocr" as const, nonWhitespaceChars: p.chars, hasVisualContent: p.hasVisualContent, ocrApplied: false };
+    }
+    if (documentLooksNative) {
+      return { pageNumber: p.pageNumber, state: "text_layer_good" as const, nonWhitespaceChars: p.chars, hasVisualContent: p.hasVisualContent, ocrApplied: false };
+    }
+    const state: PageTextQualityState = p.chars > 0 ? "text_layer_partial" : "needs_ocr";
+    return { pageNumber: p.pageNumber, state, nonWhitespaceChars: p.chars, hasVisualContent: p.hasVisualContent, ocrApplied: false };
+  });
+}
+
+export async function extractPdfPages(bytes: Uint8Array, ocrPages?: OcrPageInput[]): Promise<PdfExtractResult> {
   if (bytes.byteLength === 0) return { ok: false, reason: "invalid", message: "Arquivo PDF vazio." };
   if (bytes.byteLength > PDF_MAX_BYTES) {
     return { ok: false, reason: "too_large", message: `PDF excede o limite de ${PDF_MAX_BYTES} bytes.` };
   }
+  // Seção 19 da ordem — revalidação fail-closed do lado do worker, nunca
+  // confia só no cliente ter respeitado os próprios limites de OCR.
+  if (ocrPages && ocrPages.length > MAX_OCR_PAGES_PER_BATCH) {
+    return { ok: false, reason: "invalid", message: `Envio de OCR excede o limite de ${MAX_OCR_PAGES_PER_BATCH} páginas por lote.` };
+  }
+  for (const page of ocrPages ?? []) {
+    if (page.lines.length > MAX_OCR_LINES_PER_PAGE) {
+      return { ok: false, reason: "invalid", message: `Página ${page.pageNumber} do OCR excede o limite de ${MAX_OCR_LINES_PER_PAGE} linhas.` };
+    }
+    for (const line of page.lines) {
+      if (line.text.length > MAX_OCR_TEXT_LENGTH_PER_LINE) {
+        return { ok: false, reason: "invalid", message: `Uma linha de OCR na página ${page.pageNumber} excede o limite de ${MAX_OCR_TEXT_LENGTH_PER_LINE} caracteres.` };
+      }
+    }
+  }
+  const ocrPagesByNumber = new Map<number, OcrPageInput>((ocrPages ?? []).map((p) => [p.pageNumber, p]));
 
   const loadingTask = pdfjsLib.getDocument({
     data: bytes,
@@ -200,7 +355,6 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
     }
 
     const pages: PdfPageText[] = [];
-    let totalNonWhitespaceChars = 0;
     const rasterElements: RawVisualElement[] = [];
     const vectorCandidates: RawVectorCandidate[] = [];
 
@@ -222,8 +376,6 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
           }
         }
 
-        for (const line of lines) totalNonWhitespaceChars += line.text.replace(/\s/g, "").length;
-
         pages.push({ pageNumber, width: viewport.width, height: viewport.height, lines, hasVisualContent });
 
         // Sprint 23, seção 1 da ordem — extração visual roda NA MESMA
@@ -242,11 +394,47 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
       }
     }
 
-    if (totalNonWhitespaceChars < MIN_NON_WHITESPACE_CHARS_TOTAL) {
+    // Sprint 24, seções 2/3/4/9 da ordem — pipeline "tentar nativo →
+    // medir qualidade → só se insuficiente, OCR", agora POR PÁGINA (nunca
+    // mais um veredito único para o documento inteiro). Páginas cujo
+    // estado não é `text_layer_good` e para as quais o cliente ainda não
+    // enviou OCR ficam pendentes — o documento inteiro só falha com
+    // `needs_ocr` quando SOBRA pelo menos uma página pendente ao final
+    // desta passada (permite documentos híbridos: algumas páginas boas,
+    // outras precisando de OCR, seção 4 da ordem).
+    const pageDiagnostics = classifyPageTextQuality(pages);
+    const pagesNeedingOcr: number[] = [];
+    const ocrWarnings: string[] = [];
+    const tabularPageNumbers: number[] = [];
+
+    for (let i = 0; i < pages.length; i++) {
+      const diagnostic = pageDiagnostics[i];
+      if (diagnostic.state === "text_layer_good") continue;
+
+      const ocrPage = ocrPagesByNumber.get(diagnostic.pageNumber);
+      if (!ocrPage || ocrPage.lines.length === 0) {
+        pagesNeedingOcr.push(diagnostic.pageNumber);
+        continue;
+      }
+
+      const fusion = fusePageLines(pages[i].lines, ocrPage.lines);
+      pages[i] = { ...pages[i], lines: fusion.lines };
+      diagnostic.ocrApplied = true;
+      if (fusion.hasAmbiguousOverlap) {
+        ocrWarnings.push(`Página ${diagnostic.pageNumber}: texto OCR sobreposto de forma ambígua ao texto nativo — revisar linhas dessa região.`);
+      }
+      if (looksTabularOcrRegion(ocrPage.lines)) {
+        ocrWarnings.push(`Página ${diagnostic.pageNumber}: conteúdo reconhecido por OCR tem formato de tabela — revisão manual necessária (nunca convertido automaticamente).`);
+        tabularPageNumbers.push(diagnostic.pageNumber);
+      }
+    }
+
+    if (pagesNeedingOcr.length > 0) {
       return {
         ok: false,
         reason: "needs_ocr",
-        message: "Este PDF parece ser digitalizado e precisa de OCR. Ainda não pode ser importado automaticamente.",
+        message: `Este PDF tem ${pagesNeedingOcr.length} página(s) sem camada de texto utilizável (parecem digitalizadas). Reconheça o texto dessas páginas antes de continuar.`,
+        pagesNeedingOcr,
       };
     }
 
@@ -277,7 +465,7 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
       });
     }
 
-    return { ok: true, pageCount: doc.numPages, pages, visualElements: rasterElements };
+    return { ok: true, pageCount: doc.numPages, pages, visualElements: rasterElements, pageDiagnostics, ocrWarnings, tabularPageNumbers };
   } finally {
     await loadingTask.destroy();
   }

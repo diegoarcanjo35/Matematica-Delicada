@@ -12,6 +12,7 @@ import type { ExamIdentity } from "./pdfEnemExamIdentity";
 import { computeQuestionFingerprint } from "./fingerprint";
 import { placeVisualElement } from "./pdfEnemVisualPlacement";
 import type { RawVisualElement } from "./pdfEnemVisualModel";
+import { detectSuspiciousMathText } from "./pdfEnemOcrModel";
 
 export type PdfEnemQuestionStatus = "ready" | "needs_review";
 export type PdfEnemDuplicateStatus = "none" | "exact";
@@ -55,6 +56,11 @@ export interface PdfEnemPreviewQuestion {
   canApply: boolean;
   code: string;
   fingerprint: string;
+  /** Sprint 24, seção 15 da ordem — `true` quando qualquer parte desta
+   *  questão veio de OCR (cabeçalho, enunciado ou alternativa) — a UI
+   *  mostra "Texto reconhecido por OCR" de forma neutra (nunca um score
+   *  técnico). Confiança baixa em elemento crítico já vira `warnings`. */
+  hasOcrText: boolean;
 }
 
 export interface BuildPreviewQuestionsResult {
@@ -119,7 +125,12 @@ export async function buildPreviewQuestions(
   identity: ExamIdentity,
   existingCodes: Set<string>,
   existingFingerprints: Set<string>,
-  allVisualElements: RawVisualElement[] = []
+  allVisualElements: RawVisualElement[] = [],
+  /** Sprint 24, seção 14 da ordem — páginas onde OCR detectou conteúdo com
+   *  formato de tabela (`pdfEnemOcrFusion.ts:looksTabularOcrRegion`). Toda
+   *  questão que toca uma dessas páginas nunca fica `ready` automaticamente
+   *  — tabela complexa exige revisão manual, nunca "achatada" em texto. */
+  tabularPageNumbers: number[] = []
 ): Promise<BuildPreviewQuestionsResult> {
   const globalWarnings: string[] = [];
   const seenFingerprintsInBatch = new Map<string, number>(); // fingerprint -> originalNumber da primeira ocorrência
@@ -131,10 +142,40 @@ export async function buildPreviewQuestions(
   }
 
   const visualsByOwner = groupVisualElementsByOwner(allVisualElements, examQuestions);
+  const tabularPages = new Set(tabularPageNumbers);
 
   const items: PdfEnemPreviewQuestion[] = [];
   for (const q of examQuestions) {
     const warnings = [...q.warnings];
+
+    // Seção 14 da ordem — qualquer página tocada por esta questão com
+    // formato de tabela reconhecido por OCR bloqueia `ready`/`canApply`
+    // PERMANENTEMENTE (mesma força de `visualReviewRequired` abaixo) —
+    // nunca "achatada" em texto e considerada pronta.
+    let hasTabularContent = false;
+    for (let page = q.pageStart; page <= q.pageEnd; page++) {
+      if (tabularPages.has(page)) {
+        warnings.push(`Conteúdo com formato de tabela reconhecido por OCR na página ${page} — revisão manual necessária, nunca aplicado automaticamente.`);
+        hasTabularContent = true;
+        break;
+      }
+    }
+
+    // Seção 11 da ordem — só quando esta questão tem texto OCR: aponta
+    // suspeita estrutural de símbolo matemático perdido (nunca corrige).
+    // Mais fraco que `hasTabularContent`: força revisão (`status`), mas
+    // nunca impede o apply em si — o editor pode confirmar o texto OCR
+    // como está ou corrigi-lo via `reviewedStatement`/`reviewedAlternatives`.
+    let hasMathSuspicion = false;
+    if (q.hasOcrText) {
+      const suspectTexts = [q.statement, ...q.alternatives.map((a) => a.text)];
+      const suspects = new Set<string>();
+      for (const text of suspectTexts) {
+        for (const s of detectSuspiciousMathText(text)) suspects.add(s);
+      }
+      for (const s of suspects) warnings.push(`Possível símbolo matemático perdido pelo OCR: ${s}.`);
+      hasMathSuspicion = suspects.size > 0;
+    }
     const structuralOk =
       q.warnings.length === 0 &&
       q.alternatives.length === 5 &&
@@ -182,14 +223,24 @@ export async function buildPreviewQuestions(
     }
 
     const status: PdfEnemQuestionStatus =
-      structuralOk && correctAlternative !== null && duplicateStatus === "none" && !visualReviewRequired && !hasPendingVisualConfirmation ? "ready" : "needs_review";
-    // `canApply` seção 11 — pendência de confirmação visual NUNCA impede o
-    // apply em si (o editor confirma NO PRÓPRIO fluxo de apply, seção 8/10
-    // da ordem), só `visualReviewRequired` (vetor/raster não resolvido)
-    // bloqueia de fato. `status==='ready'` continua controlando o rótulo
+      structuralOk &&
+      correctAlternative !== null &&
+      duplicateStatus === "none" &&
+      !visualReviewRequired &&
+      !hasPendingVisualConfirmation &&
+      !hasTabularContent &&
+      !hasMathSuspicion
+        ? "ready"
+        : "needs_review";
+    // `canApply` seção 11 — pendência de confirmação visual e suspeita de
+    // símbolo matemático NUNCA impedem o apply em si (o editor confirma/
+    // corrige no próprio fluxo, seção 8/10/16 da ordem); só
+    // `visualReviewRequired` (vetor/raster não resolvido) e
+    // `hasTabularContent` (seção 14 — tabela nunca aplicada automaticamente)
+    // bloqueiam de fato. `status==='ready'` continua controlando o rótulo
     // exibido/o comportamento padrão de seleção — `canApply` é o que a
     // rota realmente usa para permitir a seleção.
-    const canApply = structuralOk && correctAlternative !== null && duplicateStatus === "none" && !visualReviewRequired;
+    const canApply = structuralOk && correctAlternative !== null && duplicateStatus === "none" && !visualReviewRequired && !hasTabularContent;
 
     items.push({
       // Determinístico (nunca aleatório) — o apply precisa correlacionar a
@@ -213,6 +264,7 @@ export async function buildPreviewQuestions(
       canApply,
       code,
       fingerprint,
+      hasOcrText: q.hasOcrText,
     });
   }
 

@@ -18,6 +18,7 @@ import {
   type PackageError,
   type PdfApplySelectionEntry,
   type PdfExamIdentityInput,
+  type PdfOcrPageInput,
   type PdfPreviewQuestion,
   type PdfVisualConfirmation,
   type PreviewImportResponse,
@@ -26,6 +27,7 @@ import {
 } from "../../api/editorialClient";
 import { useEditorialRole } from "../../auth/editorialRoleContext";
 import { buildPackageThumbnails } from "./packageZip";
+import type { OcrProgressEvent } from "./pdfOcr";
 import "./editorial.css";
 
 /* Importação de questões — /editorial/importacoes, Sprint 19 da ordem,
@@ -560,6 +562,16 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   // Matemática). Sempre um checkbox comum, sempre desmarcável.
   const [mathOnlyFilter, setMathOnlyFilter] = useState(false);
 
+  // Sprint 24, seções 2/4/9/17/21/22 da ordem — OCR já reconhecido no
+  // navegador (nunca refeito pelo worker), acumulado por página conforme o
+  // preview vai sinalizando quais páginas precisam — reenviado tanto nas
+  // tentativas seguintes de preview QUANTO no apply (mesmo princípio de
+  // "nunca confia no preview persistido" já usado para os bytes do PDF).
+  const [examOcrPages, setExamOcrPages] = useState<PdfOcrPageInput[]>([]);
+  const [answerKeyOcrPages, setAnswerKeyOcrPages] = useState<PdfOcrPageInput[]>([]);
+  const [ocrProgress, setOcrProgress] = useState<OcrProgressEvent | null>(null);
+  const ocrAbortRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     fetchEditorialPatterns()
       .then((r) => setPatterns(r.patterns.filter((p) => p.editorialStatus === "published")))
@@ -570,6 +582,17 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
     return { year: Number(year), application, booklet, sourceUrl: sourceUrl || undefined };
   }
 
+  function handleCancelOcr() {
+    ocrAbortRef.current?.abort();
+  }
+
+  // Seção 2/4/9 da ordem — loop curto e finito (nunca infinito): cada
+  // tentativa de preview pode voltar sinalizando UMA face (prova OU
+  // gabarito) precisando de OCR; reconhece SÓ as páginas pedidas, acumula,
+  // e tenta de novo — até um máximo de tentativas (nunca um PDF real tem
+  // mais que 2-3 rodadas: prova, depois gabarito, no pior caso).
+  const MAX_PREVIEW_OCR_ROUNDS = 6;
+
   async function handleGeneratePreview() {
     if (!examFile || !answerKeyFile) return;
     setBusy(true);
@@ -578,27 +601,68 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
     setApplyResult(null);
     setUndoResult(null);
     setFinalConfirmChecked(false);
+    setOcrProgress(null);
+    let currentExamOcrPages = examOcrPages;
+    let currentAnswerKeyOcrPages = answerKeyOcrPages;
     try {
-      const result = await previewPdfEnem(examFile, answerKeyFile, currentIdentity(), confirmed);
-      setPreview(result);
-      setMathOnlyFilter(result.documentIdentityCheck?.examDetected.day === 2);
-      const initialSelection = new Map<number, PdfSelectionState>();
-      for (const q of result.questions) {
-        const editedAlternatives: PdfSelectionState["editedAlternatives"] = { A: "", B: "", C: "", D: "", E: "" };
-        for (const a of q.alternatives) editedAlternatives[a.letter] = a.text;
-        initialSelection.set(q.originalNumber, {
-          included: q.canApply && !q.hasPendingVisualConfirmation,
-          patternPrincipalId: "",
-          editing: false,
-          editedStatement: q.statement,
-          editedAlternatives,
-          visualConfirmations: {},
-        });
+      for (let round = 0; round < MAX_PREVIEW_OCR_ROUNDS; round++) {
+        try {
+          const result = await previewPdfEnem(examFile, answerKeyFile, currentIdentity(), confirmed, currentExamOcrPages, currentAnswerKeyOcrPages);
+          setPreview(result);
+          setMathOnlyFilter(result.documentIdentityCheck?.examDetected.day === 2);
+          const initialSelection = new Map<number, PdfSelectionState>();
+          for (const q of result.questions) {
+            const editedAlternatives: PdfSelectionState["editedAlternatives"] = { A: "", B: "", C: "", D: "", E: "" };
+            for (const a of q.alternatives) editedAlternatives[a.letter] = a.text;
+            initialSelection.set(q.originalNumber, {
+              included: q.canApply && !q.hasPendingVisualConfirmation,
+              patternPrincipalId: "",
+              editing: false,
+              editedStatement: q.statement,
+              editedAlternatives,
+              visualConfirmations: {},
+            });
+          }
+          setSelection(initialSelection);
+          return;
+        } catch (err) {
+          if (!(err instanceof EditorialApiError) || (err.code !== "pdf_needs_ocr_exam" && err.code !== "pdf_needs_ocr_answer_key")) {
+            throw err;
+          }
+          const isExam = err.code === "pdf_needs_ocr_exam";
+          const targetFile = isExam ? examFile : answerKeyFile;
+          const controller = new AbortController();
+          ocrAbortRef.current = controller;
+          const bytes = new Uint8Array(await targetFile.arrayBuffer());
+          // Seção 1/2 da ordem — import DINÂMICO: tesseract.js (e seu
+          // glue code) só entra no bundle do navegador quando pelo menos
+          // uma página REALMENTE precisa de OCR — nunca no chunk principal
+          // carregado por toda visita à página de importação.
+          const { runOcrOnPages } = await import("./pdfOcr");
+          const recognized = await runOcrOnPages(bytes, err.pagesNeedingOcr, {
+            signal: controller.signal,
+            onProgress: (event) => setOcrProgress(event),
+          });
+          ocrAbortRef.current = null;
+          if (isExam) {
+            currentExamOcrPages = recognized;
+            setExamOcrPages(recognized);
+          } else {
+            currentAnswerKeyOcrPages = recognized;
+            setAnswerKeyOcrPages(recognized);
+          }
+        }
       }
-      setSelection(initialSelection);
+      setError("Este PDF precisou de reconhecimento de OCR em muitas rodadas seguidas — revise os arquivos selecionados.");
     } catch (err) {
-      setError(err instanceof EditorialApiError ? err.message : "Não foi possível gerar a prévia deste PDF.");
+      if (err instanceof Error && err.name === "OcrCancelledError") {
+        setError("Reconhecimento de OCR cancelado.");
+      } else {
+        setError(err instanceof EditorialApiError ? err.message : "Não foi possível gerar a prévia deste PDF.");
+      }
     } finally {
+      setOcrProgress(null);
+      ocrAbortRef.current = null;
       setBusy(false);
     }
   }
@@ -685,7 +749,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
             }
           : {}),
       }));
-      const result = await applyPdfEnem(preview.batchId, examFile, answerKeyFile, currentIdentity(), selectionPayload);
+      const result = await applyPdfEnem(preview.batchId, examFile, answerKeyFile, currentIdentity(), selectionPayload, examOcrPages, answerKeyOcrPages);
       setApplyResult(result);
     } catch (err) {
       setError(err instanceof EditorialApiError ? err.message : "Não foi possível aplicar esta importação.");
@@ -719,7 +783,12 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           id="pdf-exam-file"
           type="file"
           accept="application/pdf,.pdf"
-          onChange={(e) => setExamFile(e.target.files?.[0] ?? null)}
+          onChange={(e) => {
+            setExamFile(e.target.files?.[0] ?? null);
+            // Seção 4 da ordem — um arquivo NOVO invalida qualquer OCR já
+            // reconhecido para o arquivo anterior (páginas diferentes).
+            setExamOcrPages([]);
+          }}
           disabled={busy}
         />
         <label htmlFor="pdf-answerkey-file" className="editorial__field-label">
@@ -729,7 +798,10 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           id="pdf-answerkey-file"
           type="file"
           accept="application/pdf,.pdf"
-          onChange={(e) => setAnswerKeyFile(e.target.files?.[0] ?? null)}
+          onChange={(e) => {
+            setAnswerKeyFile(e.target.files?.[0] ?? null);
+            setAnswerKeyOcrPages([]);
+          }}
           disabled={busy}
         />
       </Card>
@@ -777,6 +849,14 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
             Gerar prévia
           </Button>
         </div>
+        {ocrProgress && (
+          <div className="editorial__ocr-progress" role="status">
+            <p>{ocrProgress.message}</p>
+            <Button type="button" variant="secondary" onClick={handleCancelOcr}>
+              Cancelar OCR
+            </Button>
+          </div>
+        )}
       </Card>
 
       {error && <ErrorState description={error} />}
@@ -815,6 +895,9 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
                   <p className="editorial__package-question-header">
                     <strong>Questão {q.originalNumber}</strong> — Página {q.pageStart === q.pageEnd ? q.pageStart : `${q.pageStart}-${q.pageEnd}`}{" "}
                     <span>{badge}</span>
+                    {q.hasOcrText && (
+                      <span className="editorial__ocr-badge">{q.warnings.length > 0 ? "OCR — revisar" : "Texto reconhecido por OCR"}</span>
+                    )}
                   </p>
 
                   {sel.editing ? (

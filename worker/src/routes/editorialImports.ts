@@ -22,6 +22,8 @@ import {
   type PdfApplySelectionEntry,
 } from "../services/questionPdfImportService";
 import type { VisualPlacementCandidate } from "../lib/pdfEnemVisualModel";
+import type { OcrPageInput } from "../lib/pdfEnemOcrModel";
+import { MAX_OCR_PAGES_PER_BATCH, MAX_OCR_LINES_PER_PAGE, MAX_OCR_TEXT_LENGTH_PER_LINE } from "../lib/pdfEnemOcrModel";
 
 /* Sprint 19, seção 8/17 da ordem — teto do CORPO multipart do apply de
    pacote ZIP (arquivo ZIP + boundary/campos ao redor). Mesma disciplina de
@@ -41,6 +43,47 @@ const PDF_PREVIEW_MULTIPART_MAX_BYTES = PDF_EXAM_MAX_BYTES + PDF_ANSWER_KEY_MAX_
    por isso não usa lib/response.ts:readJsonBody (limite de 16KB, pensado
    para payloads de API pequenos). Aqui o limite é o próprio
    IMPORT_MAX_FILE_BYTES, checado ANTES de decodificar qualquer conteúdo. */
+
+/** Sprint 24, seções 4/19 da ordem — parse fail-closed do campo opcional
+ *  `examOcrPages`/`answerKeyOcrPages` (JSON, sempre um campo de formulário
+ *  multipart junto dos PDFs — nunca um endpoint separado, mesmo princípio
+ *  de "não criar importador paralelo" da seção 9). Valida só a FORMA aqui
+ *  (nunca confia em profundidade — `extractPdfPages` revalida os limites
+ *  numéricos de novo, seção 19: nunca só o lado do cliente). Ausente ou
+ *  string vazia → `[]` (comportamento idêntico a nenhum OCR fornecido). */
+function parseOcrPagesField(raw: string | File | null): OcrPageInput[] | { error: string } {
+  if (raw === null || raw === "") return [];
+  if (typeof raw !== "string") return { error: "Campo de OCR inválido." };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: "Campo de OCR não é um JSON válido." };
+  }
+  if (!Array.isArray(parsed)) return { error: "Campo de OCR precisa ser uma lista de páginas." };
+  if (parsed.length > MAX_OCR_PAGES_PER_BATCH) return { error: `Envio de OCR excede o limite de ${MAX_OCR_PAGES_PER_BATCH} páginas por lote.` };
+  const result: OcrPageInput[] = [];
+  for (const rawPage of parsed) {
+    const p = rawPage as { pageNumber?: unknown; lines?: unknown };
+    if (typeof p.pageNumber !== "number" || !Number.isInteger(p.pageNumber) || p.pageNumber < 1) {
+      return { error: "Cada página de OCR precisa de um 'pageNumber' inteiro positivo." };
+    }
+    if (!Array.isArray(p.lines)) return { error: "Cada página de OCR precisa de uma lista 'lines'." };
+    if (p.lines.length > MAX_OCR_LINES_PER_PAGE) return { error: `Página ${p.pageNumber} do OCR excede o limite de ${MAX_OCR_LINES_PER_PAGE} linhas.` };
+    const lines: OcrPageInput["lines"] = [];
+    for (const rawLine of p.lines) {
+      const l = rawLine as { x?: unknown; y?: unknown; text?: unknown; confidencePercent?: unknown };
+      if (typeof l.x !== "number" || typeof l.y !== "number" || typeof l.text !== "string" || typeof l.confidencePercent !== "number") {
+        return { error: `Linha de OCR inválida na página ${p.pageNumber} (esperado x, y, text, confidencePercent).` };
+      }
+      if (l.text.length > MAX_OCR_TEXT_LENGTH_PER_LINE) return { error: `Uma linha de OCR na página ${p.pageNumber} excede o limite de ${MAX_OCR_TEXT_LENGTH_PER_LINE} caracteres.` };
+      if (l.confidencePercent < 0 || l.confidencePercent > 100) return { error: `Confiança de OCR inválida na página ${p.pageNumber} (precisa estar entre 0 e 100).` };
+      lines.push({ x: l.x, y: l.y, text: l.text, confidencePercent: l.confidencePercent });
+    }
+    result.push({ pageNumber: p.pageNumber, lines });
+  }
+  return result;
+}
 
 async function requireEditorialActor(request: Request, env: Env): Promise<{ userId: string; role: "editor" | "admin" } | null> {
   const token = readSessionToken(request);
@@ -326,9 +369,17 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       sourceUrl: form.get("sourceUrl"),
     };
 
-    const result = await previewPdf(env.DB, actor.userId, examBytes, answerKeyBytes, identityInput, confirmation);
+    const examOcrPages = parseOcrPagesField(form.get("examOcrPages"));
+    if ("error" in examOcrPages) return Errors.badRequest(examOcrPages.error);
+    const answerKeyOcrPages = parseOcrPagesField(form.get("answerKeyOcrPages"));
+    if ("error" in answerKeyOcrPages) return Errors.badRequest(answerKeyOcrPages.error);
+
+    const result = await previewPdf(env.DB, actor.userId, examBytes, answerKeyBytes, identityInput, confirmation, examOcrPages, answerKeyOcrPages);
     if (!result.ok) {
-      return json({ error: { code: `pdf_${result.reason ?? "invalid"}`, message: result.message ?? "PDF inválido.", errors: result.errors ?? [] } }, { status: 400 });
+      return json(
+        { error: { code: `pdf_${result.reason ?? "invalid"}`, message: result.message ?? "PDF inválido.", errors: result.errors ?? [], pagesNeedingOcr: result.pagesNeedingOcr ?? [] } },
+        { status: 400 }
+      );
     }
     return json({
       ok: true,
@@ -441,8 +492,13 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       return Errors.badRequest("Campo 'selection' inválido.");
     }
 
+    const examOcrPages = parseOcrPagesField(form.get("examOcrPages"));
+    if ("error" in examOcrPages) return Errors.badRequest(examOcrPages.error);
+    const answerKeyOcrPages = parseOcrPagesField(form.get("answerKeyOcrPages"));
+    if ("error" in answerKeyOcrPages) return Errors.badRequest(answerKeyOcrPages.error);
+
     if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
-    const result = await applyPdf(env.DB, env.QUESTION_MEDIA, actor.userId, batchId, examBytes, answerKeyBytes, identityInput, selection);
+    const result = await applyPdf(env.DB, env.QUESTION_MEDIA, actor.userId, batchId, examBytes, answerKeyBytes, identityInput, selection, examOcrPages, answerKeyOcrPages);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();
       if (result.expired) return json({ error: { code: "preview_expired", message: "A prévia expirou. Gere uma nova." } }, { status: 409 });

@@ -24,11 +24,23 @@
    revê a prévia antes de aplicar. */
 
 import type { PdfPageText } from "./pdfEnemExtractor";
+import { isOcrConfidentEnoughForStructural } from "./pdfEnemOcrModel";
 
 export const MIN_QUESTION_NUMBER = 1;
 export const MAX_QUESTION_NUMBER = 200;
 const EXPECTED_LETTERS = ["A", "B", "C", "D", "E"] as const;
 
+/* Sprint 24, seção 10 da ordem — permanece ANCORADO no início da linha
+   (`^`), deliberadamente: uma tentativa inicial de buscar "QUESTÃO N" em
+   QUALQUER posição da linha (para lidar com fusões acidentais — ver
+   `ISOLATED_HEADING_RE`/`groupItemsByY` em pdfEnemExtractor.ts) provou ser
+   PERIGOSA demais — o próprio enunciado de uma prova real referencia
+   number de questão em prosa corrida com frequência real ("As questões 91
+   e 92 tratam do texto a seguir"), e até o texto TÉCNICO das fixtures desta
+   suíte ("Alternativa A da questao 1") batia. A causa real da fusão
+   acidental (heading + fragmento de tabela vizinha na mesma linha Y) foi
+   corrigida na ORIGEM — na extração de linhas, nunca aqui — mantendo este
+   regex conservador e ancorado como sempre foi. */
 const QUESTION_HEADING_RE = /^QUEST(?:ÃO|AO)\s+0*([1-9]\d{0,2})\b/i;
 const QUESTION_INLINE_RE = /^0*([1-9]\d{0,2})\s*[.\-–)]\s+(.*)$/;
 /* Sprint 22.1 — o PDF oficial real do ENEM NÃO usa pontuação entre a
@@ -67,6 +79,12 @@ export interface RawQuestionCandidate {
   /** Mesma ideia, por letra de alternativa — só letras efetivamente
    *  reconhecidas em `alternatives` aparecem aqui. */
   alternativeLocations: Partial<Record<(typeof EXPECTED_LETTERS)[number], QuestionSlotLocation[]>>;
+  /** Sprint 24, seção 15 da ordem — `true` quando QUALQUER linha usada para
+   *  montar esta questão (cabeçalho, enunciado ou alternativas) veio de
+   *  OCR — nunca sobre confiança, só sobre ORIGEM (a UI mostra "Texto
+   *  reconhecido por OCR" de forma neutra; confiança baixa em elemento
+   *  crítico já vira `warnings`, ver `isStructurallyTrustworthy`). */
+  hasOcrText: boolean;
 }
 
 export interface SegmentationResult {
@@ -79,16 +97,33 @@ interface FlatLine {
   text: string;
   y: number;
   hasVisualContent: boolean;
+  /** Sprint 24 — propagado de `PdfTextLine.source`/`confidencePercent`.
+   *  Ausente/`"native"` para todo texto extraído nativamente (nenhum
+   *  comportamento anterior muda). Usado SOMENTE para decidir se um
+   *  elemento ESTRUTURAL crítico (número da questão, letra de alternativa
+   *  — seção 6 da ordem) reconhecido nesta linha pode ser aceito como fato
+   *  ou precisa de revisão humana — nunca para alterar o texto em si. */
+  source?: "native" | "ocr";
+  confidencePercent?: number;
 }
 
 function flattenPages(pages: PdfPageText[]): FlatLine[] {
   const flat: FlatLine[] = [];
   for (const page of pages) {
     for (const line of page.lines) {
-      flat.push({ pageNumber: page.pageNumber, text: line.text, y: line.y, hasVisualContent: page.hasVisualContent });
+      flat.push({ pageNumber: page.pageNumber, text: line.text, y: line.y, hasVisualContent: page.hasVisualContent, source: line.source, confidencePercent: line.confidencePercent });
     }
   }
   return flat;
+}
+
+/** Sprint 24, seção 6 da ordem — `true` quando a linha é segura o bastante
+ *  para basear um elemento ESTRUTURAL crítico (número da questão, letra de
+ *  alternativa): texto nativo é sempre seguro; texto OCR só quando a
+ *  confiança não estiver na faixa "low". */
+function isStructurallyTrustworthy(line: FlatLine): boolean {
+  if (line.source !== "ocr") return true;
+  return isOcrConfidentEnoughForStructural(line.confidencePercent ?? 0);
 }
 
 /** Acumula (pageNumber -> [minY, maxY]) a partir de uma sequência de linhas
@@ -171,6 +206,11 @@ function splitStatementAndAlternatives(lines: FlatLine[]): {
       flushCurrent();
       current = { letter, parts: [match![2]], ownLines: [line] };
       nextExpectedIndex += 1;
+      // Seção 6 da ordem — a LETRA da alternativa é um elemento estrutural
+      // crítico: OCR de confiança baixa nunca é aceito silenciosamente.
+      if (!isStructurallyTrustworthy(line)) {
+        warnings.push(`Letra da alternativa ${letter} reconhecida por OCR com confiança baixa — revisão necessária.`);
+      }
       continue;
     }
     // A letra casada é a MESMA da alternativa em andamento (nunca uma
@@ -233,7 +273,7 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
   // instruções da capa como se fossem questões).
   const hasAnyHeadingStyle = flat.some((line) => QUESTION_HEADING_RE.test(line.text));
 
-  type Block = { number: number; pageStart: number; lines: FlatLine[]; pages: Set<number> };
+  type Block = { number: number; pageStart: number; lines: FlatLine[]; pages: Set<number>; extraWarnings: string[]; headingWasOcr: boolean };
   const blocks: Block[] = [];
   let current: Block | null = null;
 
@@ -241,8 +281,16 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
     const start = detectQuestionStart(line.text, !hasAnyHeadingStyle);
     if (start) {
       if (current) blocks.push(current);
-      const remainderLine: FlatLine[] = start.remainder ? [{ pageNumber: line.pageNumber, text: start.remainder, y: line.y, hasVisualContent: line.hasVisualContent }] : [];
-      current = { number: start.number, pageStart: line.pageNumber, lines: remainderLine, pages: new Set([line.pageNumber]) };
+      const remainderLine: FlatLine[] = start.remainder
+        ? [{ pageNumber: line.pageNumber, text: start.remainder, y: line.y, hasVisualContent: line.hasVisualContent, source: line.source, confidencePercent: line.confidencePercent }]
+        : [];
+      // Seção 6 da ordem — o NÚMERO da questão é um elemento estrutural
+      // crítico: se a linha que o revelou veio de OCR com confiança baixa,
+      // a questão inteira nasce com aviso (nunca aceita silenciosamente).
+      const extraWarnings = isStructurallyTrustworthy(line)
+        ? []
+        : [`Número da questão ${start.number} reconhecido por OCR com confiança baixa — revisão necessária.`];
+      current = { number: start.number, pageStart: line.pageNumber, lines: remainderLine, pages: new Set([line.pageNumber]), extraWarnings, headingWasOcr: line.source === "ocr" };
       continue;
     }
     if (current) {
@@ -263,9 +311,11 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
   for (const b of blocks) seenNumbers.set(b.number, (seenNumbers.get(b.number) ?? 0) + 1);
 
   const questions: RawQuestionCandidate[] = blocks.map((block) => {
-    const { statement, alternatives, warnings, statementLocations, alternativeLocations } = splitStatementAndAlternatives(block.lines);
+    const { statement, alternatives, warnings: splitWarnings, statementLocations, alternativeLocations } = splitStatementAndAlternatives(block.lines);
+    const warnings = [...block.extraWarnings, ...splitWarnings];
     const pageNumbers = Array.from(block.pages).sort((a, b) => a - b);
     const hasVisualContentOnPages = pageNumbers.some((p) => flat.some((l) => l.pageNumber === p && l.hasVisualContent));
+    const hasOcrText = block.headingWasOcr || block.lines.some((l) => l.source === "ocr");
 
     if (block.number < MIN_QUESTION_NUMBER || block.number > MAX_QUESTION_NUMBER) {
       warnings.push(`Número de questão fora do intervalo aceito (${MIN_QUESTION_NUMBER}-${MAX_QUESTION_NUMBER}).`);
@@ -286,6 +336,7 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
       rawLineCount: block.lines.length,
       statementLocations,
       alternativeLocations,
+      hasOcrText,
     };
   });
 

@@ -22,6 +22,7 @@
 
 import type { PdfPageText } from "./pdfEnemExtractor";
 import type { ExamIdentity } from "./pdfEnemExamIdentity";
+import { isOcrConfidentEnoughForIdentity } from "./pdfEnemOcrModel";
 
 export interface DetectedDocumentIdentity {
   year?: number;
@@ -29,6 +30,12 @@ export interface DetectedDocumentIdentity {
   bookletNumber?: number;
   color?: string;
   application?: string;
+  /** Sprint 24, seção 8 da ordem — `true` quando QUALQUER campo acima foi
+   *  lido de uma linha de origem OCR com confiança "low". Identidade
+   *  documental detectada por OCR é sempre menos confiável que texto
+   *  nativo — este PDF nunca pode, sozinho, produzir
+   *  `confirmedAutomatically=true` (ver `checkDocumentIdentity`). */
+  lowConfidenceOcrSource?: boolean;
 }
 
 const KNOWN_BOOKLET_COLORS = ["AZUL", "AMARELO", "ROSA", "CINZA", "BRANCO", "VERDE", "LARANJA"];
@@ -50,17 +57,19 @@ function normalizeColor(raw: string): string | undefined {
 /** Procura o cabeçalho repetido de rodapé/cabeçalho da PROVA em qualquer
  *  página — o mesmo padrão se repete em toda página de questão, então
  *  basta a PRIMEIRA ocorrência confiável. */
+function isLowConfidenceOcrLine(line: { source?: "native" | "ocr"; confidencePercent?: number }): boolean {
+  return line.source === "ocr" && !isOcrConfidentEnoughForIdentity(line.confidencePercent ?? 0);
+}
+
 export function detectExamDocumentIdentity(pages: PdfPageText[]): DetectedDocumentIdentity {
   for (const page of pages) {
     for (const line of page.lines) {
       const match = line.text.match(EXAM_FOOTER_RE);
       if (!match) continue;
       const color = normalizeColor(match[3]);
-      return {
-        day: Number(match[1]),
-        bookletNumber: Number(match[2]),
-        color,
-      };
+      const detected: DetectedDocumentIdentity = { day: Number(match[1]), bookletNumber: Number(match[2]), color };
+      if (isLowConfidenceOcrLine(line)) detected.lowConfidenceOcrSource = true;
+      return detected;
     }
   }
   return {};
@@ -72,6 +81,7 @@ export function detectExamDocumentIdentity(pages: PdfPageText[]): DetectedDocume
  *  página), nunca assumidas adjacentes. */
 export function detectAnswerKeyDocumentIdentity(pages: PdfPageText[]): DetectedDocumentIdentity {
   const result: DetectedDocumentIdentity = {};
+  let lowConfidenceOcrSource = false;
   for (const page of pages) {
     for (const line of page.lines) {
       if (result.day === undefined) {
@@ -79,6 +89,7 @@ export function detectAnswerKeyDocumentIdentity(pages: PdfPageText[]): DetectedD
         if (dayMatch) {
           result.day = Number(dayMatch[1]);
           result.bookletNumber = Number(dayMatch[2]);
+          if (isLowConfidenceOcrLine(line)) lowConfidenceOcrSource = true;
         }
       }
       if (result.color === undefined) {
@@ -86,10 +97,12 @@ export function detectAnswerKeyDocumentIdentity(pages: PdfPageText[]): DetectedD
         if (colorMatch) {
           result.color = normalizeColor(colorMatch[1]);
           result.year = Number(colorMatch[2]);
+          if (isLowConfidenceOcrLine(line)) lowConfidenceOcrSource = true;
         }
       }
     }
   }
+  if (lowConfidenceOcrSource) result.lowConfidenceOcrSource = true;
   return result;
 }
 
@@ -175,7 +188,15 @@ export function checkDocumentIdentity(
     messages.push(`A cor de caderno detectada no GABARITO (${answerKeyDetected.color}) não aparece no campo "Caderno/cor" confirmado.`);
   }
 
+  // Sprint 24, seção 8 da ordem — identidade OCR de confiança baixa nunca
+  // pode, sozinha, produzir `confirmedAutomatically=true`, mesmo que os
+  // campos coincidam entre os dois PDFs — o editor precisa confirmar
+  // manualmente. Nunca uma divergência (não bloqueia o apply), só impede a
+  // confirmação automática silenciosa.
+  const hasLowConfidenceOcrIdentity = !!examDetected.lowConfidenceOcrSource || !!answerKeyDetected.lowConfidenceOcrSource;
+
   const confirmedAutomatically =
+    !hasLowConfidenceOcrIdentity &&
     examDetected.day !== undefined &&
     answerKeyDetected.day !== undefined &&
     examDetected.day === answerKeyDetected.day &&
@@ -187,7 +208,9 @@ export function checkDocumentIdentity(
     examDetected.color === answerKeyDetected.color &&
     messages.length === 0;
 
-  if (!confirmedAutomatically && messages.length === 0) {
+  if (hasLowConfidenceOcrIdentity && messages.length === 0) {
+    messages.push("Identidade detectada via OCR com confiança baixa — confirme manualmente.");
+  } else if (!confirmedAutomatically && messages.length === 0) {
     messages.push("Identidade não pôde ser confirmada automaticamente neste arquivo.");
   }
 
@@ -197,5 +220,5 @@ export function checkDocumentIdentity(
 /** Distingue a mensagem neutra ("não pôde ser confirmado") das
  *  mensagens de DIVERGÊNCIA real (que bloqueiam) — nunca a mesma coisa. */
 function isDivergenceMessage(message: string): boolean {
-  return !message.startsWith("Identidade não pôde ser confirmada automaticamente");
+  return !message.startsWith("Identidade não pôde ser confirmada automaticamente") && !message.startsWith("Identidade detectada via OCR");
 }

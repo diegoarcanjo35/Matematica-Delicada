@@ -11,6 +11,10 @@ export interface ApiFieldError {
    *  simples (podem ter code/file/row/field simultaneamente); a rota de
    *  package/preview devolve esta lista estruturada em vez de `fields`. */
   errors?: PackageError[];
+  /** Sprint 24, seções 2/4 da ordem — só presente quando `code` é
+   *  `pdf_needs_ocr_exam`/`pdf_needs_ocr_answer_key`: páginas (1-based) que
+   *  precisam de OCR antes de tentar a prévia de novo. */
+  pagesNeedingOcr?: number[];
 }
 
 export class EditorialApiError extends Error {
@@ -18,6 +22,7 @@ export class EditorialApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly packageErrors: PackageError[];
+  readonly pagesNeedingOcr: number[];
 
   constructor(apiError: ApiFieldError, status: number) {
     super(apiError.message);
@@ -25,6 +30,7 @@ export class EditorialApiError extends Error {
     this.status = status;
     this.code = apiError.code;
     this.packageErrors = apiError.errors ?? [];
+    this.pagesNeedingOcr = apiError.pagesNeedingOcr ?? [];
   }
 }
 
@@ -464,6 +470,22 @@ export interface PdfPreviewAlternative {
   text: string;
 }
 
+/** Sprint 24, seções 4/9/19 da ordem — UMA linha reconhecida por OCR no
+ *  navegador (`src/pages/editorial/pdfOcr.ts:ClientOcrLine`), já em
+ *  coordenadas de página PDF nativas — mesmo formato aceito pelo worker
+ *  em `worker/src/lib/pdfEnemOcrModel.ts:OcrLineInput`. */
+export interface PdfOcrLine {
+  x: number;
+  y: number;
+  text: string;
+  confidencePercent: number;
+}
+
+export interface PdfOcrPageInput {
+  pageNumber: number;
+  lines: PdfOcrLine[];
+}
+
 /** Sprint 23 — metadado leve de UM elemento visual associado à questão
  *  (imagem raster extraída OU diagrama vetorial detectado, nunca ambos
  *  confundidos — `kind` distingue). `thumbnailDataUri` só existe na
@@ -500,6 +522,10 @@ export interface PdfPreviewQuestion {
   canApply: boolean;
   code: string;
   fingerprint: string;
+  /** Sprint 24, seção 15 da ordem — `true` quando qualquer parte desta
+   *  questão veio de OCR (cabeçalho, enunciado ou alternativa) — mostrada
+   *  como "Texto reconhecido por OCR" na UI, sem detalhes técnicos. */
+  hasOcrText: boolean;
 }
 
 /** Seção 2/3 da ordem — identidade DETECTADA no texto dos dois PDFs
@@ -549,13 +575,22 @@ export async function previewPdfEnem(
   examPdf: File,
   answerKeyPdf: File,
   identity: PdfExamIdentityInput,
-  confirmation: boolean
+  confirmation: boolean,
+  /** Sprint 24, seções 2/4/9 da ordem — OCR já reconhecido no navegador
+   *  para as páginas que uma chamada anterior sinalizou como
+   *  `needs_ocr_exam`/`needs_ocr_answer_key` (via `EditorialApiError.
+   *  pagesNeedingOcr`). Ausente/vazio preserva 100% o comportamento
+   *  anterior — nenhum PDF com camada de texto boa jamais aciona OCR. */
+  examOcrPages: PdfOcrPageInput[] = [],
+  answerKeyOcrPages: PdfOcrPageInput[] = []
 ): Promise<PreviewPdfResponse> {
   const form = new FormData();
   form.set("examPdf", examPdf);
   form.set("answerKeyPdf", answerKeyPdf);
   for (const [key, value] of buildPdfIdentityFormEntries(identity)) form.set(key, value);
   form.set("confirmation", confirmation ? "true" : "false");
+  if (examOcrPages.length > 0) form.set("examOcrPages", JSON.stringify(examOcrPages));
+  if (answerKeyOcrPages.length > 0) form.set("answerKeyOcrPages", JSON.stringify(answerKeyOcrPages));
   return request("/api/editorial/question-imports/pdf/preview", { method: "POST", body: form });
 }
 
@@ -589,7 +624,12 @@ export function applyPdfEnem(
   examPdf: File,
   answerKeyPdf: File,
   identity: PdfExamIdentityInput,
-  selection: PdfApplySelectionEntry[]
+  selection: PdfApplySelectionEntry[],
+  /** Sprint 24 — o MESMO OCR usado no preview, reenviado para o apply
+   *  poder re-derivar exatamente a mesma fusão nativo+OCR (mesmo princípio
+   *  de "nunca confia no preview persistido" já usado para o texto). */
+  examOcrPages: PdfOcrPageInput[] = [],
+  answerKeyOcrPages: PdfOcrPageInput[] = []
 ): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[] }> {
   const form = new FormData();
   form.set("batchId", batchId);
@@ -597,5 +637,7 @@ export function applyPdfEnem(
   form.set("answerKeyPdf", answerKeyPdf);
   for (const [key, value] of buildPdfIdentityFormEntries(identity)) form.set(key, value);
   form.set("selection", JSON.stringify(selection));
+  if (examOcrPages.length > 0) form.set("examOcrPages", JSON.stringify(examOcrPages));
+  if (answerKeyOcrPages.length > 0) form.set("answerKeyOcrPages", JSON.stringify(answerKeyOcrPages));
   return request("/api/editorial/question-imports/pdf/apply", { method: "POST", body: form });
 }

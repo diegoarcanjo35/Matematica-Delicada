@@ -215,6 +215,72 @@ export function buildExamPdfWithHeader(
   return buildFixturePdf(pages);
 }
 
+/** Sprint 24, seção 10 e 24-G da ordem — fixture técnica reproduzindo
+ *  EXATAMENTE a estrutura problemática encontrada no PDF oficial real
+ *  (ENEM 2019, Caderno 7 Azul): uma página de duas colunas onde (a) a
+ *  coluna esquerda tem um rótulo de diagrama solto posicionado na mesma
+ *  faixa Y de um cabeçalho "QUESTÃO N" da coluna direita, e (b) uma
+ *  segunda ocorrência onde um valor de tabela da coluna esquerda coincide
+ *  em Y com outro cabeçalho da coluna direita — os dois bugs reais
+ *  corrigidos nesta sprint (`detectColumnGutter` reescrito + isolamento de
+ *  heading em `groupItemsByY`). `leftX`/`rightX` nunca hardcoded no
+ *  algoritmo de produção — aqui só posicionam o conteúdo de teste. */
+export function buildTwoColumnCollisionFixturePdf(): Uint8Array {
+  let objNum = 1;
+  const catalogObj = objNum++;
+  const pagesObj = objNum++;
+  const fontObj = objNum++;
+  const pageObj = objNum++;
+  const contentObj = objNum++;
+
+  const leftX = 40;
+  const rightX = 300;
+  const lines: string[] = ["BT", "/F1 10 Tf"];
+  const put = (x: number, y: number, text: string) => lines.push(`1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj`);
+
+  // Coluna esquerda: corpo de texto repetido o bastante para o algoritmo
+  // de detecção de gutter (moda de X por metade da página) reconhecer a
+  // margem esquerda com confiança — nunca menos que o mínimo de repetição
+  // exigido pela implementação real.
+  for (let i = 0; i < 6; i++) put(leftX, 700 - i * 14, `Texto corrido da coluna esquerda, linha ${i}.`);
+  // Rótulo de diagrama solto da coluna esquerda, na MESMA faixa Y (arred.)
+  // do cabeçalho da coluna direita abaixo — a colisão real encontrada.
+  put(leftX, 594, "d");
+  for (let i = 0; i < 4; i++) put(leftX, 580 - i * 14, `Mais texto da coluna esquerda, linha ${i}.`);
+  put(leftX, 400, "QUESTAO 1");
+  for (let i = 0; i < 5; i++) put(leftX, 386 - i * 14, `Enunciado tecnico da questao 1, linha ${i}.`);
+  put(leftX, 300, "A. Alternativa A da questao 1");
+  put(leftX, 286, "B. Alternativa B da questao 1");
+  put(leftX, 272, "C. Alternativa C da questao 1");
+  put(leftX, 258, "D. Alternativa D da questao 1");
+  put(leftX, 244, "E. Alternativa E da questao 1");
+
+  // Coluna direita: repetição para a margem direita ser reconhecida com
+  // confiança, e o cabeçalho "QUESTAO 2" exatamente na MESMA linha Y
+  // arredondada do rótulo solto "d" da coluna esquerda (y=594).
+  for (let i = 0; i < 6; i++) put(rightX, 700 - i * 14, `Texto corrido da coluna direita, linha ${i}.`);
+  put(rightX, 594, "QUESTAO 2");
+  for (let i = 0; i < 5; i++) put(rightX, 580 - i * 14, `Enunciado tecnico da questao 2, linha ${i}.`);
+  put(rightX, 494, "A. Alternativa A da questao 2");
+  put(rightX, 480, "B. Alternativa B da questao 2");
+  put(rightX, 466, "C. Alternativa C da questao 2");
+  put(rightX, 452, "D. Alternativa D da questao 2");
+  put(rightX, 438, "E. Alternativa E da questao 2");
+
+  lines.push("ET");
+  const content = lines.join("\n");
+
+  let body = "";
+  body += `${catalogObj} 0 obj<</Type/Catalog/Pages ${pagesObj} 0 R>>endobj\n`;
+  body += `${pagesObj} 0 obj<</Type/Pages/Kids[${pageObj} 0 R]/Count 1>>endobj\n`;
+  body += `${fontObj} 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n`;
+  body += `${pageObj} 0 obj<</Type/Page/Parent ${pagesObj} 0 R/Resources<</Font<</F1 ${fontObj} 0 R>>>>/MediaBox[0 0 566.929 842]/Contents ${contentObj} 0 R>>endobj\n`;
+  body += `${contentObj} 0 obj<</Length ${content.length}>>\nstream\n${content}\nendstream\nendobj\n`;
+
+  const pdf = `%PDF-1.4\n${body}trailer<</Size ${objNum}/Root ${catalogObj} 0 R>>\n%%EOF\n`;
+  return new TextEncoder().encode(pdf);
+}
+
 /** Gabarito técnico com as duas linhas de identidade reais do ENEM/INEP
  *  ("<DIA>o DIA - CADERNO <NUM>" e "<COR> Gabarito <ANO>"), mais as
  *  respostas. */

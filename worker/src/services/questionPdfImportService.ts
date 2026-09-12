@@ -28,9 +28,10 @@
    retry concorrente pode estar usando a mesma key determinística), mas
    NUNCA existe uma questão criada sem sua imagem confirmada. */
 
-import { extractPdfPages, PDF_MAX_BYTES, type PdfPageText } from "../lib/pdfEnemExtractor";
+import { extractPdfPages, PDF_MAX_BYTES } from "../lib/pdfEnemExtractor";
 import { segmentExamQuestions, MAX_QUESTION_NUMBER } from "../lib/pdfEnemSegmenter";
-import { parseAnswerKeyFromPageLines, type AnswerLetter } from "../lib/pdfEnemAnswerKey";
+import { parseAnswerKeyFromPages, type AnswerLetter } from "../lib/pdfEnemAnswerKey";
+import type { OcrPageInput } from "../lib/pdfEnemOcrModel";
 import {
   buildPdfEnemQuestionCode,
   buildPreviewQuestions,
@@ -159,10 +160,11 @@ export interface PdfPreviewResult {
   reason?: "needs_ocr_exam" | "needs_ocr_answer_key" | "invalid_exam" | "invalid_answer_key" | "too_large" | "too_many_questions" | "invalid_identity" | "payload_too_large" | "too_many_statements" | "confirmation_required";
   message?: string;
   errors?: string[];
-}
-
-async function fingerprintPagesText(pages: PdfPageText[]): Promise<string[][]> {
-  return pages.map((p) => p.lines.map((l) => l.text));
+  /** Sprint 24, seções 2/4 da ordem — só presente quando `reason` é
+   *  `needs_ocr_exam`/`needs_ocr_answer_key`: números das páginas (1-based)
+   *  que o cliente precisa renderizar e reconhecer via OCR antes de tentar
+   *  a prévia de novo (desta vez enviando `examOcrPages`/`answerKeyOcrPages`). */
+  pagesNeedingOcr?: number[];
 }
 
 export async function previewPdf(
@@ -171,7 +173,15 @@ export async function previewPdf(
   examBytes: Uint8Array,
   answerKeyBytes: Uint8Array,
   identityInput: ExamIdentityInput,
-  confirmation: boolean
+  confirmation: boolean,
+  /** Sprint 24, seções 2/4/9 da ordem — OCR reconhecido no CLIENTE para as
+   *  páginas que `extractPdfPages` sinalizou como `needs_ocr` numa chamada
+   *  anterior (fluxo em duas etapas: 1ª chamada sem `ocrPages` detecta
+   *  quais páginas precisam; o cliente renderiza+reconhece SÓ essas
+   *  páginas e reenvia). Ausente/vazio preserva 100% do comportamento
+   *  anterior (nenhum PDF com camada de texto boa jamais aciona OCR). */
+  examOcrPages: OcrPageInput[] = [],
+  answerKeyOcrPages: OcrPageInput[] = []
 ): Promise<PdfPreviewResult> {
   if (!confirmation) {
     return {
@@ -198,16 +208,20 @@ export async function previewPdf(
   const examFingerprint = await sha256HexOfBytes(examBytes);
   const answerKeyFingerprint = await sha256HexOfBytes(answerKeyBytes);
 
-  const examExtract = await extractPdfPages(examBytes);
+  const examExtract = await extractPdfPages(examBytes, examOcrPages);
   if (!examExtract.ok) {
-    if (examExtract.reason === "needs_ocr") return { ok: false, reason: "needs_ocr_exam", message: examExtract.message };
+    if (examExtract.reason === "needs_ocr") {
+      return { ok: false, reason: "needs_ocr_exam", message: examExtract.message, pagesNeedingOcr: examExtract.pagesNeedingOcr };
+    }
     if (examExtract.reason === "too_many_pages") return { ok: false, reason: "too_large", message: examExtract.message };
     return { ok: false, reason: "invalid_exam", message: examExtract.message };
   }
 
-  const answerKeyExtract = await extractPdfPages(answerKeyBytes);
+  const answerKeyExtract = await extractPdfPages(answerKeyBytes, answerKeyOcrPages);
   if (!answerKeyExtract.ok) {
-    if (answerKeyExtract.reason === "needs_ocr") return { ok: false, reason: "needs_ocr_answer_key", message: answerKeyExtract.message };
+    if (answerKeyExtract.reason === "needs_ocr") {
+      return { ok: false, reason: "needs_ocr_answer_key", message: answerKeyExtract.message, pagesNeedingOcr: answerKeyExtract.pagesNeedingOcr };
+    }
     if (answerKeyExtract.reason === "too_many_pages") return { ok: false, reason: "too_large", message: answerKeyExtract.message };
     return { ok: false, reason: "invalid_answer_key", message: answerKeyExtract.message };
   }
@@ -217,8 +231,7 @@ export async function previewPdf(
     return { ok: false, reason: "too_many_questions", message: `Foram detectadas ${rawQuestions.length} questões, acima do limite de ${PDF_MAX_QUESTIONS_PER_BATCH}.` };
   }
 
-  const answerKeyPagesLines = await fingerprintPagesText(answerKeyExtract.pages);
-  const answerKeyParse = parseAnswerKeyFromPageLines(answerKeyPagesLines);
+  const answerKeyParse = parseAnswerKeyFromPages(answerKeyExtract.pages);
   const answerKey = answerKeyParse.answers ?? new Map<number, AnswerLetter>();
 
   // Seção 2/3 da ordem — identidade DETECTADA no texto dos dois PDFs,
@@ -241,13 +254,24 @@ export async function previewPdf(
   // buildPreviewQuestions) — para o PREVIEW, carregamos o conjunto de
   // fingerprints existentes sob demanda dentro da própria função, via uma
   // segunda consulta cujo filtro reaproveita os fingerprints calculados.
-  const { items, globalWarnings: matchWarnings } = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, new Set(), examExtract.visualElements);
+  const { items, globalWarnings: matchWarnings } = await buildPreviewQuestions(
+    rawQuestions, answerKey, identity, existingCodes, new Set(), examExtract.visualElements, examExtract.tabularPageNumbers
+  );
   const existingFingerprints = await queryExistingFingerprints(db, items.map((i) => i.fingerprint));
   // Segunda passada — agora com os fingerprints existentes reais — nunca
   // uma consulta por questão, sempre 1 consulta em lote adicional.
-  const finalResult = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, existingFingerprints, examExtract.visualElements);
+  const finalResult = await buildPreviewQuestions(
+    rawQuestions, answerKey, identity, existingCodes, existingFingerprints, examExtract.visualElements, examExtract.tabularPageNumbers
+  );
 
-  const globalWarnings = [...segmentationWarnings, ...matchWarnings, ...answerKeyParse.errors, ...documentIdentityCheck.messages];
+  const globalWarnings = [
+    ...segmentationWarnings,
+    ...matchWarnings,
+    ...answerKeyParse.errors,
+    ...documentIdentityCheck.messages,
+    ...examExtract.ocrWarnings,
+    ...answerKeyExtract.ocrWarnings,
+  ];
 
   const payload: PdfBatchPayload = {
     sourceKind: "pdf_enem",
@@ -455,7 +479,14 @@ export async function applyPdf(
   examBytes: Uint8Array,
   answerKeyBytes: Uint8Array,
   identityInput: ExamIdentityInput,
-  selection: PdfApplySelectionEntry[]
+  selection: PdfApplySelectionEntry[],
+  /** Sprint 24 — o MESMO OCR reenviado pelo cliente (nunca refeito pelo
+   *  worker, que nunca roda OCR — seção 30/31 da ordem): o apply precisa
+   *  reproduzir exatamente a mesma fusão nativo+OCR do preview para
+   *  re-segmentar e revalidar do zero (mesmo princípio de "nunca confia no
+   *  preview persistido" já usado para o texto/gabarito). */
+  examOcrPages: OcrPageInput[] = [],
+  answerKeyOcrPages: OcrPageInput[] = []
 ): Promise<PdfApplyResult> {
   const batch = await findImportBatch(db, batchId);
   if (!batch || batch.user_id !== actorUserId) return { ok: false, notFound: true };
@@ -494,9 +525,9 @@ export async function applyPdf(
   // como fonte de verdade do CONTEÚDO, só como o que o editor revisou;
   // recalcula tudo a partir dos bytes revalidados acima (seção 20: "valida
   // novamente... gabarito, 5 alternativas").
-  const examExtract = await extractPdfPages(examBytes);
+  const examExtract = await extractPdfPages(examBytes, examOcrPages);
   if (!examExtract.ok) return { ok: false, invalid: true };
-  const answerKeyExtract = await extractPdfPages(answerKeyBytes);
+  const answerKeyExtract = await extractPdfPages(answerKeyBytes, answerKeyOcrPages);
   if (!answerKeyExtract.ok) return { ok: false, invalid: true };
 
   // Seção 3 da ordem — revalidado do ZERO a partir dos bytes reenviados
@@ -511,14 +542,17 @@ export async function applyPdf(
   }
 
   const { questions: rawQuestions } = segmentExamQuestions(examExtract.pages);
-  const answerKeyPagesLines = await fingerprintPagesText(answerKeyExtract.pages);
-  const { answers: answerKey } = parseAnswerKeyFromPageLines(answerKeyPagesLines);
+  const { answers: answerKey } = parseAnswerKeyFromPages(answerKeyExtract.pages);
 
   const candidateCodes = rawQuestions.map((q) => buildPdfEnemQuestionCode(payload.identity, q.originalNumber));
   const existingCodes = await queryExistingCodes(db, candidateCodes);
-  const preliminary = await buildPreviewQuestions(rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, new Set(), examExtract.visualElements);
+  const preliminary = await buildPreviewQuestions(
+    rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, new Set(), examExtract.visualElements, examExtract.tabularPageNumbers
+  );
   const existingFingerprints = await queryExistingFingerprints(db, preliminary.items.map((i) => i.fingerprint));
-  const revalidated = await buildPreviewQuestions(rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, existingFingerprints, examExtract.visualElements);
+  const revalidated = await buildPreviewQuestions(
+    rawQuestions, answerKey ?? new Map(), payload.identity, existingCodes, existingFingerprints, examExtract.visualElements, examExtract.tabularPageNumbers
+  );
 
   const byNumber = new Map(revalidated.items.map((q) => [q.originalNumber, q] as const));
 

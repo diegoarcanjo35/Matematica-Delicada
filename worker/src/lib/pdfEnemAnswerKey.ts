@@ -14,6 +14,9 @@
    (ex.: "Caderno C" não deve virar um gabarito espúrio) — a letra precisa
    estar isolada por espaço/borda de linha. */
 
+import type { PdfPageText } from "./pdfEnemExtractor";
+import { isOcrConfidentEnoughForAnswerKey } from "./pdfEnemOcrModel";
+
 const ANSWER_KEY_LINE_RE = /(?:^|\s)0*([1-9]\d{0,2})(?:ª|º)?\s*[-:.)]?\s+([A-E])(?:\s|$)/;
 
 export type AnswerLetter = "A" | "B" | "C" | "D" | "E";
@@ -57,4 +60,23 @@ export function parseAnswerKeyLines(lines: string[]): AnswerKeyParseResult {
 
 export function parseAnswerKeyFromPageLines(pagesLines: string[][]): AnswerKeyParseResult {
   return parseAnswerKeyLines(pagesLines.flat());
+}
+
+/** Sprint 24, seção 7 da ordem — regra ABSOLUTA do gabarito: uma linha de
+ *  origem OCR só participa da leitura do gabarito quando sua confiança NÃO
+ *  está na faixa "low". Uma linha OCR de baixa confiança é DESCARTADA antes
+ *  mesmo de chegar ao regex — nunca vira uma resposta "quase certa"; a
+ *  questão correspondente simplesmente fica sem resposta nesta passada
+ *  (`correctAlternative=null` no restante do pipeline, nunca inferido de
+ *  outra forma). Texto nativo nunca é filtrado por confiança (não tem —
+ *  vem direto do PDF vetorial). */
+export function parseAnswerKeyFromPages(pages: PdfPageText[]): AnswerKeyParseResult {
+  const trustedLines: string[] = [];
+  for (const page of pages) {
+    for (const line of page.lines) {
+      if (line.source === "ocr" && !isOcrConfidentEnoughForAnswerKey(line.confidencePercent ?? 0)) continue;
+      trustedLines.push(line.text);
+    }
+  }
+  return parseAnswerKeyLines(trustedLines);
 }
