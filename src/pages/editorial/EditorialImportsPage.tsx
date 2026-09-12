@@ -550,7 +550,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   const [preview, setPreview] = useState<PreviewPdfResponse | null>(null);
   const [selection, setSelection] = useState<Map<number, PdfSelectionState>>(new Map());
   const [finalConfirmChecked, setFinalConfirmChecked] = useState(false);
-  const [applyResult, setApplyResult] = useState<{ appliedCount: number; alreadyApplied: boolean; imageUploadFailures: string[] } | null>(null);
+  const [applyResult, setApplyResult] = useState<{ appliedCount: number; alreadyApplied: boolean } | null>(null);
   const [undoResult, setUndoResult] = useState<{ undoneCount: number; alreadyUndone: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -984,13 +984,6 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           <p role="status">
             {applyResult.alreadyApplied ? "Este lote já havia sido aplicado anteriormente." : `${applyResult.appliedCount} questão(ões) criada(s) como rascunho.`}
           </p>
-          {applyResult.imageUploadFailures.length > 0 && (
-            <ul role="alert">
-              {applyResult.imageUploadFailures.map((msg, i) => (
-                <li key={i}>{msg} Anexe manualmente pelo editor de questão.</li>
-              ))}
-            </ul>
-          )}
           {isAdmin && preview && !undoResult && (
             <Button type="button" variant="secondary" onClick={() => void handleUndo()} isLoading={busy}>
               Desfazer lote

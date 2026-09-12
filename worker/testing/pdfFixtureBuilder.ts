@@ -35,13 +35,25 @@ export function buildFixturePdf(pages: string[][]): Uint8Array {
  *  vizinhança Y daquela linha, para testar associação por posição. */
 export interface FixtureImageSpec {
   afterLineIndex: number;
+  /** Resolução REAL da imagem em pixels (define `rgbBytes.length` exigido
+   *  e o tamanho físico do PNG codificado). */
   width: number;
   height: number;
   rgbBytes: number[];
   /** Deslocamento horizontal (pontos) a partir da margem padrão de texto
-   *  (x=40) — default 0. Tamanho de exibição = width/height em pontos
-   *  (escala 1:1, cada "pixel" ocupa 1pt — suficiente para testes). */
+   *  (x=40) — default 0. */
   xOffset?: number;
+  /** Tamanho de EXIBIÇÃO na página (pontos, escala do `cm`) — default
+   *  `width`/`height` (1 "pixel" = 1pt, conveniente para imagens pequenas
+   *  de teste). Para imagens de alta resolução (ex.: testar o limite de
+   *  15MB — Sprint 23.1, seção 6), sempre passar um valor pequeno aqui
+   *  (ex.: 20x20pt) para a imagem caber perto da linha-âncora — sem isso,
+   *  uma imagem de milhares de pixels de resolução seria desenhada com
+   *  milhares de PONTOS de tamanho, muito maior que a própria página, e o
+   *  elemento visual acabaria fora de qualquer faixa Y reconhecível
+   *  (nunca associado a nenhuma questão). */
+  displayWidth?: number;
+  displayHeight?: number;
 }
 
 /** Vetor técnico (retângulo com traçado) embutido numa página — gera um
@@ -91,7 +103,9 @@ export function buildFixturePdfWithVisuals(pages: FixturePageSpec[]): Uint8Array
           const imgIndex = imageObjNumsForPage.length - 1;
           const x = 40 + (img.xOffset ?? 0);
           const imgY = y - 2; // um pouco abaixo da linha, dentro da faixa da MESMA vizinhança Y.
-          lines.push(`ET\nq ${img.width} 0 0 ${img.height} ${x} ${imgY} cm /Im${imgIndex} Do Q\nBT\n/F1 10 Tf`);
+          const displayWidth = img.displayWidth ?? img.width;
+          const displayHeight = img.displayHeight ?? img.height;
+          lines.push(`ET\nq ${displayWidth} 0 0 ${displayHeight} ${x} ${imgY} cm /Im${imgIndex} Do Q\nBT\n/F1 10 Tf`);
         }
       }
       for (const vec of page.vectors ?? []) {
@@ -133,7 +147,14 @@ export function buildFixturePdfWithVisuals(pages: FixturePageSpec[]): Uint8Array
       if (img.rgbBytes.some((b) => b < 0 || b > 127)) {
         throw new Error("FixtureImageSpec: rgbBytes deve conter só valores 0-127 (ASCII puro — ver comentário do tipo).");
       }
-      const pixelStream = String.fromCharCode(...img.rgbBytes);
+      // Nunca `String.fromCharCode(...img.rgbBytes)` para imagens grandes —
+      // espalhar um array de milhões de números como argumentos individuais
+      // estoura a pilha do JS. Monta em pedaços de 64K bytes.
+      const CHUNK_SIZE = 65536;
+      let pixelStream = "";
+      for (let offset = 0; offset < img.rgbBytes.length; offset += CHUNK_SIZE) {
+        pixelStream += String.fromCharCode(...img.rgbBytes.slice(offset, offset + CHUNK_SIZE));
+      }
       body += `${objN} 0 obj<</Type/XObject/Subtype/Image/Width ${img.width}/Height ${img.height}/ColorSpace/DeviceRGB/BitsPerComponent 8/Length ${pixelStream.length}>>\nstream\n${pixelStream}\nendstream\nendobj\n`;
     }
   }

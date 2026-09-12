@@ -31,6 +31,26 @@ function smallImage(seed = 0): FixtureImageSpec {
   return { afterLineIndex: 1, width: 4, height: 4, rgbBytes };
 }
 
+/** Bytes VERDADEIRAMENTE incompressíveis (crypto.getRandomValues, nunca um
+ *  LCG — um LCG de baixa qualidade tem bits baixos previsíveis, e DEFLATE
+ *  aproveita essa estrutura escondida para comprimir bem mais do que
+ *  dados realmente aleatórios; confirmado empiricamente nesta sprint: um
+ *  LCG "ANSI C" clássico com `% 128` produziu um PNG de ~426KB a partir de
+ *  ~14.5MB crus). Mascarado para 0-127 (ASCII puro, exigido pelo builder
+ *  de fixture). Gerado em pedaços de 64KB — `crypto.getRandomValues` tem
+ *  um teto de tamanho por chamada. */
+function randomAsciiSafeBytes(count: number): number[] {
+  const bytes = new Array<number>(count);
+  const CHUNK = 65536;
+  const buf = new Uint8Array(CHUNK);
+  for (let offset = 0; offset < count; offset += CHUNK) {
+    const size = Math.min(CHUNK, count - offset);
+    crypto.getRandomValues(size === CHUNK ? buf : buf.subarray(0, size));
+    for (let i = 0; i < size; i++) bytes[offset + i] = buf[i] & 0x7f;
+  }
+  return bytes;
+}
+
 function questionPage(number: number, images: FixtureImageSpec[] = []): FixturePageSpec {
   return {
     lines: [`QUESTAO ${number}`, "Enunciado tecnico.", "A. Alt A", "B. Alt B", "C. Alt C", "D. Alt D", "E. Alt E"],
@@ -330,12 +350,13 @@ describe("Sprint 23 — preview HTTP nunca escreve no R2, sempre traz thumbnail"
   });
 });
 
+async function previewAndGetBatch(examPdf: Uint8Array, token: string) {
+  const response = await callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/preview`, buildImagePreviewForm(examPdf), token));
+  const body = (await response.json()) as PreviewBody;
+  return body;
+}
+
 describe("Sprint 23 — apply exige confirmação de imagem (seção 8/10/11 da ordem)", () => {
-  async function previewAndGetBatch(examPdf: Uint8Array, token: string) {
-    const response = await callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/preview`, buildImagePreviewForm(examPdf), token));
-    const body = (await response.json()) as PreviewBody;
-    return body;
-  }
 
   it("apply sem visualConfirmations para questão com imagem pendente é bloqueado (409)", async () => {
     const token = await seedUserWithSession("editor1");
@@ -428,5 +449,284 @@ describe("Sprint 23 — apply exige confirmação de imagem (seção 8/10/11 da 
 
     const count = db.sqlite.prepare("SELECT COUNT(*) as c FROM question_images").get() as { c: number };
     expect(count.c).toBe(1);
+  });
+});
+
+/* ------------------- Sprint 23.1 — atomicidade R2/D1 (blocos A-I) ------------------- */
+
+function questionsCount(): number {
+  return (db.sqlite.prepare("SELECT COUNT(*) as c FROM questions").get() as { c: number }).c;
+}
+function questionImagesCount(): number {
+  return (db.sqlite.prepare("SELECT COUNT(*) as c FROM question_images").get() as { c: number }).c;
+}
+async function batchStatus(batchId: string): Promise<string> {
+  const row = db.sqlite.prepare("SELECT status FROM question_import_batches WHERE id = ?").get(batchId) as { status: string } | undefined;
+  return row?.status ?? "(not found)";
+}
+
+describe("Sprint 23.1 — atomicidade R2 -> D1 (bloco A-I da ordem)", () => {
+  async function previewTwoImageQuestion(token: string) {
+    const twoImages: FixtureImageSpec[] = [smallImage(0), { ...smallImage(50), afterLineIndex: 3, xOffset: 200 }];
+    const examPdf = buildFixturePdfWithVisuals([questionPage(1, twoImages)]);
+    const preview = await previewAndGetBatch(examPdf, token);
+    const q1 = preview.questions!.find((q) => q.originalNumber === 1)!;
+    const hashes = q1.visualElements.map((e) => e.hash);
+    const selection = [
+      {
+        originalNumber: 1,
+        patternPrincipalId: PUBLISHED_PATTERN_ID,
+        visualConfirmations: hashes.map((h, i) => ({ elementHash: h, placement: i === 0 ? "statement" : "option_A", altText: `Descricao ${i}` })),
+      },
+    ];
+    return { examPdf, batchId: preview.batchId!, selection };
+  }
+
+  it("A. R2 put falha na primeira imagem -> zero questions criadas, batch continua previewed", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const examPdf = buildFixturePdfWithVisuals([questionPage(1, [smallImage()])]);
+    const preview = await previewAndGetBatch(examPdf, token);
+    const hash = preview.questions!.find((q) => q.originalNumber === 1)!.visualElements[0].hash;
+    const selection = [{ originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID, visualConfirmations: [{ elementHash: hash, placement: "statement", altText: "Descricao" }] }];
+
+    bucket.failNthPut(0); // a PRIMEIRA chamada a put() falha.
+    const response = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+
+    expect(response.status).toBe(409);
+    expect(questionsCount()).toBe(0);
+    expect(await batchStatus(preview.batchId!)).toBe("previewed");
+  });
+
+  it("B. R2 put falha na segunda de duas imagens -> zero questions, zero question_images, órfão da primeira pode permanecer", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const { examPdf, batchId, selection } = await previewTwoImageQuestion(token);
+
+    bucket.failNthPut(1); // a SEGUNDA chamada a put() falha (a primeira já foi bem-sucedida).
+    const response = await applyImagePdfRoute(token, batchId, examPdf, selection);
+
+    expect(response.status).toBe(409);
+    expect(questionsCount()).toBe(0);
+    expect(questionImagesCount()).toBe(0);
+    expect(await batchStatus(batchId)).toBe("previewed");
+    // órfão aceitável: não afirmamos nem exigimos que o primeiro objeto
+    // tenha sido limpo — seção 3 da ordem proíbe explicitamente apagar
+    // objetos determinísticos em falha ambígua.
+  });
+
+  it("C. R2 uploads todos passam + D1 falha -> nenhuma question persistida, batch continua previewed, objetos R2 podem permanecer", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const examPdf = buildFixturePdfWithVisuals([questionPage(1, [smallImage()])]);
+    const preview = await previewAndGetBatch(examPdf, token);
+    const hash = preview.questions!.find((q) => q.originalNumber === 1)!.visualElements[0].hash;
+    const selection = [{ originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID, visualConfirmations: [{ elementHash: hash, placement: "statement", altText: "Descricao" }] }];
+
+    db.failNextMatching(/INSERT INTO questions/);
+    // A exceção do D1 propaga (não é um "conflict" de negócio controlado —
+    // mesmo padrão já usado no resto do serviço para falha real do banco,
+    // capturada pelo try/catch do handler HTTP GLOBAL em produção —
+    // `handleEditorialImportsRequest` chamado diretamente aqui, sem esse
+    // wrapper, então o teste captura a exceção explicitamente para
+    // verificar as invariantes reais: nada foi persistido, o lote continua
+    // `previewed`).
+    await expect(applyImagePdfRoute(token, preview.batchId!, examPdf, selection)).rejects.toThrow("forced_failure_for_test");
+
+    expect(questionsCount()).toBe(0);
+    expect(questionImagesCount()).toBe(0);
+    expect(await batchStatus(preview.batchId!)).toBe("previewed");
+    // O put() do R2 JÁ aconteceu antes do db.batch() — o objeto físico pode
+    // ter permanecido no bucket; nunca tentamos limpá-lo (seção 3).
+  });
+
+  it("D. retry apos cenario A -> uploads tentados de novo, sucesso cria questao + image", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const examPdf = buildFixturePdfWithVisuals([questionPage(1, [smallImage()])]);
+    const preview = await previewAndGetBatch(examPdf, token);
+    const hash = preview.questions!.find((q) => q.originalNumber === 1)!.visualElements[0].hash;
+    const selection = [{ originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID, visualConfirmations: [{ elementHash: hash, placement: "statement", altText: "Descricao" }] }];
+
+    bucket.failNthPut(0);
+    const first = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+    expect(first.status).toBe(409);
+    expect(questionsCount()).toBe(0);
+
+    // Retry — a falha injetada já foi consumida (failNthPut é de uso único),
+    // então este put() vai passar normalmente.
+    const second = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+    expect(second.status).toBe(200);
+    expect(questionsCount()).toBe(1);
+    expect(questionImagesCount()).toBe(1);
+    expect(await batchStatus(preview.batchId!)).toBe("applied");
+  });
+
+  it("E. apply bem-sucedido com 2 imagens -> 2 objetos R2, 2 question_images", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const { examPdf, batchId, selection } = await previewTwoImageQuestion(token);
+
+    const response = await applyImagePdfRoute(token, batchId, examPdf, selection);
+    expect(response.status).toBe(200);
+    expect(questionImagesCount()).toBe(2);
+
+    const rows = db.sqlite.prepare("SELECT asset_ref FROM question_images").all() as Array<{ asset_ref: string }>;
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(await bucket.get(row.asset_ref)).not.toBeNull();
+    }
+  });
+
+  it("F. retry apos sucesso -> alreadyApplied=true, nenhum put R2 duplicado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const examPdf = buildFixturePdfWithVisuals([questionPage(1, [smallImage()])]);
+    const preview = await previewAndGetBatch(examPdf, token);
+    const hash = preview.questions!.find((q) => q.originalNumber === 1)!.visualElements[0].hash;
+    const selection = [{ originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID, visualConfirmations: [{ elementHash: hash, placement: "statement", altText: "Descricao" }] }];
+
+    const first = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+    expect(first.status).toBe(200);
+    const assetRef = (db.sqlite.prepare("SELECT asset_ref FROM question_images").get() as { asset_ref: string }).asset_ref;
+
+    // Se o retry tentasse subir de novo com uma key ALEATÓRIA, o put()
+    // apareceria como um objeto novo; como a rota de retry nem chega a
+    // reconstruir o plano de upload (curto-circuita em `alreadyApplied`
+    // antes disso), a MESMA key/objeto de antes é a única evidência —
+    // continua presente e sem irmãos.
+    bucket.failNthPut(0); // se ALGUM put() acontecesse no retry, este forçaria uma falha visível.
+    const second = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as ApplyBody;
+    expect(secondBody.alreadyApplied).toBe(true);
+    expect(questionImagesCount()).toBe(1);
+    expect(await bucket.get(assetRef)).not.toBeNull();
+  });
+
+  /** Imagem com dados verdadeiramente incompressíveis, dimensionada para
+   *  produzir um PNG final de aproximadamente `targetBytes` — usada para
+   *  testar o limite de 15MB no limiar real. Cada imagem individual FICA
+   *  sempre abaixo de MAX_IMAGE_UPLOAD_BYTES (8MB, seção 11 da ordem
+   *  original) — o teste dos 15MB só pode ser exercitado com MAIS DE UMA
+   *  imagem, já que uma única imagem nunca passa isolada do teto
+   *  individual. */
+  function bigImageAt(afterLineIndex: number, xOffset: number, targetFinalPngBytes: number): FixtureImageSpec {
+    // Bytes mascarados para 0-127 (7 bits) têm exatamente 128 símbolos
+    // possíveis — mesmo sendo "aleatórios" bit a bit, DEFLATE/Huffman
+    // ainda consegue codificar cada um em ~7 bits, uma razão medida
+    // empiricamente nesta sprint (~0.877 do tamanho cru, reproduzível:
+    // testado com múltiplos tamanhos de imagem, sempre dentro de ±1%).
+    const MEASURED_COMPRESSION_RATIO = 0.877;
+    const rawBytesNeeded = Math.ceil(targetFinalPngBytes / MEASURED_COMPRESSION_RATIO);
+    const side = Math.ceil(Math.sqrt(rawBytesNeeded / 3));
+    const rgbBytes = randomAsciiSafeBytes(side * side * 3);
+    return { afterLineIndex, xOffset, width: side, height: side, rgbBytes, displayWidth: 4, displayHeight: 4 };
+  }
+
+  it(
+    "G. total visual PERTO do limite de 15MB (mas abaixo, cada imagem abaixo de 8MB) -> permitido",
+    async () => {
+      const token = await seedUserWithSession("editor1");
+      grantRole("editor1", "editor");
+      // 2 imagens de ~7.3MB cada (~14.6MB somados) — cada uma
+      // confortavelmente abaixo do teto individual de 8MB, a SOMA
+      // confortavelmente abaixo do teto total de 15MB.
+      const images = [bigImageAt(1, 0, 7_000_000), bigImageAt(3, 200, 7_000_000)];
+      const examPdf = buildFixturePdfWithVisuals([questionPage(1, images)]);
+      const preview = await previewAndGetBatch(examPdf, token);
+      const item = preview.questions!.find((q) => q.originalNumber === 1)!;
+      const elements = item.visualElements;
+      expect(elements).toHaveLength(2);
+      for (const el of elements) expect(el.extractionStatus).toBe("extracted");
+      const total = elements.reduce((sum, el) => sum + (el.byteLength ?? 0), 0);
+      expect(total).toBeLessThan(15 * 1024 * 1024);
+      expect(elements.every((el) => (el.byteLength ?? 0) < 8 * 1024 * 1024)).toBe(true);
+
+      const selection = [
+        {
+          originalNumber: 1,
+          patternPrincipalId: PUBLISHED_PATTERN_ID,
+          visualConfirmations: elements.map((el, i) => ({ elementHash: el.hash, placement: i === 0 ? "statement" : "option_A", altText: `Descricao ${i}` })),
+        },
+      ];
+      const response = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+      expect(response.status).toBe(200);
+      expect(questionImagesCount()).toBe(2);
+    },
+    30000
+  );
+
+  it(
+    "H. total visual acima de 15MB (cada imagem individualmente abaixo de 8MB) -> bloqueado, zero R2 puts, zero D1 writes",
+    async () => {
+      const token = await seedUserWithSession("editor1");
+      grantRole("editor1", "editor");
+      // 2 imagens de ~7.9MB cada (~15.4-15.8MB somados) — cada uma AINDA
+      // abaixo do teto individual de 8MB (nunca bloqueadas por esse
+      // motivo), mas a SOMA excede o teto total de 15MB — prova que é o
+      // limite TOTAL do lote (nunca o individual) sendo exercitado aqui.
+      const images = [bigImageAt(1, 0, 8_100_000), bigImageAt(3, 200, 8_100_000)];
+      const examPdf = buildFixturePdfWithVisuals([questionPage(1, images)]);
+
+      const preview = await previewAndGetBatch(examPdf, token);
+      const item = preview.questions!.find((q) => q.originalNumber === 1)!;
+      const elements = item.visualElements;
+      expect(elements).toHaveLength(2);
+      for (const el of elements) {
+        expect(el.extractionStatus).toBe("extracted");
+        expect(el.byteLength ?? 0).toBeLessThan(8 * 1024 * 1024); // nenhuma das duas, isolada, excede o teto individual.
+      }
+      const total = elements.reduce((sum, el) => sum + (el.byteLength ?? 0), 0);
+      expect(total).toBeGreaterThan(15 * 1024 * 1024); // a SOMA das duas excede o teto total — é isso que o teste prova.
+
+      let putCalls = 0;
+      const originalPut = bucket.put.bind(bucket);
+      bucket.put = (async (...args: Parameters<typeof bucket.put>) => {
+        putCalls++;
+        return originalPut(...args);
+      }) as typeof bucket.put;
+
+      const selection = [
+        {
+          originalNumber: 1,
+          patternPrincipalId: PUBLISHED_PATTERN_ID,
+          visualConfirmations: elements.map((el, i) => ({ elementHash: el.hash, placement: i === 0 ? "statement" : "option_A", altText: `Descricao ${i}` })),
+        },
+      ];
+      const response = await applyImagePdfRoute(token, preview.batchId!, examPdf, selection);
+      const body = (await response.json()) as ApplyBody & { error?: { code: string } };
+
+      expect(response.status).toBe(413);
+      expect(body.error?.code).toBe("pdf_visual_bytes_exceeded");
+      expect(putCalls).toBe(0); // zero R2 puts — bloqueado ANTES de qualquer upload.
+      expect(questionsCount()).toBe(0); // zero D1 writes.
+      expect(questionImagesCount()).toBe(0);
+      expect(await batchStatus(preview.batchId!)).toBe("previewed");
+
+      bucket.put = originalPut;
+    },
+    30000
+  );
+
+  it("I. questão sem imagem -> fluxo antigo continua funcionando", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const examPdf = buildFixturePdfWithVisuals([questionPage(1)]);
+    const answerKeyPdf = buildAnswerKeyPdf([[1, "C"], [2, "A"], [3, "B"], [4, "D"], [5, "E"], [6, "C"], [7, "A"], [8, "B"]]);
+    const form = new FormData();
+    form.set("examPdf", new File([examPdf], "prova.pdf", { type: "application/pdf" }));
+    form.set("answerKeyPdf", new File([answerKeyPdf], "gabarito.pdf", { type: "application/pdf" }));
+    form.set("year", DEFAULT_IDENTITY.year);
+    form.set("application", DEFAULT_IDENTITY.application);
+    form.set("booklet", DEFAULT_IDENTITY.booklet);
+    form.set("confirmation", "true");
+    const previewResponse = await callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/preview`, form, token));
+    const preview = (await previewResponse.json()) as PreviewBody;
+
+    const response = await applyImagePdfRoute(token, preview.batchId!, examPdf, [{ originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID }]);
+    expect(response.status).toBe(200);
+    expect(questionsCount()).toBe(1);
+    expect(questionImagesCount()).toBe(0);
   });
 });

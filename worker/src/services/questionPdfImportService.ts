@@ -11,14 +11,22 @@
 
    Preview NUNCA escreve em `questions`/`question_images`/R2 (seção 19).
    Apply só cria questões em `draft` (seção 20) — nunca aceita status vindo
-   do cliente. Esta sprint v1 NÃO extrai imagem automaticamente do PDF (ver
-   relatório final: rasterização de XObject de imagem exigiria canvas,
-   indisponível no runtime do Worker sem uma dependência de imaging não
-   avaliada nesta sprint) — toda questão com conteúdo visual detectado é
-   marcada `visualReviewRequired=true` e cai em `needs_review`; a Andreia
-   anexa a imagem manualmente pelo editor de questão já existente
-   (explicitamente permitido pela seção 10 da ordem). Por isso `apply`
-   AQUI nunca sobe nada ao R2 e nunca grava `question_images`. */
+   do cliente.
+
+   Sprint 23 adicionou extração automática de imagem (via pdfjs-dist +
+   pngEncoder.ts, sem canvas/dependência nova — ver pdfEnemVisualExtractor.ts).
+   Conteúdo vetorial real (não-decorativo) continua permanentemente fora do
+   apply automático nesta v1 (`visualReviewRequired=true`, cai em
+   `needs_review` — Andreia cria a questão manualmente, seção 10 da ordem).
+
+   Sprint 23.1 corrigiu a atomicidade do upload de imagem: R2 SEMPRE sobe
+   ANTES de qualquer escrita no D1, e a criação da questão + `question_images`
+   acontece no MESMO `db.batch()` — nunca duas transações separadas. Se
+   algum `put()` falhar, nenhuma questão é criada (lote continua
+   `previewed`, retry tenta de novo); se o D1 falhar depois dos puts,
+   objetos R2 órfãos são aceitáveis (nunca apagados automaticamente — um
+   retry concorrente pode estar usando a mesma key determinística), mas
+   NUNCA existe uma questão criada sem sua imagem confirmada. */
 
 import { extractPdfPages, PDF_MAX_BYTES, type PdfPageText } from "../lib/pdfEnemExtractor";
 import { segmentExamQuestions, MAX_QUESTION_NUMBER } from "../lib/pdfEnemSegmenter";
@@ -55,9 +63,17 @@ import {
   buildUpsertDnaStatement,
 } from "../repositories/questionRepository";
 import type { AlternativeInput } from "../lib/questionsValidation";
-import { validateImageAltText } from "../lib/questionsValidation";
+import {
+  validateImageAltText,
+  buildR2AssetKey,
+  MAX_IMAGE_UPLOAD_BYTES,
+  MAX_IMAGES_PER_QUESTION,
+  type QuestionAlternativeLetter,
+} from "../lib/questionsValidation";
+import { sniffImageMimeType } from "../lib/imageSniffing";
+import { buildStandaloneInsertImageStatement, buildGuardedImageAuditStatement } from "../repositories/questionRepository";
 import type { RawVisualElement, VisualPlacementCandidate } from "../lib/pdfEnemVisualModel";
-import { addQuestionImage } from "./questionMediaService";
+import { MAX_TOTAL_VISUAL_BYTES_PER_BATCH } from "../lib/pdfEnemVisualModel";
 
 function newId(): string {
   return crypto.randomUUID();
@@ -75,9 +91,11 @@ export const PDF_MAX_QUESTIONS_PER_BATCH = MAX_QUESTION_NUMBER; // mesmo teto es
  *  bytes do zero a partir dos PDFs reenviados (mesmo princípio já usado
  *  para texto/gabarito). Os bytes só existem, brevemente, em memória:
  *  (a) dentro da resposta HTTP do preview, como thumbnail base64 (nunca
- *  gravados); (b) durante o apply, para upload real via
- *  `addQuestionImage` (mesmo pipeline R2/D1 do resto do Banco de
- *  Questões). */
+ *  gravados); (b) durante o apply, para upload real no R2 (seção 2 da
+ *  ordem Sprint 23.1 — R2 SEMPRE antes do D1; ver `applyPdf` — reaproveita
+ *  os mesmos blocos de escrita de `question_images`/auditoria de
+ *  questionRepository.ts usados pelo resto do Banco de Questões, nunca
+ *  `addQuestionImage()` diretamente, que assume a questão já existente). */
 export type PersistableVisualElement = Omit<RawVisualElement, "pngBytes">;
 export type HttpVisualElement = Omit<RawVisualElement, "pngBytes"> & { thumbnailDataUri?: string };
 
@@ -355,16 +373,15 @@ export interface PdfApplyResult {
   conflict?: boolean;
   conflictReason?: string;
   tooManyStatements?: boolean;
+  /** Sprint 23.1, seção 6 da ordem — soma real dos bytes finais de TODOS
+   *  os PNGs que seriam enviados neste apply excede
+   *  `MAX_TOTAL_VISUAL_BYTES_PER_BATCH`. Bloqueia ANTES de qualquer
+   *  `put()` no R2 e antes de qualquer escrita no D1 — nunca um upload
+   *  parcial. */
+  visualBytesExceeded?: boolean;
   message?: string;
   appliedCount?: number;
   questionIds?: string[];
-  /** Seção 14 da ordem — melhor esforço, best-effort: se o lote de
-   *  questões já foi criado (D1 comprometido) mas o upload de alguma
-   *  imagem confirmada falhou depois, a resposta continua `ok:true`
-   *  (as questões existem, nada foi perdido) mas lista aqui quais
-   *  falharam — a Andreia pode anexar manualmente pelo editor de questão
-   *  já existente. Nunca um estado silencioso: o cliente sempre sabe. */
-  imageUploadFailures?: string[];
 }
 
 function logPotentialConflict(context: string, error: unknown): void {
@@ -597,6 +614,10 @@ export async function applyPdf(
     }
   }
 
+  // Seção 2/8 da ordem (Sprint 23.1) — `questionId` é gerado AQUI (nunca
+  // depende do D1) para poder ser usado tanto na chave R2 (determinística)
+  // QUANTO no INSERT de `questions` mais adiante — sem isso não daria para
+  // subir a imagem antes de a questão existir no banco.
   const selectedRows = selection.map((entry) => {
     const item = effectiveByNumber.get(entry.originalNumber)!;
     const alternativas: AlternativeInput[] = item.alternatives.map((a) => ({
@@ -605,20 +626,137 @@ export async function applyPdf(
       isCorrect: a.letter === item.correctAlternative,
       distractorExplanation: null,
     }));
-    return { item, patternPrincipalId: entry.patternPrincipalId, alternativas, padroes: [{ patternId: entry.patternPrincipalId, role: "principal" as const }], tags: [] as string[] };
+    return {
+      entry,
+      item,
+      questionId: newId(),
+      patternPrincipalId: entry.patternPrincipalId,
+      alternativas,
+      padroes: [{ patternId: entry.patternPrincipalId, role: "principal" as const }],
+      tags: [] as string[],
+    };
   });
 
-  const plannedStatements = plannedD1StatementCountForRows(selectedRows);
+  /* ---------------------------------------------------------------------
+     Sprint 23.1, seções 2/6/7 da ordem — plano de upload de imagem,
+     construído ANTES de qualquer escrita (R2 ou D1). Cada entrada aqui
+     representa UM `put()` que vai acontecer e UMA linha `question_images`
+     que vai ser inserida no MESMO `db.batch()` da criação da questão —
+     nunca duas transações separadas.
+     --------------------------------------------------------------------- */
+  interface ImageUploadPlan {
+    originalNumber: number;
+    questionId: string;
+    imageId: string;
+    assetRef: string;
+    pngBytes: Uint8Array;
+    mimeType: "image/png";
+    sizeBytes: number;
+    contentSha256: string;
+    altText: string;
+    placement: "enunciado" | "alternativa";
+    alternativeLetter: QuestionAlternativeLetter | null;
+  }
+
+  const imagePlans: ImageUploadPlan[] = [];
+  for (const row of selectedRows) {
+    const confirmations = row.entry.visualConfirmations;
+    if (!confirmations || confirmations.length === 0) continue;
+    if (confirmations.length > MAX_IMAGES_PER_QUESTION) {
+      return { ok: false, conflict: true, conflictReason: `Questão ${row.entry.originalNumber}: ${confirmations.length} imagens excede o limite de ${MAX_IMAGES_PER_QUESTION} por questão.` };
+    }
+    const elementsByHash = new Map(row.item.visualElements.map((el) => [el.hash, el] as const));
+    for (const confirmation of confirmations) {
+      const element = elementsByHash.get(confirmation.elementHash);
+      if (!element || !element.pngBytes) {
+        // Mesma exigência de "nunca confia no preview persistido" já usada
+        // para texto/gabarito — se a re-extração desta chamada não
+        // reproduziu o MESMO elemento confirmado, é uma divergência real
+        // entre o que foi revisado e o que foi reenviado. Bloqueia o LOTE
+        // INTEIRO, nunca um upload parcial silencioso.
+        return {
+          ok: false,
+          conflict: true,
+          conflictReason: `Questão ${row.entry.originalNumber}: imagem confirmada não foi re-derivada nesta aplicação (divergência entre o PDF revisado e o reenviado). Gere uma nova prévia.`,
+        };
+      }
+      const sniffed = sniffImageMimeType(element.pngBytes);
+      if (sniffed !== "image/png") {
+        // Nunca deveria acontecer (nós mesmos geramos o PNG via
+        // pngEncoder.ts) — defesa em profundidade contra um bug futuro do
+        // encoder que produzisse bytes malformados; nunca sobe ao R2 nem
+        // grava D1 um arquivo que não é realmente o que diz ser.
+        return { ok: false, conflict: true, conflictReason: `Questão ${row.entry.originalNumber}: imagem gerada não passou na validação de formato real.` };
+      }
+      if (element.pngBytes.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
+        return { ok: false, conflict: true, conflictReason: `Questão ${row.entry.originalNumber}: imagem excede o limite de ${MAX_IMAGE_UPLOAD_BYTES} bytes.` };
+      }
+      const imageId = newId();
+      const [placementKind, letter] =
+        confirmation.placement === "statement" ? (["enunciado", null] as const) : (["alternativa", confirmation.placement.replace("option_", "") as QuestionAlternativeLetter] as const);
+      imagePlans.push({
+        originalNumber: row.entry.originalNumber,
+        questionId: row.questionId,
+        imageId,
+        assetRef: buildR2AssetKey(row.questionId, imageId, "image/png"),
+        pngBytes: element.pngBytes,
+        mimeType: "image/png",
+        sizeBytes: element.pngBytes.byteLength,
+        contentSha256: await sha256HexOfBytes(element.pngBytes),
+        altText: confirmation.altText,
+        placement: placementKind,
+        alternativeLetter: letter,
+      });
+    }
+  }
+
+  // Seção 6 da ordem — soma dos bytes FÍSICOS finais dos PNGs (nunca o
+  // tamanho do JSON da prévia, que é uma coisa completamente diferente),
+  // checado ANTES de qualquer `put()` no R2 e ANTES de qualquer escrita
+  // no D1.
+  const totalVisualBytes = imagePlans.reduce((sum, plan) => sum + plan.sizeBytes, 0);
+  if (totalVisualBytes > MAX_TOTAL_VISUAL_BYTES_PER_BATCH) {
+    return {
+      ok: false,
+      visualBytesExceeded: true,
+      message: `O total de imagens confirmadas (${totalVisualBytes} bytes) excede o limite de ${MAX_TOTAL_VISUAL_BYTES_PER_BATCH} bytes por aplicação.`,
+    };
+  }
+
+  const plannedStatements = plannedD1StatementCountForRows(selectedRows, imagePlans.length * 2);
   if (plannedStatements > IMPORT_BATCH_MAX_D1_STATEMENTS) {
     return { ok: false, tooManyStatements: true, message: `Esta seleção geraria ${plannedStatements} operações no banco de dados, acima do limite seguro de ${IMPORT_BATCH_MAX_D1_STATEMENTS}.` };
+  }
+
+  /* ---------------------------------------------------------------------
+     Seção 2/3/4 da ordem — R2 PRIMEIRO, sempre. Se QUALQUER `put()` falhar,
+     paramos imediatamente e NUNCA tocamos o D1 — o lote continua
+     `previewed`, um retry vai tentar os uploads de novo (put() é
+     idempotente para a MESMA key/bytes). Objetos já enviados por puts
+     ANTERIORES nesta mesma chamada NUNCA são apagados (seção 3: um retry
+     concorrente pode estar usando a mesma key; órfão é sempre preferível a
+     remover mídia válida de outra tentativa).
+     --------------------------------------------------------------------- */
+  for (const plan of imagePlans) {
+    try {
+      await bucket.put(plan.assetRef, plan.pngBytes, { httpMetadata: { contentType: plan.mimeType } });
+    } catch (error) {
+      logPotentialConflict(`falha ao subir imagem no R2 (questão ${plan.originalNumber}, key ${plan.assetRef})`, error);
+      return {
+        ok: false,
+        conflict: true,
+        conflictReason: `Questão ${plan.originalNumber}: falha ao enviar imagem ao armazenamento. Nenhuma questão foi criada — tente aplicar novamente.`,
+      };
+    }
   }
 
   const examDescription = describeExamIdentity(payload.identity);
   const statements: D1PreparedStatement[] = [buildMarkBatchAppliedStatement(db, batchId)];
   const questionIds: string[] = [];
+  const imageStatementIndexByPlan: number[] = []; // índice, em `statements`, do INSERT de question_images de cada plano (mesma ordem de `imagePlans`) — usado depois para checar `changes===1`.
 
   for (const row of selectedRows) {
-    const questionId = newId();
+    const questionId = row.questionId;
     questionIds.push(questionId);
     statements.push(
       buildInsertQuestionStatement(db, {
@@ -678,6 +816,44 @@ export async function applyPdf(
       })
     );
     statements.push(buildInsertImportItemStatement(db, { id: newId(), batchId, rowNumber: row.item.originalNumber, code: row.item.code, questionId }));
+
+    // Seção 2 da ordem — question_images entra no MESMO db.batch() da
+    // criação da questão (nunca uma transação separada depois). O guard
+    // interno de `buildStandaloneInsertImageStatement`/
+    // `buildGuardedImageAuditStatement` (status editável / linha existe)
+    // sempre passa aqui: a questão foi inserida statements ATRÁS, na MESMA
+    // transação, e nunca é tocada por mais ninguém antes deste ponto.
+    const plansForThisQuestion = imagePlans.filter((p) => p.questionId === questionId);
+    for (let position = 0; position < plansForThisQuestion.length; position++) {
+      const plan = plansForThisQuestion[position];
+      statements.push(
+        buildStandaloneInsertImageStatement(db, {
+          id: plan.imageId,
+          questionId,
+          assetRef: plan.assetRef,
+          altText: plan.altText,
+          caption: null,
+          position,
+          placement: plan.placement,
+          alternativeLetter: plan.alternativeLetter,
+          storageKind: "r2",
+          mimeType: plan.mimeType,
+          sizeBytes: plan.sizeBytes,
+          contentSha256: plan.contentSha256,
+        })
+      );
+      imageStatementIndexByPlan.push(statements.length - 1);
+      statements.push(
+        buildGuardedImageAuditStatement(db, {
+          id: newId(),
+          imageId: plan.imageId,
+          questionId,
+          eventType: "editorial_question_image_added",
+          userId: actorUserId,
+          metadata: { questionId, imageId: plan.imageId, placement: plan.placement, storageKind: "r2", sourceKind: "pdf_enem" },
+        })
+      );
+    }
   }
 
   let results;
@@ -703,6 +879,24 @@ export async function applyPdf(
     return { ok: false, conflict: true };
   }
 
+  // Seção 5 da ordem — invariante estrutural: o batch inteiro já
+  // comprometeu (chegamos até aqui), então TODO INSERT de question_images
+  // e sua auditoria acoplada precisam ter afetado exatamente 1 linha cada
+  // — o guard de status editável dessas duas statements SEMPRE é
+  // verdadeiro aqui (a questão foi inserida statements atrás, na MESMA
+  // transação, e nada mais a tocou). Se algum não bateu, é uma violação de
+  // invariante real (nunca um resultado de negócio comum) — mesmo padrão
+  // de `assertMutationAuditCoupling` já usado em questionMediaService.ts.
+  for (const statementIndex of imageStatementIndexByPlan) {
+    const insertChanges = results[statementIndex].meta.changes;
+    const auditChanges = results[statementIndex + 1].meta.changes;
+    if (insertChanges !== 1 || auditChanges !== 1) {
+      throw new Error(
+        `questionPdfImportService: invariante violada — INSERT de question_images (changes=${insertChanges}) ou sua auditoria (changes=${auditChanges}) não afetou exatamente 1 linha, mesmo após o batch de apply ter comprometido (batchId=${batchId}).`
+      );
+    }
+  }
+
   await recordAuditEvent(db, newId(), "editorial_question_import_applied", actorUserId, {
     batchId,
     sourceKind: "pdf_enem",
@@ -712,51 +906,12 @@ export async function applyPdf(
     examPdfSha256: examFingerprint,
     answerKeyPdfSha256: answerKeyFingerprint,
     appliedCount: selectedRows.length,
+    imageCount: imagePlans.length,
     // Seção 27 da ordem — "IDs criados" no audit; metadata só aceita
     // valores escalares (string/number/boolean), nunca array — junta como
     // string única (nunca enunciado/gabarito, só os IDs técnicos).
     questionIds: questionIds.join(","),
   });
 
-  // Seção 9/14 da ordem — SÓ AGORA (questões já existem, D1 comprometido)
-  // sobe as imagens confirmadas, reaproveitando o MESMO pipeline R2/D1 do
-  // resto do Banco de Questões (`addQuestionImage` — sniff de MIME real,
-  // SHA-256, chave determinística, limites, R2-antes-de-D1). Preview NUNCA
-  // grava nada no R2 (seção 9) — este é o único ponto do fluxo de PDF que
-  // escreve no bucket. Melhor esforço DEPOIS do batch principal: uma falha
-  // aqui nunca desfaz as questões já criadas (impossível — D1 já
-  // comprometeu), só é reportada em `imageUploadFailures` para a Andreia
-  // resolver manualmente pelo editor de questão existente.
-  const imageUploadFailures: string[] = [];
-  for (let i = 0; i < selection.length; i++) {
-    const entry = selection[i];
-    const confirmations = entry.visualConfirmations;
-    if (!confirmations || confirmations.length === 0) continue;
-    const questionId = questionIds[i];
-    const item = effectiveByNumber.get(entry.originalNumber)!;
-    const elementsByHash = new Map(item.visualElements.map((el) => [el.hash, el] as const));
-
-    for (const confirmation of confirmations) {
-      const element = elementsByHash.get(confirmation.elementHash);
-      if (!element || !element.pngBytes) {
-        imageUploadFailures.push(`Questão ${entry.originalNumber}: imagem confirmada não foi re-derivada na aplicação (divergência entre PDF revisado e reenviado).`);
-        continue;
-      }
-      const [placementKind, letter] = confirmation.placement === "statement" ? (["enunciado", undefined] as const) : (["alternativa", confirmation.placement.replace("option_", "")] as const);
-      const result = await addQuestionImage(db, bucket, questionId, actorUserId, {
-        mutationId: newId(),
-        placement: placementKind,
-        alternativeLetter: letter ?? null,
-        altText: confirmation.altText,
-        caption: null,
-        fileBytes: element.pngBytes,
-        declaredMimeType: "image/png",
-      });
-      if (!result.ok) {
-        imageUploadFailures.push(`Questão ${entry.originalNumber}: falha ao anexar imagem (${Object.values(result.fieldErrors ?? {}).join("; ") || "erro desconhecido"}).`);
-      }
-    }
-  }
-
-  return { ok: true, appliedCount: selectedRows.length, questionIds, ...(imageUploadFailures.length > 0 ? { imageUploadFailures } : {}) };
+  return { ok: true, appliedCount: selectedRows.length, questionIds };
 }

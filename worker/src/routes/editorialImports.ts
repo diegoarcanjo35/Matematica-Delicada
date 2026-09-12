@@ -458,6 +458,9 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       if (result.tooManyStatements) {
         return json({ error: { code: "pdf_too_many_statements", message: result.message ?? "Seleção grande demais para aplicar de uma vez." } }, { status: 413 });
       }
+      if (result.visualBytesExceeded) {
+        return json({ error: { code: "pdf_visual_bytes_exceeded", message: result.message ?? "Total de imagens confirmadas excede o limite permitido." } }, { status: 413 });
+      }
       return json({ error: { code: "pdf_invalid", message: result.message ?? "Prévia inválida ou seleção com erros pendentes." } }, { status: 400 });
     }
     return json({
@@ -465,7 +468,6 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       appliedCount: result.appliedCount ?? 0,
       alreadyApplied: result.alreadyApplied ?? false,
       questionIds: result.questionIds ?? [],
-      imageUploadFailures: result.imageUploadFailures ?? [],
     });
   }
 

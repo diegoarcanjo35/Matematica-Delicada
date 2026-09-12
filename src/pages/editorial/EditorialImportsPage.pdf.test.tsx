@@ -96,7 +96,7 @@ function mockApi(previewBody: unknown = buildPreviewResponse()) {
       if (url.includes("/api/editorial/patterns")) return new Response(JSON.stringify(PATTERNS_RESPONSE), { status: 200 });
       if (url.includes("/question-imports/pdf/preview")) return new Response(JSON.stringify(previewBody), { status: 200 });
       if (url.includes("/question-imports/pdf/apply")) {
-        return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-1"], imageUploadFailures: [] }), { status: 200 });
+        return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-1"] }), { status: 200 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     })
@@ -359,7 +359,7 @@ describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
         if (url.includes("/question-imports/pdf/apply")) {
           const form = init!.body as FormData;
           capturedApplyBody = form.get("selection") as string;
-          return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-3"], imageUploadFailures: [] }), { status: 200 });
+          return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-3"] }), { status: 200 });
         }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       })

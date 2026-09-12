@@ -590,7 +590,7 @@ export function applyPdfEnem(
   answerKeyPdf: File,
   identity: PdfExamIdentityInput,
   selection: PdfApplySelectionEntry[]
-): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[]; imageUploadFailures: string[] }> {
+): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[] }> {
   const form = new FormData();
   form.set("batchId", batchId);
   form.set("examPdf", examPdf);
