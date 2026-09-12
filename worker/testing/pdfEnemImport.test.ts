@@ -233,6 +233,10 @@ describe("buildPreviewQuestions — dedupe (secao 13 da ordem)", () => {
   });
 });
 
+function buildConfirmedIdentity(overrides: Partial<{ year: number; booklet: string }> = {}) {
+  return validateExamIdentityInput({ year: overrides.year ?? 2019, application: "Aplicacao regular", booklet: overrides.booklet ?? "Caderno 7 Azul" }).identity!;
+}
+
 describe("pdfEnemDocumentIdentity — extracao real do texto do PDF (Sprint 22.1, secoes 2/3/4)", () => {
   it("detecta dia/caderno/cor no cabecalho real da PROVA (formato confirmado no PDF oficial 2019)", async () => {
     const pdf = buildExamPdfWithHeader([1], { day: 2, bookletNumber: 7, color: "AZUL" });
@@ -256,23 +260,27 @@ describe("pdfEnemDocumentIdentity — extracao real do texto do PDF (Sprint 22.1
   });
 
   it("identidade nao detectavel em nenhum dos dois PDFs nunca e tratada como confirmada nem como divergencia (mensagem neutra)", () => {
-    const result = checkDocumentIdentity({}, {}, "Caderno Azul");
+    const result = checkDocumentIdentity({}, {}, buildConfirmedIdentity({ booklet: "Caderno Azul" }));
     expect(result.ok).toBe(true); // nunca bloqueia por falta de sinal
     expect(result.confirmedAutomatically).toBe(false); // mas tambem nunca finge ter confirmado
     expect(result.messages).toEqual(["Identidade não pôde ser confirmada automaticamente neste arquivo."]);
   });
 
-  it("dia/caderno/cor detectados e iguais nos dois PDFs -> confirmado automaticamente, sem mensagem", () => {
-    const result = checkDocumentIdentity({ day: 2, bookletNumber: 7, color: "AZUL" }, { day: 2, bookletNumber: 7, color: "AZUL", year: 2019 }, "Caderno 7 Azul");
+  it("item E (regressao do caso oficial real) — dia/caderno/cor/ano detectados e iguais nos dois PDFs -> confirmado automaticamente, sem mensagem", () => {
+    const result = checkDocumentIdentity(
+      { day: 2, bookletNumber: 7, color: "AZUL" },
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2019 },
+      buildConfirmedIdentity({ year: 2019, booklet: "Caderno 7 Azul" })
+    );
     expect(result.ok).toBe(true);
     expect(result.confirmedAutomatically).toBe(true);
     expect(result.messages).toEqual([]);
   });
 
-  it("TESTE ADVERSARIAL OBRIGATORIO (secao 4 da ordem) — prova Caderno 7 Azul x gabarito Caderno 8 Rosa: BLOQUEIA mesmo que o editor tenha digitado 'Caderno 7 Azul'", () => {
+  it("item F (preservado) — TESTE ADVERSARIAL OBRIGATORIO — prova Caderno 7 Azul x gabarito Caderno 8 Rosa: BLOQUEIA mesmo que o editor tenha digitado 'Caderno 7 Azul'", () => {
     const examDetected = { day: 2, bookletNumber: 7, color: "AZUL" };
     const keyDetected = { day: 2, bookletNumber: 8, color: "ROSA", year: 2019 };
-    const result = checkDocumentIdentity(examDetected, keyDetected, "Caderno 7 Azul");
+    const result = checkDocumentIdentity(examDetected, keyDetected, buildConfirmedIdentity({ year: 2019, booklet: "Caderno 7 Azul" }));
     expect(result.ok).toBe(false);
     expect(result.confirmedAutomatically).toBe(false);
     expect(result.messages.some((m) => m.includes("Caderno divergente"))).toBe(true);
@@ -280,9 +288,47 @@ describe("pdfEnemDocumentIdentity — extracao real do texto do PDF (Sprint 22.1
   });
 
   it("campo do editor nao menciona o caderno/cor detectado em um dos PDFs -> tambem bloqueia (fail-closed)", () => {
-    const result = checkDocumentIdentity({ day: 2, bookletNumber: 7, color: "AZUL" }, {}, "Caderno 9 Rosa");
+    const result = checkDocumentIdentity({ day: 2, bookletNumber: 7, color: "AZUL" }, {}, buildConfirmedIdentity({ booklet: "Caderno 9 Rosa" }));
     expect(result.ok).toBe(false);
     expect(result.messages.some((m) => m.includes("não aparece no campo"))).toBe(true);
+  });
+
+  it("item A — editor confirma ano 2019 e o gabarito detecta ano 2019 -> identidade valida, sem mensagem de ano", () => {
+    const result = checkDocumentIdentity(
+      { day: 2, bookletNumber: 7, color: "AZUL" },
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2019 },
+      buildConfirmedIdentity({ year: 2019, booklet: "Caderno 7 Azul" })
+    );
+    expect(result.ok).toBe(true);
+    expect(result.messages.some((m) => m.includes("Ano") || m.includes("ano"))).toBe(false);
+  });
+
+  it("item B/bloqueio principal desta sprint — editor confirma ano 2019 mas o GABARITO detecta ano 2020 -> BLOQUEIA mesmo com dia/caderno/cor batendo", () => {
+    const result = checkDocumentIdentity(
+      { day: 2, bookletNumber: 7, color: "AZUL" },
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2020 },
+      buildConfirmedIdentity({ year: 2019, booklet: "Caderno 7 Azul" })
+    );
+    expect(result.ok).toBe(false);
+    expect(result.confirmedAutomatically).toBe(false);
+    expect(result.messages.some((m) => m.includes("ano detectado no GABARITO (2020) diverge do ano confirmado (2019)"))).toBe(true);
+  });
+
+  it("item D — ano nao detectavel no gabarito nunca inventa divergencia; identidade fica 'nao confirmada automaticamente' quando aplicavel", () => {
+    // dia/caderno/cor batem, mas o gabarito nao trouxe ano nenhum (campo ausente).
+    const result = checkDocumentIdentity({ day: 2, bookletNumber: 7, color: "AZUL" }, { day: 2, bookletNumber: 7, color: "AZUL" }, buildConfirmedIdentity({ year: 2019, booklet: "Caderno 7 Azul" }));
+    expect(result.ok).toBe(true); // ausencia de ano nunca vira divergencia sozinha
+    expect(result.messages.some((m) => m.includes("diverge do ano"))).toBe(false);
+  });
+
+  it("ano divergente detectado ENTRE os dois PDFs (quando a prova tambem detectar ano no futuro) tambem bloqueia", () => {
+    const result = checkDocumentIdentity(
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2018 },
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2019 },
+      buildConfirmedIdentity({ year: 2019, booklet: "Caderno 7 Azul" })
+    );
+    expect(result.ok).toBe(false);
+    expect(result.messages.some((m) => m.includes("Ano divergente entre os PDFs"))).toBe(true);
   });
 });
 

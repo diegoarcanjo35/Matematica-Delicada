@@ -382,6 +382,38 @@ describe("Sprint 22.1 — TESTE ADVERSARIAL OBRIGATORIO de identidade documental
     const total = (db.sqlite.prepare("SELECT COUNT(*) as c FROM questions").get() as { c: number }).c;
     expect(total).toBe(0);
   });
+
+  it("Sprint 22.2 — itens B/C: editor confirma ano 2019, mas o GABARITO detecta ano 2020 (dia/caderno/cor batendo): preview vem com canApply=false e apply e rejeitado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+
+    const examPdf = buildExamPdfWithHeader([136, 137], { day: 2, bookletNumber: 7, color: "AZUL" });
+    const answerKeyPdf = buildAnswerKeyPdfWithIdentity(
+      [[136, "C"], [137, "A"], [101, "B"], [102, "D"], [103, "E"], [104, "C"]],
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2020 } // ANO divergente de proposito — dia/caderno/cor batendo
+    );
+
+    const form = buildPreviewFormData({ examPdf, answerKeyPdf, identity: { year: "2019", booklet: "Caderno 7 Azul" } });
+    const previewResponse = await previewPdfRoute(token, form);
+    expect(previewResponse.status).toBe(200);
+    const body = (await previewResponse.json()) as PreviewBody & { documentIdentityCheck?: { ok: boolean; messages: string[] }; globalWarnings?: string[] };
+    expect(body.canApply).toBe(false); // item B
+    expect(body.documentIdentityCheck?.ok).toBe(false);
+    expect(body.documentIdentityCheck?.messages.some((m) => m.includes("ano detectado no GABARITO (2020) diverge do ano confirmado (2019)"))).toBe(true);
+
+    const applyForm = new FormData();
+    applyForm.set("batchId", body.batchId!);
+    applyForm.set("examPdf", new File([examPdf], "prova.pdf", { type: "application/pdf" }));
+    applyForm.set("answerKeyPdf", new File([answerKeyPdf], "gabarito.pdf", { type: "application/pdf" }));
+    applyForm.set("year", "2019");
+    applyForm.set("application", "Aplicacao regular");
+    applyForm.set("booklet", "Caderno 7 Azul");
+    applyForm.set("selection", JSON.stringify([{ originalNumber: 136, patternPrincipalId: PUBLISHED_PATTERN_ID }]));
+    const applyResponse = await callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/apply`, applyForm, token));
+    expect(applyResponse.status).toBe(409); // item C
+    const total = (db.sqlite.prepare("SELECT COUNT(*) as c FROM questions").get() as { c: number }).c;
+    expect(total).toBe(0);
+  });
 });
 
 describe("Sprint 22.1 — fluxo de revisao/edicao editorial (secoes 5/7/10 da ordem)", () => {

@@ -21,6 +21,7 @@
    validado. */
 
 import type { PdfPageText } from "./pdfEnemExtractor";
+import type { ExamIdentity } from "./pdfEnemExamIdentity";
 
 export interface DetectedDocumentIdentity {
   year?: number;
@@ -120,13 +121,23 @@ function editorTextMentions(editorText: string, value: string | number | undefin
  *  "Caderno/cor") também bloqueia — sinal de que o editor pode ter
  *  confirmado a identidade errada. Campo não detectado em NENHUM dos
  *  dois lados nunca bloqueia sozinho (não inventa problema onde não há
- *  sinal). */
+ *  sinal).
+ *
+ *  Sprint 22.2 — recebe a `ExamIdentity` CONFIRMADA inteira (não mais só
+ *  o texto livre de "Caderno/cor"): bug real encontrado — `year` já era
+ *  detectado no gabarito (`detectAnswerKeyDocumentIdentity`) mas nunca
+ *  comparado contra nada, então "prova 2019 / gabarito 2020 / editor
+ *  confirmando 2019" passava batendo em dia/caderno/cor. Agora o ano
+ *  detectado em QUALQUER um dos dois PDFs é comparado tanto contra o ano
+ *  CONFIRMADO pelo editor quanto contra o ano detectado no OUTRO
+ *  documento — mesma disciplina fail-closed dos demais campos. */
 export function checkDocumentIdentity(
   examDetected: DetectedDocumentIdentity,
   answerKeyDetected: DetectedDocumentIdentity,
-  editorBookletText: string
+  confirmedIdentity: ExamIdentity
 ): DocumentIdentityCheckResult {
   const messages: string[] = [];
+  const editorBookletText = confirmedIdentity.booklet;
 
   if (examDetected.day !== undefined && answerKeyDetected.day !== undefined && examDetected.day !== answerKeyDetected.day) {
     messages.push(`Dia divergente entre os PDFs: a prova indica ${examDetected.day}º dia, o gabarito indica ${answerKeyDetected.day}º dia.`);
@@ -140,6 +151,15 @@ export function checkDocumentIdentity(
   }
   if (examDetected.color && answerKeyDetected.color && examDetected.color !== answerKeyDetected.color) {
     messages.push(`Cor de caderno divergente entre os PDFs: a prova indica ${examDetected.color}, o gabarito indica ${answerKeyDetected.color}.`);
+  }
+  if (examDetected.year !== undefined && answerKeyDetected.year !== undefined && examDetected.year !== answerKeyDetected.year) {
+    messages.push(`Ano divergente entre os PDFs: a prova indica ${examDetected.year}, o gabarito indica ${answerKeyDetected.year}.`);
+  }
+  if (answerKeyDetected.year !== undefined && answerKeyDetected.year !== confirmedIdentity.year) {
+    messages.push(`O ano detectado no GABARITO (${answerKeyDetected.year}) diverge do ano confirmado (${confirmedIdentity.year}).`);
+  }
+  if (examDetected.year !== undefined && examDetected.year !== confirmedIdentity.year) {
+    messages.push(`O ano detectado na PROVA (${examDetected.year}) diverge do ano confirmado (${confirmedIdentity.year}).`);
   }
 
   if (!editorTextMentions(editorBookletText, examDetected.bookletNumber)) {

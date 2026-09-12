@@ -162,7 +162,7 @@ export async function previewPdf(
   // documental suspeita.
   const examDocumentIdentity = detectExamDocumentIdentity(examExtract.pages);
   const answerKeyDocumentIdentity = detectAnswerKeyDocumentIdentity(answerKeyExtract.pages);
-  const documentIdentityCheck = checkDocumentIdentity(examDocumentIdentity, answerKeyDocumentIdentity, identity.booklet);
+  const documentIdentityCheck = checkDocumentIdentity(examDocumentIdentity, answerKeyDocumentIdentity, identity);
 
   // Seção 22 da ordem — pré-passo puro (sem D1) para coletar candidatos,
   // MESMO padrão de importValidationContext.ts (CSV/ZIP): resolve a
@@ -410,7 +410,7 @@ export async function applyPdf(
   // bloqueia o apply, mesmo que o preview tenha permitido gerar a prévia.
   const examDocumentIdentity = detectExamDocumentIdentity(examExtract.pages);
   const answerKeyDocumentIdentity = detectAnswerKeyDocumentIdentity(answerKeyExtract.pages);
-  const documentIdentityCheck = checkDocumentIdentity(examDocumentIdentity, answerKeyDocumentIdentity, payload.identity.booklet);
+  const documentIdentityCheck = checkDocumentIdentity(examDocumentIdentity, answerKeyDocumentIdentity, payload.identity);
   if (!documentIdentityCheck.ok) {
     return { ok: false, conflict: true, conflictReason: documentIdentityCheck.messages.join(" ") };
   }
