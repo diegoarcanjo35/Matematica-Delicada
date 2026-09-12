@@ -14,6 +14,13 @@ import {
 } from "../services/questionImportService";
 import { buildTemplateCsvV2 } from "../lib/questionImportV2";
 import { applyPackage, previewPackage, PACKAGE_MAX_FILE_BYTES } from "../services/questionPackageImportService";
+import {
+  applyPdf,
+  previewPdf,
+  PDF_ANSWER_KEY_MAX_BYTES,
+  PDF_EXAM_MAX_BYTES,
+  type PdfApplySelectionEntry,
+} from "../services/questionPdfImportService";
 
 /* Sprint 19, seção 8/17 da ordem — teto do CORPO multipart do apply de
    pacote ZIP (arquivo ZIP + boundary/campos ao redor). Mesma disciplina de
@@ -21,6 +28,11 @@ import { applyPackage, previewPackage, PACKAGE_MAX_FILE_BYTES } from "../service
    (worker/src/routes/editorialQuestions.ts) — nunca um cheque "só se o
    cabeçalho existir". */
 const PACKAGE_MAX_MULTIPART_BYTES = PACKAGE_MAX_FILE_BYTES + 1024 * 1024; // 1 MB de margem de overhead multipart.
+
+/* Sprint 22, seção 24 da ordem — teto do CORPO multipart do preview/apply
+   de PDF (dois arquivos: prova + gabarito, + campos de identidade ao
+   redor). Mesma disciplina de Content-Length obrigatório e fail-closed. */
+const PDF_PREVIEW_MULTIPART_MAX_BYTES = PDF_EXAM_MAX_BYTES + PDF_ANSWER_KEY_MAX_BYTES + 2 * 1024 * 1024; // 2 MB de margem.
 
 /* Rotas de importação CSV — Sprint 7 v1.0, seção 8.2 da ordem.
 
@@ -264,6 +276,149 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       ok: true,
       appliedCount: result.appliedCount ?? 0,
       imageCount: result.imageCount ?? 0,
+      alreadyApplied: result.alreadyApplied ?? false,
+      questionIds: result.questionIds ?? [],
+    });
+  }
+
+  // Sprint 22 — PDF oficial do ENEM (prova + gabarito), namespace SEPARADO
+  // dos de CSV/ZIP acima (mesmo cuidado de isolamento da Sprint 19: nunca
+  // reaproveita /preview ou /apply genéricos). Corpo sempre multipart/
+  // form-data — preview já recebe os dois PDFs (nunca só um), porque a
+  // identidade do exame precisa ser confirmada e o casamento questão↔
+  // gabarito calculado antes de qualquer prévia existir (seção 18/19 da
+  // ordem).
+  if (path === "/api/editorial/question-imports/pdf/preview") {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+
+    const contentLengthRaw = request.headers.get("content-length");
+    if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
+      return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido para upload de PDF.");
+    }
+    if (Number(contentLengthRaw) > PDF_PREVIEW_MULTIPART_MAX_BYTES) {
+      return Errors.payloadTooLarge("Corpo da requisição excede o limite permitido para gerar a prévia.");
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return Errors.badRequest("Corpo multipart/form-data inválido.");
+    }
+
+    const examPdf = form.get("examPdf");
+    const answerKeyPdf = form.get("answerKeyPdf");
+    if (!(examPdf instanceof File)) return Errors.badRequest("Campo 'examPdf' é obrigatório (PDF da prova).");
+    if (!(answerKeyPdf instanceof File)) return Errors.badRequest("Campo 'answerKeyPdf' é obrigatório (PDF do gabarito oficial).");
+
+    const examBytes = new Uint8Array(await examPdf.arrayBuffer());
+    if (examBytes.byteLength > PDF_EXAM_MAX_BYTES) return Errors.payloadTooLarge(`PDF da prova excede o limite de ${PDF_EXAM_MAX_BYTES} bytes.`);
+    const answerKeyBytes = new Uint8Array(await answerKeyPdf.arrayBuffer());
+    if (answerKeyBytes.byteLength > PDF_ANSWER_KEY_MAX_BYTES) return Errors.payloadTooLarge(`PDF do gabarito excede o limite de ${PDF_ANSWER_KEY_MAX_BYTES} bytes.`);
+
+    const confirmation = form.get("confirmation") === "true";
+    const identityInput = {
+      year: form.get("year"),
+      application: form.get("application"),
+      booklet: form.get("booklet"),
+      languageVariant: form.get("languageVariant"),
+      sourceUrl: form.get("sourceUrl"),
+    };
+
+    const result = await previewPdf(env.DB, actor.userId, examBytes, answerKeyBytes, identityInput, confirmation);
+    if (!result.ok) {
+      return json({ error: { code: `pdf_${result.reason ?? "invalid"}`, message: result.message ?? "PDF inválido.", errors: result.errors ?? [] } }, { status: 400 });
+    }
+    return json({
+      ok: true,
+      batchId: result.batchId,
+      examIdentity: result.examIdentity,
+      pageCount: result.pageCount,
+      detectedQuestionCount: result.detectedQuestionCount,
+      matchedAnswerCount: result.matchedAnswerCount,
+      questions: result.questions,
+      globalWarnings: result.globalWarnings ?? [],
+      canApply: result.canApply ?? false,
+      expiresAt: result.expiresAt,
+    });
+  }
+
+  if (path === "/api/editorial/question-imports/pdf/apply") {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+
+    const contentLengthRaw = request.headers.get("content-length");
+    if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
+      return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido para aplicar o PDF.");
+    }
+    if (Number(contentLengthRaw) > PDF_PREVIEW_MULTIPART_MAX_BYTES) {
+      return Errors.payloadTooLarge("Corpo da requisição excede o limite permitido para aplicar.");
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return Errors.badRequest("Corpo multipart/form-data inválido.");
+    }
+
+    const batchId = form.get("batchId");
+    if (!isValidQuestionId(batchId)) return Errors.badRequest("Informe batchId.");
+    const examPdf = form.get("examPdf");
+    const answerKeyPdf = form.get("answerKeyPdf");
+    if (!(examPdf instanceof File)) return Errors.badRequest("Campo 'examPdf' é obrigatório (o mesmo PDF da prova selecionado no preview).");
+    if (!(answerKeyPdf instanceof File)) return Errors.badRequest("Campo 'answerKeyPdf' é obrigatório (o mesmo PDF do gabarito selecionado no preview).");
+
+    const examBytes = new Uint8Array(await examPdf.arrayBuffer());
+    if (examBytes.byteLength > PDF_EXAM_MAX_BYTES) return Errors.payloadTooLarge(`PDF da prova excede o limite de ${PDF_EXAM_MAX_BYTES} bytes.`);
+    const answerKeyBytes = new Uint8Array(await answerKeyPdf.arrayBuffer());
+    if (answerKeyBytes.byteLength > PDF_ANSWER_KEY_MAX_BYTES) return Errors.payloadTooLarge(`PDF do gabarito excede o limite de ${PDF_ANSWER_KEY_MAX_BYTES} bytes.`);
+
+    const identityInput = {
+      year: form.get("year"),
+      application: form.get("application"),
+      booklet: form.get("booklet"),
+      languageVariant: form.get("languageVariant"),
+      sourceUrl: form.get("sourceUrl"),
+    };
+
+    const selectionRaw = form.get("selection");
+    if (typeof selectionRaw !== "string") return Errors.badRequest("Informe 'selection' (JSON com as questões escolhidas e seus padrões).");
+    let selection: PdfApplySelectionEntry[];
+    try {
+      const parsed = JSON.parse(selectionRaw) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("not an array");
+      selection = parsed.map((entry) => {
+        const e = entry as { originalNumber?: unknown; patternPrincipalId?: unknown };
+        if (typeof e.originalNumber !== "number" || typeof e.patternPrincipalId !== "string" || !e.patternPrincipalId) {
+          throw new Error("invalid entry");
+        }
+        return { originalNumber: e.originalNumber, patternPrincipalId: e.patternPrincipalId };
+      });
+    } catch {
+      return Errors.badRequest("Campo 'selection' inválido.");
+    }
+
+    const result = await applyPdf(env.DB, actor.userId, batchId, examBytes, answerKeyBytes, identityInput, selection);
+    if (!result.ok) {
+      if (result.notFound) return Errors.notFound();
+      if (result.expired) return json({ error: { code: "preview_expired", message: "A prévia expirou. Gere uma nova." } }, { status: 409 });
+      if (result.fingerprintMismatch) {
+        return json({ error: { code: "pdf_fingerprint_mismatch", message: "Os PDFs reenviados são diferentes dos que geraram esta prévia. Gere uma nova prévia." } }, { status: 409 });
+      }
+      if (result.identityMismatch) {
+        return json({ error: { code: "pdf_identity_mismatch", message: "A identidade do exame informada não corresponde à desta prévia." } }, { status: 409 });
+      }
+      if (result.conflict) {
+        return json({ error: { code: "pdf_conflict", message: result.conflictReason ?? "Um ou mais itens não podem ser aplicados. Revise a seleção." } }, { status: 409 });
+      }
+      if (result.tooManyStatements) {
+        return json({ error: { code: "pdf_too_many_statements", message: result.message ?? "Seleção grande demais para aplicar de uma vez." } }, { status: 413 });
+      }
+      return json({ error: { code: "pdf_invalid", message: result.message ?? "Prévia inválida ou seleção com erros pendentes." } }, { status: 400 });
+    }
+    return json({
+      ok: true,
+      appliedCount: result.appliedCount ?? 0,
       alreadyApplied: result.alreadyApplied ?? false,
       questionIds: result.questionIds ?? [],
     });

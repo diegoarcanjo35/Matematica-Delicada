@@ -436,3 +436,110 @@ export function applyPackageBatch(
   form.set("arquivo", file);
   return request("/api/editorial/question-imports/package/apply", { method: "POST", body: form });
 }
+
+/* ----------------------------- PDF oficial ENEM (Sprint 22) -----------------------
+   Seção 18 da ordem — namespace SEPARADO, sempre multipart/form-data (dois
+   PDFs + campos de identidade). Andreia nunca vê JSON bruto — a prévia
+   estruturada abaixo é o que a UI renderiza. */
+
+export interface PdfExamIdentity {
+  exam: "ENEM";
+  year: number;
+  application: string;
+  booklet: string;
+  languageVariant: string | null;
+  sourceLabel: string | null;
+}
+
+export interface PdfExamIdentityInput {
+  year: number;
+  application: string;
+  booklet: string;
+  languageVariant?: string;
+  sourceUrl?: string;
+}
+
+export interface PdfPreviewAlternative {
+  letter: "A" | "B" | "C" | "D" | "E";
+  text: string;
+}
+
+export interface PdfPreviewQuestion {
+  tempId: string;
+  originalNumber: number;
+  pageStart: number;
+  pageEnd: number;
+  statement: string;
+  alternatives: PdfPreviewAlternative[];
+  correctAlternative: "A" | "B" | "C" | "D" | "E" | null;
+  warnings: string[];
+  status: "ready" | "needs_review";
+  duplicateStatus: "none" | "exact";
+  visualReviewRequired: boolean;
+  patternPrincipalId: string | null;
+  canApply: boolean;
+  code: string;
+  fingerprint: string;
+}
+
+export interface PreviewPdfResponse {
+  ok: true;
+  batchId: string;
+  examIdentity: PdfExamIdentity;
+  pageCount: number;
+  detectedQuestionCount: number;
+  matchedAnswerCount: number;
+  questions: PdfPreviewQuestion[];
+  globalWarnings: string[];
+  canApply: boolean;
+  expiresAt: string;
+}
+
+function buildPdfIdentityFormEntries(identity: PdfExamIdentityInput): Array<[string, string]> {
+  const entries: Array<[string, string]> = [
+    ["year", String(identity.year)],
+    ["application", identity.application],
+    ["booklet", identity.booklet],
+  ];
+  if (identity.languageVariant) entries.push(["languageVariant", identity.languageVariant]);
+  if (identity.sourceUrl) entries.push(["sourceUrl", identity.sourceUrl]);
+  return entries;
+}
+
+export async function previewPdfEnem(
+  examPdf: File,
+  answerKeyPdf: File,
+  identity: PdfExamIdentityInput,
+  confirmation: boolean
+): Promise<PreviewPdfResponse> {
+  const form = new FormData();
+  form.set("examPdf", examPdf);
+  form.set("answerKeyPdf", answerKeyPdf);
+  for (const [key, value] of buildPdfIdentityFormEntries(identity)) form.set(key, value);
+  form.set("confirmation", confirmation ? "true" : "false");
+  return request("/api/editorial/question-imports/pdf/preview", { method: "POST", body: form });
+}
+
+export interface PdfApplySelectionEntry {
+  originalNumber: number;
+  patternPrincipalId: string;
+}
+
+/** Apply do PDF — mesma convenção do Pacote ZIP: os MESMOS dois `File`s já
+ *  escolhidos no preview são reenviados automaticamente pelo componente,
+ *  nunca pedidos de novo a Andreia. */
+export function applyPdfEnem(
+  batchId: string,
+  examPdf: File,
+  answerKeyPdf: File,
+  identity: PdfExamIdentityInput,
+  selection: PdfApplySelectionEntry[]
+): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[] }> {
+  const form = new FormData();
+  form.set("batchId", batchId);
+  form.set("examPdf", examPdf);
+  form.set("answerKeyPdf", answerKeyPdf);
+  for (const [key, value] of buildPdfIdentityFormEntries(identity)) form.set(key, value);
+  form.set("selection", JSON.stringify(selection));
+  return request("/api/editorial/question-imports/pdf/apply", { method: "POST", body: form });
+}

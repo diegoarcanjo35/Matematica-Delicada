@@ -5,15 +5,23 @@ import { ErrorState } from "../../components/ErrorState";
 import {
   applyImportBatch,
   applyPackageBatch,
+  applyPdfEnem,
   EditorialApiError,
+  fetchEditorialPatterns,
   previewImportFile,
   previewPackageFile,
+  previewPdfEnem,
   templateV2DownloadUrl,
   undoImportBatch,
+  type EditorialPatternSummary,
   type ImportRowError,
   type PackageError,
+  type PdfApplySelectionEntry,
+  type PdfExamIdentityInput,
+  type PdfPreviewQuestion,
   type PreviewImportResponse,
   type PreviewPackageResponse,
+  type PreviewPdfResponse,
 } from "../../api/editorialClient";
 import { useEditorialRole } from "../../auth/editorialRoleContext";
 import { buildPackageThumbnails } from "./packageZip";
@@ -29,7 +37,7 @@ import "./editorial.css";
    Sprint 7 v1.0 — o modo CSV (preview/erros por linha/aplicar/desfazer)
    continua o mesmo fluxo já em produção, só reorganizado sob o seletor. */
 
-type ImportMode = "csv" | "zip";
+type ImportMode = "csv" | "zip" | "pdf_enem";
 
 export function EditorialImportsPage() {
   const role = useEditorialRole();
@@ -49,15 +57,21 @@ export function EditorialImportsPage() {
             <input type="radio" name="import-mode" value="zip" checked={mode === "zip"} onChange={() => setMode("zip")} />
             Pacote ZIP com imagens
           </label>
+          <label>
+            <input type="radio" name="import-mode" value="pdf_enem" checked={mode === "pdf_enem"} onChange={() => setMode("pdf_enem")} />
+            PDF oficial ENEM
+          </label>
         </div>
         <p className="editorial__mode-description">
           {mode === "csv"
             ? "Para questões sem imagens ou importações estruturadas."
-            : "Para importar questões e imagens juntas. Você não precisa renomear as imagens."}
+            : mode === "zip"
+              ? "Para importar questões e imagens juntas. Você não precisa renomear as imagens."
+              : "Para extrair questões diretamente do PDF oficial da prova + PDF do gabarito do ENEM/INEP."}
         </p>
       </Card>
 
-      {mode === "csv" ? <CsvImportPanel /> : <PackageImportPanel isAdmin={role === "admin"} />}
+      {mode === "csv" ? <CsvImportPanel /> : mode === "zip" ? <PackageImportPanel isAdmin={role === "admin"} /> : <PdfImportPanel isAdmin={role === "admin"} />}
     </div>
   );
 }
@@ -445,6 +459,304 @@ function PackageImportPanel({ isAdmin }: { isAdmin: boolean }) {
                 <p role="status">{undoResult.alreadyUndone ? "Lote já havia sido desfeito." : `${undoResult.undoneCount} questão(ões) removida(s).`}</p>
               )}
             </div>
+          )}
+        </Card>
+      )}
+    </>
+  );
+}
+
+/* --------------------------------- Modo PDF ENEM (Sprint 22) --------------------------------- */
+
+/** Seção 31 da ordem — badge de status SEMPRE como texto (nunca só cor).
+ *  Prioridade: duplicidade > gabarito ausente > estrutura ambígua > imagem
+ *  não extraída > pronta. `duplicateStatus` desta sprint só distingue
+ *  "exact"/"none" (nunca uma camada "possível" separada — decisão
+ *  documentada no relatório final: nenhuma heurística de duplicidade
+ *  aproximada foi implementada, só correspondência exata de código ou
+ *  fingerprint). */
+function pdfQuestionBadge(q: PdfPreviewQuestion): string {
+  if (q.duplicateStatus === "exact") return "Já existe no banco";
+  if (q.correctAlternative === null) return "Gabarito ausente";
+  if (q.warnings.some((w) => /alternativa|ordem/i.test(w))) return "Estrutura ambígua";
+  if (q.visualReviewRequired) return "Imagem precisa revisão";
+  if (q.status === "needs_review") return "Precisa revisão";
+  return "Pronta";
+}
+
+interface PdfSelectionState {
+  included: boolean;
+  patternPrincipalId: string;
+}
+
+function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
+  const [examFile, setExamFile] = useState<File | null>(null);
+  const [answerKeyFile, setAnswerKeyFile] = useState<File | null>(null);
+  const [year, setYear] = useState("");
+  const [application, setApplication] = useState("");
+  const [booklet, setBooklet] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+
+  const [patterns, setPatterns] = useState<EditorialPatternSummary[]>([]);
+  const [preview, setPreview] = useState<PreviewPdfResponse | null>(null);
+  const [selection, setSelection] = useState<Map<number, PdfSelectionState>>(new Map());
+  const [finalConfirmChecked, setFinalConfirmChecked] = useState(false);
+  const [applyResult, setApplyResult] = useState<{ appliedCount: number; alreadyApplied: boolean } | null>(null);
+  const [undoResult, setUndoResult] = useState<{ undoneCount: number; alreadyUndone: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetchEditorialPatterns()
+      .then((r) => setPatterns(r.patterns.filter((p) => p.editorialStatus === "published")))
+      .catch(() => setPatterns([]));
+  }, []);
+
+  function currentIdentity(): PdfExamIdentityInput {
+    return { year: Number(year), application, booklet, sourceUrl: sourceUrl || undefined };
+  }
+
+  async function handleGeneratePreview() {
+    if (!examFile || !answerKeyFile) return;
+    setBusy(true);
+    setError(null);
+    setPreview(null);
+    setApplyResult(null);
+    setUndoResult(null);
+    setFinalConfirmChecked(false);
+    try {
+      const result = await previewPdfEnem(examFile, answerKeyFile, currentIdentity(), confirmed);
+      setPreview(result);
+      const initialSelection = new Map<number, PdfSelectionState>();
+      for (const q of result.questions) {
+        initialSelection.set(q.originalNumber, { included: q.canApply, patternPrincipalId: "" });
+      }
+      setSelection(initialSelection);
+    } catch (err) {
+      setError(err instanceof EditorialApiError ? err.message : "Não foi possível gerar a prévia deste PDF.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function updateSelection(originalNumber: number, patch: Partial<PdfSelectionState>) {
+    setSelection((prev) => {
+      const next = new Map(prev);
+      const current = next.get(originalNumber) ?? { included: false, patternPrincipalId: "" };
+      next.set(originalNumber, { ...current, ...patch });
+      return next;
+    });
+  }
+
+  const includedEntries = Array.from(selection.entries()).filter(([, s]) => s.included);
+  const includedCount = includedEntries.length;
+  const allIncludedHavePattern = includedEntries.every(([, s]) => s.patternPrincipalId.length > 0);
+  const canSubmitApply = includedCount > 0 && allIncludedHavePattern && finalConfirmChecked;
+
+  async function handleApply() {
+    if (!preview || !examFile || !answerKeyFile || !canSubmitApply) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const selectionPayload: PdfApplySelectionEntry[] = includedEntries.map(([originalNumber, s]) => ({
+        originalNumber,
+        patternPrincipalId: s.patternPrincipalId,
+      }));
+      const result = await applyPdfEnem(preview.batchId, examFile, answerKeyFile, currentIdentity(), selectionPayload);
+      setApplyResult(result);
+    } catch (err) {
+      setError(err instanceof EditorialApiError ? err.message : "Não foi possível aplicar esta importação.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUndo() {
+    if (!preview) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await undoImportBatch(preview.batchId);
+      setUndoResult(result);
+    } catch (err) {
+      setError(err instanceof EditorialApiError ? err.message : "Não foi possível desfazer esta importação.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Card className="editorial__nav-card">
+        <p>1. Arquivos</p>
+        <label htmlFor="pdf-exam-file" className="editorial__field-label">
+          PDF da prova
+        </label>
+        <input
+          id="pdf-exam-file"
+          type="file"
+          accept="application/pdf,.pdf"
+          onChange={(e) => setExamFile(e.target.files?.[0] ?? null)}
+          disabled={busy}
+        />
+        <label htmlFor="pdf-answerkey-file" className="editorial__field-label">
+          PDF do gabarito oficial
+        </label>
+        <input
+          id="pdf-answerkey-file"
+          type="file"
+          accept="application/pdf,.pdf"
+          onChange={(e) => setAnswerKeyFile(e.target.files?.[0] ?? null)}
+          disabled={busy}
+        />
+      </Card>
+
+      <Card className="editorial__nav-card">
+        <p>2. Identificação</p>
+        <label htmlFor="pdf-year" className="editorial__field-label">
+          Ano
+        </label>
+        <input id="pdf-year" type="number" value={year} onChange={(e) => setYear(e.target.value)} disabled={busy} />
+        <label htmlFor="pdf-application" className="editorial__field-label">
+          Aplicação
+        </label>
+        <input
+          id="pdf-application"
+          type="text"
+          placeholder="Ex.: Aplicação regular, Reaplicação, PPL"
+          value={application}
+          onChange={(e) => setApplication(e.target.value)}
+          disabled={busy}
+        />
+        <label htmlFor="pdf-booklet" className="editorial__field-label">
+          Caderno/cor
+        </label>
+        <input id="pdf-booklet" type="text" placeholder="Ex.: Caderno Azul" value={booklet} onChange={(e) => setBooklet(e.target.value)} disabled={busy} />
+        <label htmlFor="pdf-source-url" className="editorial__field-label">
+          Fonte/URL (opcional)
+        </label>
+        <input id="pdf-source-url" type="text" value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} disabled={busy} />
+        <label>
+          <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} disabled={busy} />
+          Confirmo que estes arquivos correspondem à prova e ao gabarito oficial da mesma aplicação/caderno.
+        </label>
+      </Card>
+
+      <Card className="editorial__nav-card">
+        <p>3. Analisar</p>
+        <div className="editorial__actions">
+          <Button
+            type="button"
+            onClick={() => void handleGeneratePreview()}
+            isLoading={busy}
+            disabled={!examFile || !answerKeyFile || !confirmed || !year || !application || !booklet}
+          >
+            Gerar prévia
+          </Button>
+        </div>
+      </Card>
+
+      {error && <ErrorState description={error} />}
+
+      {preview && !applyResult && (
+        <Card className="editorial__nav-card" data-testid="pdf-preview">
+          <h2>4. Revisão</h2>
+          <p>
+            {preview.detectedQuestionCount} questões detectadas — {preview.questions.filter((q) => q.canApply).length} prontas,{" "}
+            {preview.questions.filter((q) => !q.canApply).length} precisam revisão,{" "}
+            {preview.questions.filter((q) => q.visualReviewRequired).length} com imagens,{" "}
+            {preview.questions.filter((q) => q.duplicateStatus === "exact").length} possíveis duplicidades.
+          </p>
+          {preview.globalWarnings.length > 0 && (
+            <ul role="alert">
+              {preview.globalWarnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
+
+          <ul className="editorial__package-questions" data-testid="pdf-question-list">
+            {preview.questions.map((q) => {
+              const sel = selection.get(q.originalNumber) ?? { included: false, patternPrincipalId: "" };
+              const badge = pdfQuestionBadge(q);
+              return (
+                <li key={q.tempId} className="editorial__package-question">
+                  <p className="editorial__package-question-header">
+                    <strong>Questão {q.originalNumber}</strong> — Página {q.pageStart === q.pageEnd ? q.pageStart : `${q.pageStart}-${q.pageEnd}`}{" "}
+                    <span>{badge}</span>
+                  </p>
+                  <p>{q.statement}</p>
+                  <ul>
+                    {q.alternatives.map((a) => (
+                      <li key={a.letter}>
+                        {a.letter}. {a.text}
+                        {q.correctAlternative === a.letter ? " (gabarito oficial)" : ""}
+                      </li>
+                    ))}
+                  </ul>
+                  {q.warnings.length > 0 && (
+                    <ul role="alert">
+                      {q.warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <label htmlFor={`pdf-pattern-${q.originalNumber}`} className="editorial__field-label">
+                    Padrão principal
+                  </label>
+                  <select
+                    id={`pdf-pattern-${q.originalNumber}`}
+                    value={sel.patternPrincipalId}
+                    onChange={(e) => updateSelection(q.originalNumber, { patternPrincipalId: e.target.value })}
+                    disabled={busy || !sel.included}
+                  >
+                    <option value="">Selecione um padrão</option>
+                    {patterns.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={sel.included}
+                      disabled={busy || !q.canApply}
+                      onChange={(e) => updateSelection(q.originalNumber, { included: e.target.checked })}
+                    />
+                    Selecionar para aplicar
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+
+          <p>Serão criadas {includedCount} questões em rascunho.</p>
+          <label>
+            <input type="checkbox" checked={finalConfirmChecked} onChange={(e) => setFinalConfirmChecked(e.target.checked)} disabled={busy} />
+            Revisei os gabaritos e os dados desta importação.
+          </label>
+          <div className="editorial__actions">
+            <Button type="button" onClick={() => void handleApply()} isLoading={busy} disabled={!canSubmitApply}>
+              Criar {includedCount} rascunhos
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {applyResult && (
+        <Card className="editorial__nav-card" data-testid="pdf-applied-result">
+          <p role="status">
+            {applyResult.alreadyApplied ? "Este lote já havia sido aplicado anteriormente." : `${applyResult.appliedCount} questão(ões) criada(s) como rascunho.`}
+          </p>
+          {isAdmin && preview && !undoResult && (
+            <Button type="button" variant="secondary" onClick={() => void handleUndo()} isLoading={busy}>
+              Desfazer lote
+            </Button>
+          )}
+          {undoResult && (
+            <p role="status">{undoResult.alreadyUndone ? "Lote já havia sido desfeito." : `${undoResult.undoneCount} questão(ões) removida(s).`}</p>
           )}
         </Card>
       )}
