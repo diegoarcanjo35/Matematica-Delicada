@@ -80,3 +80,44 @@ export function buildAnswerKeyPdf(answers: Array<[number, string]>): Uint8Array 
   const lines = answers.map(([n, letter]) => `${n} ${letter}`);
   return buildFixturePdf([lines]);
 }
+
+/** Sprint 22.1 — mesmo builder de prova, mas repetindo em CADA página o
+ *  cabeçalho real do ENEM/INEP ("<AREA> - <DIA>o dia | Caderno <NUM> -
+ *  <COR> - Pagina <N>", confirmado contra o PDF oficial 2019 usado no
+ *  smoke desta sprint) — necessário para os testes de
+ *  pdfEnemDocumentIdentity.ts. "o" sem acento (ASCII puro, mesma
+ *  convenção do resto deste arquivo) casa com a mesma regex tolerante a
+ *  "º"/"o" usada no parser real. */
+export function buildExamPdfWithHeader(
+  questionNumbers: number[],
+  header: { day: number; bookletNumber: number; color: string; area?: string }
+): Uint8Array {
+  const headerLine = `${header.area ?? "MT"} - ${header.day}o dia | Caderno ${header.bookletNumber} - ${header.color} - Pagina 1`;
+  const pages: string[][] = [[headerLine]];
+  for (const n of questionNumbers) {
+    const current = pages[pages.length - 1];
+    current.push(`QUESTAO ${n}`);
+    current.push(`Enunciado tecnico da questao ${n} de teste.`);
+    current.push(`A. Alternativa A da questao ${n}`);
+    current.push(`B. Alternativa B da questao ${n}`);
+    current.push(`C. Alternativa C da questao ${n}`);
+    current.push(`D. Alternativa D da questao ${n}`);
+    current.push(`E. Alternativa E da questao ${n}`);
+  }
+  return buildFixturePdf(pages);
+}
+
+/** Gabarito técnico com as duas linhas de identidade reais do ENEM/INEP
+ *  ("<DIA>o DIA - CADERNO <NUM>" e "<COR> Gabarito <ANO>"), mais as
+ *  respostas. */
+export function buildAnswerKeyPdfWithIdentity(
+  answers: Array<[number, string]>,
+  identity: { day: number; bookletNumber: number; color: string; year: number }
+): Uint8Array {
+  const lines = [
+    `${identity.day}o DIA - CADERNO ${identity.bookletNumber}`,
+    `${identity.color} Gabarito ${identity.year}`,
+    ...answers.map(([n, letter]) => `${n} ${letter}`),
+  ];
+  return buildFixturePdf([lines]);
+}

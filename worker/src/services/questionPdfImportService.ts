@@ -35,7 +35,14 @@ import {
   type ExamIdentity,
   type ExamIdentityInput,
 } from "../lib/pdfEnemExamIdentity";
+import {
+  checkDocumentIdentity,
+  detectAnswerKeyDocumentIdentity,
+  detectExamDocumentIdentity,
+  type DocumentIdentityCheckResult,
+} from "../lib/pdfEnemDocumentIdentity";
 import { sha256HexOfBytes } from "../lib/crypto";
+import { computeQuestionFingerprint } from "../lib/fingerprint";
 import { queryExistingCodes, queryExistingFingerprints } from "../lib/importValidationContext";
 import { isPayloadWithinBatchLimit, PAYLOAD_TOO_LARGE_MESSAGE, IMPORT_BATCH_MAX_D1_STATEMENTS, plannedD1StatementCountForRows } from "../lib/importBatchLimits";
 import { recordAuditEvent } from "../repositories/auditRepository";
@@ -64,12 +71,17 @@ export interface PdfBatchPayload {
   examFingerprint: string;
   answerKeyFingerprint: string;
   questions: PdfEnemPreviewQuestion[];
+  /** Seção 2/3 da ordem — identidade DETECTADA no texto dos dois PDFs,
+   *  persistida para o apply poder revalidar a MESMA comparação (nunca
+   *  confiando só no resultado do preview). */
+  documentIdentityCheck: DocumentIdentityCheckResult;
 }
 
 export interface PdfPreviewResult {
   ok: boolean;
   batchId?: string;
   examIdentity?: ExamIdentity;
+  documentIdentityCheck?: DocumentIdentityCheckResult;
   pageCount?: number;
   detectedQuestionCount?: number;
   matchedAnswerCount?: number;
@@ -142,6 +154,16 @@ export async function previewPdf(
   const answerKeyParse = parseAnswerKeyFromPageLines(answerKeyPagesLines);
   const answerKey = answerKeyParse.answers ?? new Map<number, AnswerLetter>();
 
+  // Seção 2/3 da ordem — identidade DETECTADA no texto dos dois PDFs,
+  // comparada em três vias (prova × gabarito × o que o editor confirmou
+  // no campo "Caderno/cor"). Fail-closed: qualquer divergência REAL força
+  // canApply=false no lote inteiro, mesmo que questões individuais
+  // estejam estruturalmente prontas — nunca aplicável com identidade
+  // documental suspeita.
+  const examDocumentIdentity = detectExamDocumentIdentity(examExtract.pages);
+  const answerKeyDocumentIdentity = detectAnswerKeyDocumentIdentity(answerKeyExtract.pages);
+  const documentIdentityCheck = checkDocumentIdentity(examDocumentIdentity, answerKeyDocumentIdentity, identity.booklet);
+
   // Seção 22 da ordem — pré-passo puro (sem D1) para coletar candidatos,
   // MESMO padrão de importValidationContext.ts (CSV/ZIP): resolve a
   // existência de código/fingerprint em consultas EM LOTE, nunca uma
@@ -158,7 +180,7 @@ export async function previewPdf(
   // uma consulta por questão, sempre 1 consulta em lote adicional.
   const finalResult = await buildPreviewQuestions(rawQuestions, answerKey, identity, existingCodes, existingFingerprints);
 
-  const globalWarnings = [...segmentationWarnings, ...matchWarnings, ...answerKeyParse.errors];
+  const globalWarnings = [...segmentationWarnings, ...matchWarnings, ...answerKeyParse.errors, ...documentIdentityCheck.messages];
 
   const payload: PdfBatchPayload = {
     sourceKind: "pdf_enem",
@@ -166,6 +188,7 @@ export async function previewPdf(
     examFingerprint,
     answerKeyFingerprint,
     questions: finalResult.items,
+    documentIdentityCheck,
   };
 
   const payloadJson = JSON.stringify(payload);
@@ -215,21 +238,40 @@ export async function previewPdf(
     ok: true,
     batchId,
     examIdentity: identity,
+    documentIdentityCheck,
     pageCount: examExtract.pageCount,
     detectedQuestionCount: finalResult.items.length,
     matchedAnswerCount: finalResult.items.filter((q) => q.correctAlternative !== null).length,
     questions: finalResult.items,
     globalWarnings,
-    canApply: finalResult.items.some((q) => q.canApply),
+    // Seção 3 da ordem — divergência documental real (ok=false) derruba
+    // canApply do LOTE INTEIRO, mesmo com questões individualmente
+    // prontas — nunca aplicável com identidade suspeita entre os PDFs.
+    canApply: documentIdentityCheck.ok && finalResult.items.some((q) => q.canApply),
     expiresAt,
   };
 }
 
 /* -------------------------------- Apply -------------------------------- */
 
+/** Seção 5/7 da ordem — correção editorial de uma questão `needs_review`
+ *  por problema ESTRUTURAL (nunca de gabarito). `reviewedStatement`/
+ *  `reviewedAlternatives` são OPCIONAIS: ausentes, a questão é aplicada
+ *  como extraída; presentes, substituem enunciado/textos das alternativas
+ *  e o backend revalida tudo do zero (nunca confia no texto editado sem
+ *  checar). Deliberadamente SEM nenhum campo de gabarito/resposta correta
+ *  aqui — a interface nem permite ao cliente enviar isso; ver seção 7:
+ *  "preserva correctAlternative exclusivamente do gabarito oficial". */
+export interface PdfReviewedAlternative {
+  letter: "A" | "B" | "C" | "D" | "E";
+  text: string;
+}
+
 export interface PdfApplySelectionEntry {
   originalNumber: number;
   patternPrincipalId: string;
+  reviewedStatement?: string;
+  reviewedAlternatives?: PdfReviewedAlternative[];
 }
 
 export interface PdfApplyResult {
@@ -250,6 +292,65 @@ export interface PdfApplyResult {
 
 function logPotentialConflict(context: string, error: unknown): void {
   console.error(`questionPdfImportService: ${context}`, { error: error instanceof Error ? error.message : String(error) });
+}
+
+const REQUIRED_REVIEWED_LETTERS = ["A", "B", "C", "D", "E"] as const;
+
+export interface ReviewEditResult {
+  ok: boolean;
+  item?: PdfEnemPreviewQuestion;
+  reason?: string;
+}
+
+/** Seção 5/7 da ordem — aplica (quando presente) a correção editorial de
+ *  enunciado/alternativas de UMA questão, revalidando do zero — nunca
+ *  confia no texto editado sem checar de novo:
+ *    - exatamente 5 alternativas, letras A-E únicas e na ordem certa;
+ *    - nenhum texto vazio;
+ *    - fingerprint RECALCULADO a partir do texto editado (nunca reaproveita
+ *      o fingerprint da extração original);
+ *    - `correctAlternative` NUNCA muda — vem exclusivamente do casamento
+ *      já feito com o PDF de gabarito na revalidação (`item` de entrada),
+ *      e a interface de entrada (`PdfApplySelectionEntry`) nem tem como
+ *      carregar uma resposta correta alternativa.
+ *  Sem `reviewedStatement`/`reviewedAlternatives`, devolve o item
+ *  original sem tocar em nada. */
+export async function applyReviewEdit(item: PdfEnemPreviewQuestion, entry: PdfApplySelectionEntry): Promise<ReviewEditResult> {
+  if (entry.reviewedStatement === undefined && entry.reviewedAlternatives === undefined) {
+    return { ok: true, item };
+  }
+
+  const statement = (entry.reviewedStatement ?? item.statement).trim();
+  if (statement.length === 0) {
+    return { ok: false, reason: `Questão ${item.originalNumber}: enunciado editado não pode ficar vazio.` };
+  }
+
+  const alternatives = entry.reviewedAlternatives ?? item.alternatives;
+  if (alternatives.length !== 5 || alternatives.some((a, i) => a.letter !== REQUIRED_REVIEWED_LETTERS[i])) {
+    return { ok: false, reason: `Questão ${item.originalNumber}: a correção precisa ter exatamente as 5 alternativas A-E, nesta ordem.` };
+  }
+  if (alternatives.some((a) => a.text.trim().length === 0)) {
+    return { ok: false, reason: `Questão ${item.originalNumber}: nenhuma alternativa da correção pode ficar vazia.` };
+  }
+
+  // Fingerprint SEMPRE recalculado do conteúdo efetivo — nunca reaproveita
+  // o da extração original quando o texto mudou. `isCorrect` sempre
+  // false aqui (mesma convenção do resto do pipeline): o fingerprint
+  // nunca depende de qual alternativa é a correta.
+  const fingerprint = await computeQuestionFingerprint(
+    statement,
+    alternatives.map((a) => ({ letter: a.letter, text: a.text.trim(), isCorrect: false }))
+  );
+
+  return {
+    ok: true,
+    item: {
+      ...item,
+      statement,
+      alternatives: alternatives.map((a) => ({ letter: a.letter, text: a.text.trim() })),
+      fingerprint,
+    },
+  };
 }
 
 export async function applyPdf(
@@ -303,6 +404,17 @@ export async function applyPdf(
   const answerKeyExtract = await extractPdfPages(answerKeyBytes);
   if (!answerKeyExtract.ok) return { ok: false, invalid: true };
 
+  // Seção 3 da ordem — revalidado do ZERO a partir dos bytes reenviados
+  // (nunca confia no `documentIdentityCheck` persistido no preview como
+  // fonte de verdade final): qualquer divergência REAL entre os PDFs
+  // bloqueia o apply, mesmo que o preview tenha permitido gerar a prévia.
+  const examDocumentIdentity = detectExamDocumentIdentity(examExtract.pages);
+  const answerKeyDocumentIdentity = detectAnswerKeyDocumentIdentity(answerKeyExtract.pages);
+  const documentIdentityCheck = checkDocumentIdentity(examDocumentIdentity, answerKeyDocumentIdentity, payload.identity.booklet);
+  if (!documentIdentityCheck.ok) {
+    return { ok: false, conflict: true, conflictReason: documentIdentityCheck.messages.join(" ") };
+  }
+
   const { questions: rawQuestions } = segmentExamQuestions(examExtract.pages);
   const answerKeyPagesLines = await fingerprintPagesText(answerKeyExtract.pages);
   const { answers: answerKey } = parseAnswerKeyFromPageLines(answerKeyPagesLines);
@@ -325,24 +437,58 @@ export async function applyPdf(
       : { results: [] };
   const publishedPatternIds = new Set((publishedRows.results ?? []).map((r) => r.id));
 
-  // Seção 21 da ordem — tudo ou nada: qualquer entrada da seleção que não
-  // esteja `canApply` (ainda), ou sem padrão principal published válido,
-  // bloqueia o LOTE INTEIRO. Nenhum apply parcial silencioso.
+  // Seção 5/7 da ordem — resolve a correção editorial (quando presente) de
+  // CADA entrada ANTES de qualquer checagem de prontidão — nunca decide
+  // "pronta"/"não pronta" com base no texto ORIGINAL quando um texto
+  // corrigido foi enviado.
   const seenSelectionNumbers = new Set<number>();
+  const effectiveByNumber = new Map<number, PdfEnemPreviewQuestion>();
   for (const entry of selection) {
     if (seenSelectionNumbers.has(entry.originalNumber)) return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber} selecionada mais de uma vez.` };
     seenSelectionNumbers.add(entry.originalNumber);
 
     const item = byNumber.get(entry.originalNumber);
     if (!item) return { ok: false, invalid: true, message: `Questão ${entry.originalNumber} não foi reconhecida nesta revalidação.` };
-    if (!item.canApply) return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber} não está pronta para aplicar.` };
+
+    const reviewResult = await applyReviewEdit(item, entry);
+    if (!reviewResult.ok) return { ok: false, conflict: true, conflictReason: reviewResult.reason };
+    effectiveByNumber.set(entry.originalNumber, reviewResult.item!);
+  }
+
+  // Fingerprints EFETIVOS (pós-correção, quando houve) que ainda não foram
+  // checados contra o banco — a correção pode ter mudado o fingerprint
+  // original já revalidado acima. Nunca uma consulta por questão: uma
+  // única consulta em lote para os fingerprints que MUDARAM.
+  const editedFingerprints = selection
+    .map((entry) => effectiveByNumber.get(entry.originalNumber)!.fingerprint)
+    .filter((fp) => !existingFingerprints.has(fp));
+  const editedExistingFingerprints = await queryExistingFingerprints(db, editedFingerprints);
+  const allExistingFingerprints = new Set([...existingFingerprints, ...editedExistingFingerprints]);
+
+  // Seção 21 da ordem — tudo ou nada: qualquer entrada da seleção que não
+  // esteja pronta (gabarito ausente, conteúdo visual, duplicidade — mesmo
+  // após a correção editorial —, ou sem padrão principal published
+  // válido) bloqueia o LOTE INTEIRO. Nenhum apply parcial silencioso.
+  const seenFingerprintsInSelection = new Set<string>();
+  for (const entry of selection) {
+    const item = effectiveByNumber.get(entry.originalNumber)!;
+    if (item.correctAlternative === null) {
+      return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: gabarito ausente — nunca pode ser inferido, nunca escolhido manualmente.` };
+    }
+    if (item.visualReviewRequired) {
+      return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: conteúdo visual não extraído — precisa ser criada manualmente com a imagem anexada.` };
+    }
+    if (existingCodes.has(item.code) || allExistingFingerprints.has(item.fingerprint) || seenFingerprintsInSelection.has(item.fingerprint)) {
+      return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber}: duplicidade (código ou enunciado equivalente já existente).` };
+    }
+    seenFingerprintsInSelection.add(item.fingerprint);
     if (!entry.patternPrincipalId || !publishedPatternIds.has(entry.patternPrincipalId)) {
       return { ok: false, conflict: true, conflictReason: `Questão ${entry.originalNumber} sem padrão principal published válido.` };
     }
   }
 
   const selectedRows = selection.map((entry) => {
-    const item = byNumber.get(entry.originalNumber)!;
+    const item = effectiveByNumber.get(entry.originalNumber)!;
     const alternativas: AlternativeInput[] = item.alternatives.map((a) => ({
       letter: a.letter,
       text: a.text,

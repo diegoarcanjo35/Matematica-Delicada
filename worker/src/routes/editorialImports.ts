@@ -333,6 +333,7 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       ok: true,
       batchId: result.batchId,
       examIdentity: result.examIdentity,
+      documentIdentityCheck: result.documentIdentityCheck,
       pageCount: result.pageCount,
       detectedQuestionCount: result.detectedQuestionCount,
       matchedAnswerCount: result.matchedAnswerCount,
@@ -388,11 +389,36 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       const parsed = JSON.parse(selectionRaw) as unknown;
       if (!Array.isArray(parsed)) throw new Error("not an array");
       selection = parsed.map((entry) => {
-        const e = entry as { originalNumber?: unknown; patternPrincipalId?: unknown };
+        const e = entry as {
+          originalNumber?: unknown;
+          patternPrincipalId?: unknown;
+          reviewedStatement?: unknown;
+          reviewedAlternatives?: unknown;
+        };
         if (typeof e.originalNumber !== "number" || typeof e.patternPrincipalId !== "string" || !e.patternPrincipalId) {
           throw new Error("invalid entry");
         }
-        return { originalNumber: e.originalNumber, patternPrincipalId: e.patternPrincipalId };
+        const result: PdfApplySelectionEntry = { originalNumber: e.originalNumber, patternPrincipalId: e.patternPrincipalId };
+        // Seção 5/7 da ordem — correção editorial OPCIONAL de enunciado/
+        // alternativas; NUNCA um campo de gabarito/resposta correta aqui
+        // (a interface não permite — ver PdfApplySelectionEntry). Validação
+        // estrutural completa (5 letras A-E, textos não vazios) acontece no
+        // serviço, nunca só aqui.
+        if (e.reviewedStatement !== undefined) {
+          if (typeof e.reviewedStatement !== "string") throw new Error("invalid reviewedStatement");
+          result.reviewedStatement = e.reviewedStatement;
+        }
+        if (e.reviewedAlternatives !== undefined) {
+          if (!Array.isArray(e.reviewedAlternatives)) throw new Error("invalid reviewedAlternatives");
+          result.reviewedAlternatives = e.reviewedAlternatives.map((alt) => {
+            const a = alt as { letter?: unknown; text?: unknown };
+            if (typeof a.letter !== "string" || !["A", "B", "C", "D", "E"].includes(a.letter) || typeof a.text !== "string") {
+              throw new Error("invalid reviewed alternative");
+            }
+            return { letter: a.letter as "A" | "B" | "C" | "D" | "E", text: a.text };
+          });
+        }
+        return result;
       });
     } catch {
       return Errors.badRequest("Campo 'selection' inválido.");

@@ -317,4 +317,81 @@ describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
     await user.click(screen.getByRole("radio", { name: "CSV" }));
     expect(screen.getByLabelText("Arquivo CSV")).toBeInTheDocument();
   });
+
+  it("Sprint 22.1 (secao 5/7) — corrigir uma questao com problema estrutural envia reviewedStatement/reviewedAlternatives no apply, nunca o gabarito", async () => {
+    const editableQuestion = {
+      tempId: "3",
+      originalNumber: 3,
+      pageStart: 1,
+      pageEnd: 1,
+      statement: "Enunciado com problema estrutural (so 4 alternativas).",
+      alternatives: [
+        { letter: "A", text: "Alt A" },
+        { letter: "B", text: "Alt B" },
+        { letter: "C", text: "Alt C" },
+        { letter: "D", text: "Alt D" },
+      ],
+      correctAlternative: "B",
+      warnings: ["Detectadas 4 alternativas (esperado exatamente 5)."],
+      status: "needs_review",
+      duplicateStatus: "none",
+      visualReviewRequired: false,
+      patternPrincipalId: null,
+      canApply: false,
+      code: "ENEM-2019-APLICACAO-REGULA-003",
+      fingerprint: "fp-3",
+    };
+    let capturedApplyBody: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/editorial/patterns")) return new Response(JSON.stringify(PATTERNS_RESPONSE), { status: 200 });
+        if (url.includes("/question-imports/pdf/preview")) {
+          return new Response(JSON.stringify(buildPreviewResponse({ questions: [editableQuestion] })), { status: 200 });
+        }
+        if (url.includes("/question-imports/pdf/apply")) {
+          const form = init!.body as FormData;
+          capturedApplyBody = form.get("selection") as string;
+          return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-3"] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      })
+    );
+
+    const user = userEvent.setup();
+    renderPage();
+    await selectPdfMode(user);
+    await user.upload(screen.getByLabelText("PDF da prova"), buildPdfFile("prova.pdf"));
+    await user.upload(screen.getByLabelText("PDF do gabarito oficial"), buildPdfFile("gabarito.pdf"));
+    await fillIdentityAndConfirm(user);
+    await user.click(screen.getByRole("button", { name: "Gerar prévia" }));
+
+    await screen.findByTestId("pdf-preview");
+    await user.click(screen.getByRole("button", { name: "Editar enunciado/alternativas" }));
+
+    const statementBox = screen.getByLabelText("Enunciado (correção editorial)");
+    await user.clear(statementBox);
+    await user.type(statementBox, "Enunciado corrigido pela editora.");
+    const altEField = screen.getByLabelText("Alternativa E");
+    await user.type(altEField, "Alt E corrigida");
+
+    const checkbox = screen.getByLabelText("Selecionar para aplicar");
+    await user.click(checkbox);
+    const select = screen.getByLabelText("Padrão principal", { selector: "#pdf-pattern-3" });
+    await user.selectOptions(select, "pat-published-1");
+    await user.click(screen.getByLabelText("Revisei os gabaritos e os dados desta importação."));
+    await user.click(screen.getByRole("button", { name: "Criar 1 rascunhos" }));
+
+    await screen.findByTestId("pdf-applied-result");
+    expect(capturedApplyBody).not.toBeNull();
+    const selection = JSON.parse(capturedApplyBody!);
+    expect(selection).toHaveLength(1);
+    expect(selection[0].reviewedStatement).toBe("Enunciado corrigido pela editora.");
+    expect(selection[0].reviewedAlternatives).toHaveLength(5);
+    expect(selection[0].reviewedAlternatives.find((a: { letter: string }) => a.letter === "E").text).toBe("Alt E corrigida");
+    // Nenhum campo de gabarito/resposta correta é enviado pelo cliente —
+    // a interface nem tem esse campo.
+    expect(selection[0]).not.toHaveProperty("correctAlternative");
+  });
 });

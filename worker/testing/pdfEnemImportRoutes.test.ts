@@ -7,7 +7,8 @@ import { createSession } from "../src/repositories/sessionRepository";
 import { sha256Hex, hashPassword } from "../src/lib/crypto";
 import type { Env } from "../src/env";
 import { handleEditorialImportsRequest } from "../src/routes/editorialImports";
-import { buildAnswerKeyPdf, buildExamPdf, buildFixturePdf } from "./pdfFixtureBuilder";
+import { buildAnswerKeyPdf, buildAnswerKeyPdfWithIdentity, buildExamPdf, buildExamPdfWithHeader, buildFixturePdf } from "./pdfFixtureBuilder";
+import { computeQuestionFingerprint } from "../src/lib/fingerprint";
 
 /* Sprint 22 — importador de PDF oficial do ENEM: RBAC, contrato HTTP,
    atomicidade/idempotência do apply e a garantia mais crítica da ordem —
@@ -70,7 +71,7 @@ const DEFAULT_IDENTITY = { year: "2019", application: "Aplicacao regular", bookl
 function buildPreviewFormData(overrides: {
   examPdf?: Uint8Array;
   answerKeyPdf?: Uint8Array;
-  identity?: Partial<typeof DEFAULT_IDENTITY>;
+  identity?: Partial<typeof DEFAULT_IDENTITY> & { sourceUrl?: string };
   confirmation?: string;
 } = {}): FormData {
   const identity = { ...DEFAULT_IDENTITY, ...overrides.identity };
@@ -87,6 +88,7 @@ function buildPreviewFormData(overrides: {
   form.set("year", identity.year);
   form.set("application", identity.application);
   form.set("booklet", identity.booklet);
+  if (overrides.identity?.sourceUrl) form.set("sourceUrl", overrides.identity.sourceUrl);
   form.set("confirmation", overrides.confirmation ?? "true");
   return form;
 }
@@ -190,36 +192,36 @@ describe("Sprint 22 — contrato do preview", () => {
   });
 });
 
+async function applyPdfRoute(
+  token: string,
+  batchId: string,
+  selection: Array<{ originalNumber: number; patternPrincipalId: string; reviewedStatement?: string; reviewedAlternatives?: Array<{ letter: string; text: string }> }>,
+  overrides: { examPdf?: Uint8Array; answerKeyPdf?: Uint8Array; identity?: Partial<typeof DEFAULT_IDENTITY> } = {}
+): Promise<Response> {
+  const identity = { ...DEFAULT_IDENTITY, ...overrides.identity };
+  const form = new FormData();
+  form.set("batchId", batchId);
+  form.set("examPdf", new File([overrides.examPdf ?? buildExamPdf([1, 2])], "prova.pdf", { type: "application/pdf" }));
+  form.set(
+    "answerKeyPdf",
+    new File(
+      [overrides.answerKeyPdf ?? buildAnswerKeyPdf([[1, "C"], [2, "A"], [3, "B"], [4, "D"], [5, "E"], [6, "C"], [7, "A"], [8, "B"]])],
+      "gabarito.pdf",
+      { type: "application/pdf" }
+    )
+  );
+  form.set("year", identity.year);
+  form.set("application", identity.application);
+  form.set("booklet", identity.booklet);
+  form.set("selection", JSON.stringify(selection));
+  return callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/apply`, form, token));
+}
+
 describe("Sprint 22 — apply cria SEMPRE draft, nunca published, e exige padrão principal published", () => {
   async function previewAndGetBatch(token: string): Promise<{ batchId: string; questions: PreviewBody["questions"] }> {
     const response = await previewPdfRoute(token, buildPreviewFormData());
     const body = (await response.json()) as PreviewBody;
     return { batchId: body.batchId!, questions: body.questions };
-  }
-
-  async function applyPdfRoute(
-    token: string,
-    batchId: string,
-    selection: Array<{ originalNumber: number; patternPrincipalId: string }>,
-    overrides: { examPdf?: Uint8Array; answerKeyPdf?: Uint8Array; identity?: Partial<typeof DEFAULT_IDENTITY> } = {}
-  ): Promise<Response> {
-    const identity = { ...DEFAULT_IDENTITY, ...overrides.identity };
-    const form = new FormData();
-    form.set("batchId", batchId);
-    form.set("examPdf", new File([overrides.examPdf ?? buildExamPdf([1, 2])], "prova.pdf", { type: "application/pdf" }));
-    form.set(
-      "answerKeyPdf",
-      new File(
-        [overrides.answerKeyPdf ?? buildAnswerKeyPdf([[1, "C"], [2, "A"], [3, "B"], [4, "D"], [5, "E"], [6, "C"], [7, "A"], [8, "B"]])],
-        "gabarito.pdf",
-        { type: "application/pdf" }
-      )
-    );
-    form.set("year", identity.year);
-    form.set("application", identity.application);
-    form.set("booklet", identity.booklet);
-    form.set("selection", JSON.stringify(selection));
-    return callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/apply`, form, token));
   }
 
   it("aplica as questões selecionadas como draft — nunca published, mesmo com dados completos", async () => {
@@ -343,5 +345,197 @@ describe("Sprint 22 — apply cria SEMPRE draft, nunca published, e exige padrã
     expect(undoResponse.status).toBe(200);
     const total = (db.sqlite.prepare("SELECT COUNT(*) as c FROM questions").get() as { c: number }).c;
     expect(total).toBe(0);
+  });
+});
+
+describe("Sprint 22.1 — TESTE ADVERSARIAL OBRIGATORIO de identidade documental (secao 4 da ordem)", () => {
+  it("prova com cabecalho 'Caderno 7 Azul' x gabarito com cabecalho 'Caderno 8 Rosa': preview vem com canApply=false mesmo com o editor confirmando 'Caderno 7 Azul', e apply e rejeitado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+
+    const examPdf = buildExamPdfWithHeader([136, 137], { day: 2, bookletNumber: 7, color: "AZUL" });
+    const answerKeyPdf = buildAnswerKeyPdfWithIdentity(
+      [[136, "C"], [137, "A"], [101, "B"], [102, "D"], [103, "E"], [104, "C"]],
+      { day: 2, bookletNumber: 8, color: "ROSA", year: 2019 } // caderno/cor DIVERGENTE de propósito
+    );
+
+    const form = buildPreviewFormData({ examPdf, answerKeyPdf, identity: { booklet: "Caderno 7 Azul" } });
+    const previewResponse = await previewPdfRoute(token, form);
+    expect(previewResponse.status).toBe(200);
+    const body = (await previewResponse.json()) as PreviewBody & { documentIdentityCheck?: { ok: boolean; messages: string[] }; globalWarnings?: string[] };
+    expect(body.canApply).toBe(false); // NUNCA aplicavel mesmo com questoes estruturalmente prontas
+    expect(body.documentIdentityCheck?.ok).toBe(false);
+    expect(body.documentIdentityCheck?.messages.some((m) => m.includes("Caderno divergente"))).toBe(true);
+    expect((body.globalWarnings ?? []).some((w) => w.includes("Caderno divergente"))).toBe(true);
+
+    // Mesmo que o editor insista e tente aplicar mesmo assim.
+    const applyForm = new FormData();
+    applyForm.set("batchId", body.batchId!);
+    applyForm.set("examPdf", new File([examPdf], "prova.pdf", { type: "application/pdf" }));
+    applyForm.set("answerKeyPdf", new File([answerKeyPdf], "gabarito.pdf", { type: "application/pdf" }));
+    applyForm.set("year", "2019");
+    applyForm.set("application", "Aplicacao regular");
+    applyForm.set("booklet", "Caderno 7 Azul");
+    applyForm.set("selection", JSON.stringify([{ originalNumber: 136, patternPrincipalId: PUBLISHED_PATTERN_ID }]));
+    const applyResponse = await callRoute(await formDataToRequest(`${LOCAL_ORIGIN}/api/editorial/question-imports/pdf/apply`, applyForm, token));
+    expect(applyResponse.status).toBe(409);
+    const total = (db.sqlite.prepare("SELECT COUNT(*) as c FROM questions").get() as { c: number }).c;
+    expect(total).toBe(0);
+  });
+});
+
+describe("Sprint 22.1 — fluxo de revisao/edicao editorial (secoes 5/7/10 da ordem)", () => {
+  function buildBrokenExamPdf(): Uint8Array {
+    return buildFixturePdf([
+      [
+        "QUESTAO 1",
+        "Enunciado tecnico da questao 1.",
+        "A. Alternativa A da questao 1",
+        "B. Alternativa B da questao 1",
+        "C. Alternativa C da questao 1",
+        "D. Alternativa D da questao 1",
+        "E. Alternativa E da questao 1",
+        "QUESTAO 3",
+        "Enunciado com problema estrutural (so 4 alternativas).",
+        "A. Alt A",
+        "B. Alt B",
+        "C. Alt C",
+        "D. Alt D",
+      ],
+    ]);
+  }
+
+  const brokenKeyPdf = buildAnswerKeyPdf([
+    [1, "C"],
+    [3, "B"],
+    [101, "A"],
+    [102, "D"],
+    [103, "E"],
+    [104, "C"],
+  ]);
+
+  async function previewBrokenBatch(token: string): Promise<{ batchId: string }> {
+    const form = buildPreviewFormData({ examPdf: buildBrokenExamPdf(), answerKeyPdf: brokenKeyPdf });
+    const response = await previewPdfRoute(token, form);
+    const body = (await response.json()) as PreviewBody;
+    return { batchId: body.batchId! };
+  }
+
+  it("questao 3 aparece needs_review por estrutura (4 alternativas), nunca 'consertada' sozinha", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const form = buildPreviewFormData({ examPdf: buildBrokenExamPdf(), answerKeyPdf: brokenKeyPdf });
+    const response = await previewPdfRoute(token, form);
+    const body = (await response.json()) as PreviewBody;
+    const q3 = body.questions!.find((q) => q.originalNumber === 3)!;
+    expect(q3.status).toBe("needs_review");
+    expect(q3.canApply).toBe(false);
+  });
+
+  it("needs_review corrigido -> ready quando permitido: aplica com reviewedAlternatives, gabarito preservado do PDF, fingerprint recalculado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    const { batchId } = await previewBrokenBatch(token);
+
+    const response = await applyPdfRoute(token, batchId, [
+      { originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID },
+      {
+        originalNumber: 3,
+        patternPrincipalId: PUBLISHED_PATTERN_ID,
+        reviewedStatement: "Enunciado corrigido pela editora para a questao 3.",
+        reviewedAlternatives: [
+          { letter: "A", text: "A corrigida" },
+          { letter: "B", text: "B corrigida" },
+          { letter: "C", text: "C corrigida" },
+          { letter: "D", text: "D corrigida" },
+          { letter: "E", text: "E corrigida" },
+        ],
+      },
+    ], { examPdf: buildBrokenExamPdf(), answerKeyPdf: brokenKeyPdf });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; appliedCount: number; questionIds: string[] };
+    expect(body.appliedCount).toBe(2);
+
+    const q3Id = body.questionIds[1];
+    const q3Row = db.sqlite.prepare("SELECT enunciado FROM questions WHERE id = ?").get(q3Id) as { enunciado: string };
+    expect(q3Row.enunciado).toBe("Enunciado corrigido pela editora para a questao 3.");
+
+    const correctAlt = db.sqlite.prepare("SELECT letter, text FROM question_alternatives WHERE question_id = ? AND is_correct = 1").get(q3Id) as {
+      letter: string;
+      text: string;
+    };
+    // Gabarito real da questao 3 e "B" — a correcao editorial NUNCA escolhe
+    // a letra correta, so o TEXTO; a letra marcada correta precisa bater
+    // com o que o PDF de gabarito diz, usando o TEXTO editado.
+    expect(correctAlt.letter).toBe("B");
+    expect(correctAlt.text).toBe("B corrigida");
+  });
+
+  it("dedupe apos edicao: se o texto corrigido colide com uma questao JA existente no banco, o lote inteiro e rejeitado", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+
+    const editedStatement = "Enunciado corrigido pela editora para a questao 3.";
+    const editedAlternatives = [
+      { letter: "A" as const, text: "A corrigida" },
+      { letter: "B" as const, text: "B corrigida" },
+      { letter: "C" as const, text: "C corrigida" },
+      { letter: "D" as const, text: "D corrigida" },
+      { letter: "E" as const, text: "E corrigida" },
+    ];
+    const collidingFingerprint = await computeQuestionFingerprint(
+      editedStatement,
+      editedAlternatives.map((a) => ({ letter: a.letter, text: a.text, isCorrect: false }))
+    );
+    // Pré-existe uma questão no banco com o MESMO fingerprint que a edição vai produzir.
+    db.sqlite.exec(
+      `INSERT INTO questions (id, code, enunciado, dificuldade, origem, fingerprint, editorial_status)
+       VALUES ('existing-q', 'EXISTING-001', 'Outro enunciado qualquer', 'media', 'autoral', '${collidingFingerprint}', 'draft')`
+    );
+
+    const { batchId } = await previewBrokenBatch(token);
+    const response = await applyPdfRoute(
+      token,
+      batchId,
+      [{ originalNumber: 3, patternPrincipalId: PUBLISHED_PATTERN_ID, reviewedStatement: editedStatement, reviewedAlternatives: editedAlternatives }],
+      { examPdf: buildBrokenExamPdf(), answerKeyPdf: brokenKeyPdf }
+    );
+    expect(response.status).toBe(409);
+    const total = (db.sqlite.prepare("SELECT COUNT(*) as c FROM questions WHERE id != 'existing-q'").get() as { c: number }).c;
+    expect(total).toBe(0);
+  });
+});
+
+describe("Sprint 22.1 — rastreabilidade de sourceUrl/identidade apos o batch (secao 9 da ordem)", () => {
+  it("GET /:batchId continua expondo sourceUrl/identidade do exame DEPOIS de aplicado e DEPOIS de desfeito", async () => {
+    const token = await seedUserWithSession("editor1");
+    grantRole("editor1", "editor");
+    grantRole("editor1", "admin");
+
+    const form = buildPreviewFormData({
+      identity: { sourceUrl: "https://download.inep.gov.br/educacao_basica/enem/provas/2019/exemplo.pdf" },
+    });
+    const previewResponse = await previewPdfRoute(token, form);
+    const previewBody = (await previewResponse.json()) as PreviewBody;
+    const batchId = previewBody.batchId!;
+
+    async function fetchBatchStatus(): Promise<{ batch: { pdfSourceInfo: { sourceUrl: string | null } | null } }> {
+      const req = new Request(`${LOCAL_ORIGIN}/api/editorial/question-imports/${batchId}`, { headers: { Cookie: `md_session=${token}` } });
+      const res = await callRoute(req);
+      return (await res.json()) as never;
+    }
+
+    const beforeApply = await fetchBatchStatus();
+    expect(beforeApply.batch.pdfSourceInfo?.sourceUrl).toBe("https://download.inep.gov.br/educacao_basica/enem/provas/2019/exemplo.pdf");
+
+    await applyPdfRoute(token, batchId, [{ originalNumber: 1, patternPrincipalId: PUBLISHED_PATTERN_ID }]);
+    const afterApply = await fetchBatchStatus();
+    expect(afterApply.batch.pdfSourceInfo?.sourceUrl).toBe("https://download.inep.gov.br/educacao_basica/enem/provas/2019/exemplo.pdf");
+
+    const undoReq = new Request(`${LOCAL_ORIGIN}/api/editorial/question-imports/${batchId}/undo`, { method: "POST", headers: { Cookie: `md_session=${token}` } });
+    await callRoute(undoReq);
+    const afterUndo = await fetchBatchStatus();
+    expect(afterUndo.batch.pdfSourceInfo?.sourceUrl).toBe("https://download.inep.gov.br/educacao_basica/enem/provas/2019/exemplo.pdf");
   });
 });

@@ -88,15 +88,26 @@ const VISUAL_OPS_TO_DETECT: number[] = [
  *  Uma linha é a concatenação, em ordem X crescente, dos itens cujo Y
  *  arredondado coincide. Este agrupamento é DETERMINÍSTICO (mesmos bytes
  *  de entrada sempre produzem a mesma saída) — pré-requisito para o apply
- *  poder re-extrair e comparar com o preview (seção 7 da ordem). */
-function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>): PdfTextLine[] {
+ *  poder re-extrair e comparar com o preview (seção 7 da ordem).
+ *
+ *  Sprint 22.1 — corrigido após o smoke com o PDF oficial real do ENEM
+ *  2019: o caderno de questões usa DUAS COLUNAS por página (confirmado
+ *  na prova real), e a versão anterior (que só agrupava por Y, ignorando
+ *  X além de ordenar dentro da própria linha) intercalava texto da coluna
+ *  esquerda com o da direita sempre que as duas tinham uma linha na MESMA
+ *  altura — o que é quase sempre o caso em texto corrido de duas colunas.
+ *  `detectColumnGutter` procura um vão vazio real (nenhum item começa
+ *  ali) no terço central da página; se encontrado, cada coluna é
+ *  agrupada em linhas SEPARADAMENTE (mesmo algoritmo por Y de antes) e a
+ *  ordem de leitura final é coluna esquerda inteira (topo→rodapé) seguida
+ *  da coluna direita inteira — nunca misturado por Y global. Páginas sem
+ *  vão central detectável (capa/instruções, que usam largura cheia)
+ *  continuam no modo de coluna única anterior — nunca forçamos um corte
+ *  onde não existe. */
+function groupItemsByY(items: Array<{ x: number; y: number; str: string }>): PdfTextLine[] {
   const buckets = new Map<number, Array<{ x: number; str: string }>>();
   for (const item of items) {
-    if (!item.str) continue;
-    const y = Math.round(item.transform[5]);
-    const x = item.transform[4];
-    // Tolerância de 2px — arredondamentos de fonte/kerning não devem
-    // quebrar a mesma linha visual em duas.
+    const y = item.y;
     let bucketKey = y;
     for (const existingKey of buckets.keys()) {
       if (Math.abs(existingKey - y) <= 2) {
@@ -105,8 +116,8 @@ function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>)
       }
     }
     const bucket = buckets.get(bucketKey);
-    if (bucket) bucket.push({ x, str: item.str });
-    else buckets.set(bucketKey, [{ x, str: item.str }]);
+    if (bucket) bucket.push(item);
+    else buckets.set(bucketKey, [item]);
   }
   const lines: PdfTextLine[] = [];
   for (const [y, parts] of buckets.entries()) {
@@ -118,10 +129,39 @@ function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>)
       .trim();
     if (text.length > 0) lines.push({ y, text });
   }
-  // Y cresce para BAIXO na origem de página do PDF (topo tem Y maior) —
-  // ordena do topo para o rodapé, nunca a ordem de inserção do Map.
   lines.sort((a, b) => b.y - a.y);
   return lines;
+}
+
+/** Procura o maior vão vazio de posições X no terço central da página —
+ *  sinal de um gutter real entre duas colunas impressas. `null` quando
+ *  nenhum vão suficientemente largo existe (página de coluna única).
+ *  Nunca um corte fixo hardcoded — sempre derivado dos dados reais da
+ *  própria página. */
+function detectColumnGutter(xs: number[], pageWidth: number): number | null {
+  if (xs.length < 10 || pageWidth <= 0) return null;
+  const sorted = [...xs].sort((a, b) => a - b);
+  let bestGapMid: number | null = null;
+  let bestGapSize = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i] - sorted[i - 1];
+    const mid = (sorted[i] + sorted[i - 1]) / 2;
+    if (mid > pageWidth * 0.35 && mid < pageWidth * 0.65 && gap > bestGapSize) {
+      bestGapSize = gap;
+      bestGapMid = mid;
+    }
+  }
+  return bestGapSize > pageWidth * 0.03 ? bestGapMid : null;
+}
+
+function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>, pageWidth: number): PdfTextLine[] {
+  const flat = items.filter((i) => i.str).map((i) => ({ x: i.transform[4], y: Math.round(i.transform[5]), str: i.str }));
+  const gutter = detectColumnGutter(flat.map((i) => i.x), pageWidth);
+  if (gutter === null) return groupItemsByY(flat);
+
+  const left = flat.filter((i) => i.x < gutter);
+  const right = flat.filter((i) => i.x >= gutter);
+  return [...groupItemsByY(left), ...groupItemsByY(right)];
 }
 
 export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResult> {
@@ -167,8 +207,8 @@ export async function extractPdfPages(bytes: Uint8Array): Promise<PdfExtractResu
         const items = (content.items as Array<{ str?: string; transform: number[] }>)
           .filter((i): i is { str: string; transform: number[] } => typeof i.str === "string")
           .slice(0, PDF_MAX_TEXT_ITEMS_PER_PAGE);
-        const lines = groupItemsIntoLines(items);
         const viewport = page.getViewport({ scale: 1 });
+        const lines = groupItemsIntoLines(items, viewport.width);
 
         let hasVisualContent = false;
         for (const fn of operatorList.fnArray) {

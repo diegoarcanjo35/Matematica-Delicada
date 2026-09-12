@@ -31,7 +31,11 @@ const EXPECTED_LETTERS = ["A", "B", "C", "D", "E"] as const;
 
 const QUESTION_HEADING_RE = /^QUEST(?:ÃO|AO)\s+0*([1-9]\d{0,2})\b/i;
 const QUESTION_INLINE_RE = /^0*([1-9]\d{0,2})\s*[.\-–)]\s+(.*)$/;
-const ALTERNATIVE_RE = /^([A-E])\s*[.\-–)]\s+(.*)$/;
+/* Sprint 22.1 — o PDF oficial real do ENEM NÃO usa pontuação entre a
+   letra e o texto da alternativa (ex.: linha própria "A", depois o texto
+   — nunca "A."). A pontuação continua aceita OPCIONALMENTE (compatível
+   com outros formatos), mas nunca exigida. */
+const ALTERNATIVE_RE = /^([A-E])(?:\s*[.\-–)])?\s+(.+)$/;
 
 export interface RawQuestionCandidate {
   originalNumber: number;
@@ -67,18 +71,40 @@ function flattenPages(pages: PdfPageText[]): FlatLine[] {
   return flat;
 }
 
-function detectQuestionStart(text: string): { number: number; remainder: string } | null {
+/** `allowInline` — Sprint 22.1: o fallback "N." inline SÓ é considerado
+ *  quando o documento inteiro não usa NENHUMA vez o formato explícito
+ *  "QUESTÃO N" (decidido uma única vez por `segmentExamQuestions`, ver
+ *  `hasAnyHeadingStyle` abaixo). Bug real encontrado no PDF oficial: sem
+ *  essa guarda, a lista numerada de instruções da capa ("1. Este
+ *  CADERNO...", "2. Confira..." etc.) era reconhecida como questões 1-8
+ *  espúrias — o mesmo padrão inline que detecta "91." também casa "1."
+ *  de uma lista de instruções comum. */
+function detectQuestionStart(text: string, allowInline: boolean): { number: number; remainder: string } | null {
   const heading = text.match(QUESTION_HEADING_RE);
   if (heading) return { number: Number(heading[1]), remainder: text.slice(heading[0].length).trim() };
+  if (!allowInline) return null;
   const inline = text.match(QUESTION_INLINE_RE);
   if (inline) return { number: Number(inline[1]), remainder: inline[2] };
   return null;
 }
 
 /** Divide o bloco de linhas de UMA questão (já isolado pelo chamador) em
- *  enunciado + alternativas A-E. Nunca reordena; a primeira ocorrência de
- *  cada letra marca o início daquela alternativa; texto após a última
- *  letra reconhecida pertence a ela até o fim do bloco. */
+ *  enunciado + alternativas A-E. Nunca reordena.
+ *
+ *  Sprint 22.1 — `ALTERNATIVE_RE` teve a pontuação tornada opcional (o
+ *  PDF oficial real não usa "A.", só "A" numa linha própria), o que por
+ *  si só abriria risco real de falso-positivo: uma frase comum do
+ *  enunciado começando com "A " (artigo) ou "E " (conjunção) casaria a
+ *  regex. A defesa é SEQUENCIAL, nunca so-textual: só aceitamos uma nova
+ *  alternativa quando a letra casada é EXATAMENTE a próxima esperada na
+ *  sequência A→B→C→D→E (a primeira aceita precisa ser "A"; depois de "A"
+ *  só "B" é aceito como próxima alternativa, nunca "C"/"D"/"E" fora de
+ *  ordem, nunca "A" de novo). Qualquer linha que comece com uma letra
+ *  A-E fora da sequência esperada é tratada como CONTINUAÇÃO de texto
+ *  (enunciado ou alternativa em andamento), nunca uma nova alternativa —
+ *  cinco frases reais começarem, em sequência, exatamente com "A", "B",
+ *  "C", "D" e "E" isolados é praticamente impossível em português
+ *  corrido. */
 function splitStatementAndAlternatives(lines: string[]): {
   statement: string;
   alternatives: Array<{ letter: (typeof EXPECTED_LETTERS)[number]; text: string }>;
@@ -88,13 +114,24 @@ function splitStatementAndAlternatives(lines: string[]): {
   const statementLines: string[] = [];
   const alternatives: Array<{ letter: (typeof EXPECTED_LETTERS)[number]; text: string }> = [];
   let current: { letter: (typeof EXPECTED_LETTERS)[number]; parts: string[] } | null = null;
+  let nextExpectedIndex = 0; // índice em EXPECTED_LETTERS da próxima letra aceitável
 
   for (const line of lines) {
     const match = line.match(ALTERNATIVE_RE);
-    if (match) {
-      const letter = match[1] as (typeof EXPECTED_LETTERS)[number];
+    const letter = match ? (match[1] as (typeof EXPECTED_LETTERS)[number]) : null;
+    if (letter && nextExpectedIndex < EXPECTED_LETTERS.length && letter === EXPECTED_LETTERS[nextExpectedIndex]) {
       if (current) alternatives.push({ letter: current.letter, text: current.parts.join(" ").trim() });
-      current = { letter, parts: [match[2]] };
+      current = { letter, parts: [match![2]] };
+      nextExpectedIndex += 1;
+      continue;
+    }
+    // A letra casada é a MESMA da alternativa em andamento (nunca uma
+    // letra fora de sequência qualquer, que quase sempre é só uma
+    // palavra comum do português) — sinal real de duplicidade, nunca
+    // silenciosamente ignorado nem tratado como nova alternativa.
+    if (letter && current && letter === current.letter) {
+      warnings.push("Letra de alternativa duplicada detectada.");
+      current.parts.push(match![2]);
       continue;
     }
     if (current) current.parts.push(line);
@@ -102,15 +139,13 @@ function splitStatementAndAlternatives(lines: string[]): {
   }
   if (current) alternatives.push({ letter: current.letter, text: current.parts.join(" ").trim() });
 
-  const letters = alternatives.map((a) => a.letter);
-  const distinctLetters = new Set(letters);
-  if (letters.length !== distinctLetters.size) warnings.push("Letra de alternativa duplicada detectada.");
+  // Duplicata (mesma letra da alternativa em andamento) já foi detectada
+  // e avisada dentro do laço acima. Construção por sequência estrita
+  // A→B→C→D→E torna "fora de ordem"/letras distintas-mas-desordenadas
+  // estruturalmente impossíveis aqui — só resta checar a CONTAGEM e
+  // texto vazio.
   if (alternatives.length !== 5) warnings.push(`Detectadas ${alternatives.length} alternativas (esperado exatamente 5).`);
   if (alternatives.some((a) => a.text.length === 0)) warnings.push("Uma ou mais alternativas ficaram com texto vazio.");
-  const orderedCorrectly = letters.every((l, i) => i === 0 || l > letters[i - 1]);
-  if (alternatives.length > 0 && (!orderedCorrectly || letters[0] !== "A")) {
-    warnings.push("Alternativas fora da ordem A-E esperada.");
-  }
 
   return { statement: statementLines.join(" ").replace(/\s+/g, " ").trim(), alternatives, warnings };
 }
@@ -123,12 +158,18 @@ export function segmentExamQuestions(pages: PdfPageText[]): SegmentationResult {
   const flat = flattenPages(pages);
   const globalWarnings: string[] = [];
 
+  // Sprint 22.1 — decidido UMA vez para o documento inteiro: se alguma
+  // linha já usa o formato explícito "QUESTÃO N", o fallback inline "N."
+  // fica desligado para todo o parse (evita casar a lista numerada de
+  // instruções da capa como se fossem questões).
+  const hasAnyHeadingStyle = flat.some((line) => QUESTION_HEADING_RE.test(line.text));
+
   type Block = { number: number; pageStart: number; lines: string[]; pages: Set<number> };
   const blocks: Block[] = [];
   let current: Block | null = null;
 
   for (const line of flat) {
-    const start = detectQuestionStart(line.text);
+    const start = detectQuestionStart(line.text, !hasAnyHeadingStyle);
     if (start) {
       if (current) blocks.push(current);
       current = { number: start.number, pageStart: line.pageNumber, lines: start.remainder ? [start.remainder] : [], pages: new Set([line.pageNumber]) };

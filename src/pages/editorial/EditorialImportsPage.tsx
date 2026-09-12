@@ -487,6 +487,20 @@ function pdfQuestionBadge(q: PdfPreviewQuestion): string {
 interface PdfSelectionState {
   included: boolean;
   patternPrincipalId: string;
+  /** Seção 5/7 da ordem — correção editorial opcional (nunca de gabarito).
+   *  `editedAlternatives` sempre tem as 5 chaves A-E, mesmo vazias, para o
+   *  formulário controlado nunca perder um campo. */
+  editing: boolean;
+  editedStatement: string;
+  editedAlternatives: Record<"A" | "B" | "C" | "D" | "E", string>;
+}
+
+/** Seção 5 da ordem — edição só faz sentido quando o PROBLEMA é
+ *  estrutural: nunca quando falta gabarito (editar texto não resolve),
+ *  nunca quando é conteúdo visual (seção 6), nunca quando já é uma
+ *  duplicidade exata. */
+function isStructurallyEditable(q: PdfPreviewQuestion): boolean {
+  return !q.canApply && !q.visualReviewRequired && q.duplicateStatus !== "exact" && q.correctAlternative !== null;
 }
 
 function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
@@ -506,6 +520,11 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   const [undoResult, setUndoResult] = useState<{ undoneCount: number; alreadyUndone: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Seção 8 da ordem — nunca hardcoded para todo PDF: o padrão só vem
+  // marcado quando a identidade DETECTADA no cabeçalho real da prova diz
+  // "2º dia" (formato tradicional do ENEM: 91-135 Natureza, 136-180
+  // Matemática). Sempre um checkbox comum, sempre desmarcável.
+  const [mathOnlyFilter, setMathOnlyFilter] = useState(false);
 
   useEffect(() => {
     fetchEditorialPatterns()
@@ -528,9 +547,18 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
     try {
       const result = await previewPdfEnem(examFile, answerKeyFile, currentIdentity(), confirmed);
       setPreview(result);
+      setMathOnlyFilter(result.documentIdentityCheck?.examDetected.day === 2);
       const initialSelection = new Map<number, PdfSelectionState>();
       for (const q of result.questions) {
-        initialSelection.set(q.originalNumber, { included: q.canApply, patternPrincipalId: "" });
+        const editedAlternatives: PdfSelectionState["editedAlternatives"] = { A: "", B: "", C: "", D: "", E: "" };
+        for (const a of q.alternatives) editedAlternatives[a.letter] = a.text;
+        initialSelection.set(q.originalNumber, {
+          included: q.canApply,
+          patternPrincipalId: "",
+          editing: false,
+          editedStatement: q.statement,
+          editedAlternatives,
+        });
       }
       setSelection(initialSelection);
     } catch (err) {
@@ -540,16 +568,35 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
+  function emptySelectionState(): PdfSelectionState {
+    return { included: false, patternPrincipalId: "", editing: false, editedStatement: "", editedAlternatives: { A: "", B: "", C: "", D: "", E: "" } };
+  }
+
   function updateSelection(originalNumber: number, patch: Partial<PdfSelectionState>) {
     setSelection((prev) => {
       const next = new Map(prev);
-      const current = next.get(originalNumber) ?? { included: false, patternPrincipalId: "" };
+      const current = next.get(originalNumber) ?? emptySelectionState();
       next.set(originalNumber, { ...current, ...patch });
       return next;
     });
   }
 
-  const includedEntries = Array.from(selection.entries()).filter(([, s]) => s.included);
+  function updateEditedAlternative(originalNumber: number, letter: "A" | "B" | "C" | "D" | "E", text: string) {
+    setSelection((prev) => {
+      const next = new Map(prev);
+      const current = next.get(originalNumber) ?? emptySelectionState();
+      next.set(originalNumber, { ...current, editedAlternatives: { ...current.editedAlternatives, [letter]: text } });
+      return next;
+    });
+  }
+
+  // Seção 8 da ordem — quando o filtro "só Matemática" está ligado, uma
+  // questão de Natureza marcada `included` antes de o filtro ser ativado
+  // NUNCA entra no apply, mesmo escondida da lista — o filtro esconde E
+  // exclui, nunca só um dos dois.
+  const visibleQuestions = (preview?.questions ?? []).filter((q) => !mathOnlyFilter || (q.originalNumber >= 136 && q.originalNumber <= 180));
+  const visibleNumbers = new Set(visibleQuestions.map((q) => q.originalNumber));
+  const includedEntries = Array.from(selection.entries()).filter(([originalNumber, s]) => s.included && visibleNumbers.has(originalNumber));
   const includedCount = includedEntries.length;
   const allIncludedHavePattern = includedEntries.every(([, s]) => s.patternPrincipalId.length > 0);
   const canSubmitApply = includedCount > 0 && allIncludedHavePattern && finalConfirmChecked;
@@ -562,6 +609,15 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
       const selectionPayload: PdfApplySelectionEntry[] = includedEntries.map(([originalNumber, s]) => ({
         originalNumber,
         patternPrincipalId: s.patternPrincipalId,
+        // Seção 5/7 da ordem — só manda a correção quando o editor de fato
+        // abriu o formulário de edição para esta questão; nunca reenvia
+        // texto "editado" para uma questão que nunca foi tocada.
+        ...(s.editing
+          ? {
+              reviewedStatement: s.editedStatement,
+              reviewedAlternatives: (["A", "B", "C", "D", "E"] as const).map((letter) => ({ letter, text: s.editedAlternatives[letter] })),
+            }
+          : {}),
       }));
       const result = await applyPdfEnem(preview.batchId, examFile, answerKeyFile, currentIdentity(), selectionPayload);
       setApplyResult(result);
@@ -668,6 +724,11 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
             {preview.questions.filter((q) => q.visualReviewRequired).length} com imagens,{" "}
             {preview.questions.filter((q) => q.duplicateStatus === "exact").length} possíveis duplicidades.
           </p>
+          <label>
+            <input type="checkbox" checked={mathOnlyFilter} onChange={(e) => setMathOnlyFilter(e.target.checked)} disabled={busy} />
+            Importar somente Matemática (136–180)
+          </label>
+
           {preview.globalWarnings.length > 0 && (
             <ul role="alert">
               {preview.globalWarnings.map((w, i) => (
@@ -677,24 +738,64 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           )}
 
           <ul className="editorial__package-questions" data-testid="pdf-question-list">
-            {preview.questions.map((q) => {
-              const sel = selection.get(q.originalNumber) ?? { included: false, patternPrincipalId: "" };
+            {visibleQuestions.map((q) => {
+              const sel = selection.get(q.originalNumber) ?? emptySelectionState();
               const badge = pdfQuestionBadge(q);
+              const editable = isStructurallyEditable(q);
+              const canBeIncluded = q.canApply || (editable && sel.editing);
               return (
                 <li key={q.tempId} className="editorial__package-question">
                   <p className="editorial__package-question-header">
                     <strong>Questão {q.originalNumber}</strong> — Página {q.pageStart === q.pageEnd ? q.pageStart : `${q.pageStart}-${q.pageEnd}`}{" "}
                     <span>{badge}</span>
                   </p>
-                  <p>{q.statement}</p>
-                  <ul>
-                    {q.alternatives.map((a) => (
-                      <li key={a.letter}>
-                        {a.letter}. {a.text}
-                        {q.correctAlternative === a.letter ? " (gabarito oficial)" : ""}
-                      </li>
-                    ))}
-                  </ul>
+
+                  {sel.editing ? (
+                    <>
+                      <label htmlFor={`pdf-statement-${q.originalNumber}`} className="editorial__field-label">
+                        Enunciado (correção editorial)
+                      </label>
+                      <textarea
+                        id={`pdf-statement-${q.originalNumber}`}
+                        value={sel.editedStatement}
+                        onChange={(e) => updateSelection(q.originalNumber, { editedStatement: e.target.value })}
+                        disabled={busy}
+                      />
+                      <ul>
+                        {(["A", "B", "C", "D", "E"] as const).map((letter) => (
+                          <li key={letter}>
+                            <label htmlFor={`pdf-alt-${q.originalNumber}-${letter}`} className="editorial__field-label">
+                              Alternativa {letter}
+                              {q.correctAlternative === letter ? " (gabarito oficial — nunca editável)" : ""}
+                            </label>
+                            <input
+                              id={`pdf-alt-${q.originalNumber}-${letter}`}
+                              type="text"
+                              value={sel.editedAlternatives[letter]}
+                              onChange={(e) => updateEditedAlternative(q.originalNumber, letter, e.target.value)}
+                              disabled={busy}
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                      <Button type="button" variant="secondary" onClick={() => updateSelection(q.originalNumber, { editing: false })} disabled={busy}>
+                        Cancelar correção
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <p>{q.statement}</p>
+                      <ul>
+                        {q.alternatives.map((a) => (
+                          <li key={a.letter}>
+                            {a.letter}. {a.text}
+                            {q.correctAlternative === a.letter ? " (gabarito oficial)" : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+
                   {q.warnings.length > 0 && (
                     <ul role="alert">
                       {q.warnings.map((w, i) => (
@@ -702,6 +803,24 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
                       ))}
                     </ul>
                   )}
+
+                  {editable && !sel.editing && (
+                    <Button type="button" variant="secondary" onClick={() => updateSelection(q.originalNumber, { editing: true })} disabled={busy}>
+                      Editar enunciado/alternativas
+                    </Button>
+                  )}
+
+                  {q.visualReviewRequired && (
+                    <p>
+                      Esta questão tem conteúdo visual (gráfico/imagem/tabela) que não foi extraído automaticamente. Para incluí-la, crie a questão
+                      manualmente no editor de questões e anexe a imagem — os dados extraídos acima (enunciado, alternativas, gabarito) podem ser
+                      copiados de referência.{" "}
+                      <a href="/editorial/questoes/nova" target="_blank" rel="noreferrer">
+                        Abrir editor de questões
+                      </a>
+                    </p>
+                  )}
+
                   <label htmlFor={`pdf-pattern-${q.originalNumber}`} className="editorial__field-label">
                     Padrão principal
                   </label>
@@ -722,7 +841,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
                     <input
                       type="checkbox"
                       checked={sel.included}
-                      disabled={busy || !q.canApply}
+                      disabled={busy || !canBeIncluded}
                       onChange={(e) => updateSelection(q.originalNumber, { included: e.target.checked })}
                     />
                     Selecionar para aplicar

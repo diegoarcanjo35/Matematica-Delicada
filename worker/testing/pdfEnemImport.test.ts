@@ -5,7 +5,10 @@ import { segmentExamQuestions } from "../src/lib/pdfEnemSegmenter";
 import { parseAnswerKeyFromPageLines } from "../src/lib/pdfEnemAnswerKey";
 import { buildPreviewQuestions, buildPdfEnemQuestionCode } from "../src/lib/pdfEnemMatch";
 import { validateExamIdentityInput, examIdentitiesCompatible } from "../src/lib/pdfEnemExamIdentity";
-import { buildAnswerKeyPdf, buildExamPdf, buildFixturePdf } from "./pdfFixtureBuilder";
+import { buildAnswerKeyPdf, buildAnswerKeyPdfWithIdentity, buildExamPdf, buildExamPdfWithHeader, buildFixturePdf } from "./pdfFixtureBuilder";
+import { checkDocumentIdentity, detectAnswerKeyDocumentIdentity, detectExamDocumentIdentity } from "../src/lib/pdfEnemDocumentIdentity";
+import { applyReviewEdit, type PdfApplySelectionEntry } from "../src/services/questionPdfImportService";
+import type { PdfEnemPreviewQuestion } from "../src/lib/pdfEnemMatch";
 
 const IDENTITY_INPUT = { year: 2019, application: "Aplicacao regular", booklet: "Caderno Azul" };
 
@@ -227,5 +230,190 @@ describe("buildPreviewQuestions — dedupe (secao 13 da ordem)", () => {
     const { items: firstPass } = await buildPreviewQuestions(questions, new Map([[1, "C"]]), identity, new Set(), new Set());
     const { items } = await buildPreviewQuestions(questions, new Map([[1, "C"]]), identity, new Set(), new Set([firstPass[0].fingerprint]));
     expect(items[0].duplicateStatus).toBe("exact");
+  });
+});
+
+describe("pdfEnemDocumentIdentity — extracao real do texto do PDF (Sprint 22.1, secoes 2/3/4)", () => {
+  it("detecta dia/caderno/cor no cabecalho real da PROVA (formato confirmado no PDF oficial 2019)", async () => {
+    const pdf = buildExamPdfWithHeader([1], { day: 2, bookletNumber: 7, color: "AZUL" });
+    const extract = await extractPdfPages(pdf);
+    expect(extract.ok).toBe(true);
+    if (!extract.ok) return;
+    const detected = detectExamDocumentIdentity(extract.pages);
+    expect(detected).toEqual({ day: 2, bookletNumber: 7, color: "AZUL" });
+  });
+
+  it("detecta dia/caderno/cor/ano no GABARITO real (duas linhas separadas pelo layout de colunas)", async () => {
+    const pdf = buildAnswerKeyPdfWithIdentity(
+      [[1, "C"], [2, "A"], [3, "B"], [4, "D"], [5, "E"], [6, "C"], [7, "A"], [8, "B"]],
+      { day: 2, bookletNumber: 7, color: "AZUL", year: 2019 }
+    );
+    const extract = await extractPdfPages(pdf);
+    expect(extract.ok).toBe(true);
+    if (!extract.ok) return;
+    const detected = detectAnswerKeyDocumentIdentity(extract.pages);
+    expect(detected).toEqual({ day: 2, bookletNumber: 7, color: "AZUL", year: 2019 });
+  });
+
+  it("identidade nao detectavel em nenhum dos dois PDFs nunca e tratada como confirmada nem como divergencia (mensagem neutra)", () => {
+    const result = checkDocumentIdentity({}, {}, "Caderno Azul");
+    expect(result.ok).toBe(true); // nunca bloqueia por falta de sinal
+    expect(result.confirmedAutomatically).toBe(false); // mas tambem nunca finge ter confirmado
+    expect(result.messages).toEqual(["Identidade não pôde ser confirmada automaticamente neste arquivo."]);
+  });
+
+  it("dia/caderno/cor detectados e iguais nos dois PDFs -> confirmado automaticamente, sem mensagem", () => {
+    const result = checkDocumentIdentity({ day: 2, bookletNumber: 7, color: "AZUL" }, { day: 2, bookletNumber: 7, color: "AZUL", year: 2019 }, "Caderno 7 Azul");
+    expect(result.ok).toBe(true);
+    expect(result.confirmedAutomatically).toBe(true);
+    expect(result.messages).toEqual([]);
+  });
+
+  it("TESTE ADVERSARIAL OBRIGATORIO (secao 4 da ordem) — prova Caderno 7 Azul x gabarito Caderno 8 Rosa: BLOQUEIA mesmo que o editor tenha digitado 'Caderno 7 Azul'", () => {
+    const examDetected = { day: 2, bookletNumber: 7, color: "AZUL" };
+    const keyDetected = { day: 2, bookletNumber: 8, color: "ROSA", year: 2019 };
+    const result = checkDocumentIdentity(examDetected, keyDetected, "Caderno 7 Azul");
+    expect(result.ok).toBe(false);
+    expect(result.confirmedAutomatically).toBe(false);
+    expect(result.messages.some((m) => m.includes("Caderno divergente"))).toBe(true);
+    expect(result.messages.some((m) => m.includes("Cor de caderno divergente"))).toBe(true);
+  });
+
+  it("campo do editor nao menciona o caderno/cor detectado em um dos PDFs -> tambem bloqueia (fail-closed)", () => {
+    const result = checkDocumentIdentity({ day: 2, bookletNumber: 7, color: "AZUL" }, {}, "Caderno 9 Rosa");
+    expect(result.ok).toBe(false);
+    expect(result.messages.some((m) => m.includes("não aparece no campo"))).toBe(true);
+  });
+});
+
+describe("applyReviewEdit — correcao editorial de enunciado/alternativas (Sprint 22.1, secoes 5/7 da ordem)", () => {
+  function baseItem(overrides: Partial<PdfEnemPreviewQuestion> = {}): PdfEnemPreviewQuestion {
+    return {
+      tempId: "3",
+      originalNumber: 3,
+      pageStart: 1,
+      pageEnd: 1,
+      statement: "Enunciado original com problema estrutural.",
+      alternatives: [
+        { letter: "A", text: "Alternativa A" },
+        { letter: "B", text: "Alternativa B" },
+        { letter: "C", text: "Alternativa C" },
+        { letter: "D", text: "Alternativa D" },
+      ], // só 4 — estruturalmente invalida na extracao original
+      correctAlternative: "B",
+      warnings: ["Detectadas 4 alternativas (esperado exatamente 5)."],
+      status: "needs_review",
+      duplicateStatus: "none",
+      visualReviewRequired: false,
+      patternPrincipalId: null,
+      canApply: false,
+      code: "ENEM-2019-TESTE-003",
+      fingerprint: "fingerprint-original",
+      ...overrides,
+    };
+  }
+
+  it("sem reviewedStatement/reviewedAlternatives devolve o item original sem tocar em nada", async () => {
+    const item = baseItem();
+    const entry: PdfApplySelectionEntry = { originalNumber: 3, patternPrincipalId: "pat-1" };
+    const result = await applyReviewEdit(item, entry);
+    expect(result.ok).toBe(true);
+    expect(result.item).toBe(item);
+  });
+
+  it("edicao estrutural valida (5 alternativas A-E) corrige a questao e RECALCULA o fingerprint", async () => {
+    const item = baseItem();
+    const entry: PdfApplySelectionEntry = {
+      originalNumber: 3,
+      patternPrincipalId: "pat-1",
+      reviewedStatement: "Enunciado corrigido pela editora.",
+      reviewedAlternatives: [
+        { letter: "A", text: "A corrigida" },
+        { letter: "B", text: "B corrigida" },
+        { letter: "C", text: "C corrigida" },
+        { letter: "D", text: "D corrigida" },
+        { letter: "E", text: "E corrigida" },
+      ],
+    };
+    const result = await applyReviewEdit(item, entry);
+    expect(result.ok).toBe(true);
+    expect(result.item!.alternatives).toHaveLength(5);
+    expect(result.item!.statement).toBe("Enunciado corrigido pela editora.");
+    expect(result.item!.fingerprint).not.toBe("fingerprint-original"); // nunca reaproveita o fingerprint antigo
+  });
+
+  it("gabarito NUNCA e editavel/inferivel: correctAlternative permanece o do PDF de gabarito mesmo apos a edicao de texto", async () => {
+    const item = baseItem({ correctAlternative: "B" });
+    const entry: PdfApplySelectionEntry = {
+      originalNumber: 3,
+      patternPrincipalId: "pat-1",
+      reviewedStatement: "Enunciado corrigido.",
+      reviewedAlternatives: [
+        { letter: "A", text: "A corrigida" },
+        { letter: "B", text: "B corrigida" },
+        { letter: "C", text: "C corrigida" },
+        { letter: "D", text: "D corrigida" },
+        { letter: "E", text: "E corrigida" },
+      ],
+    };
+    const result = await applyReviewEdit(item, entry);
+    expect(result.ok).toBe(true);
+    expect(result.item!.correctAlternative).toBe("B"); // inalterado — a interface nem aceita mudar isso
+  });
+
+  it("edicao com numero errado de alternativas (4, nao 5) e rejeitada explicitamente", async () => {
+    const item = baseItem();
+    const entry: PdfApplySelectionEntry = {
+      originalNumber: 3,
+      patternPrincipalId: "pat-1",
+      reviewedAlternatives: [
+        { letter: "A", text: "A" },
+        { letter: "B", text: "B" },
+        { letter: "C", text: "C" },
+        { letter: "D", text: "D" },
+      ] as never,
+    };
+    const result = await applyReviewEdit(item, entry);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("exatamente as 5 alternativas");
+  });
+
+  it("edicao com alternativa vazia e rejeitada explicitamente", async () => {
+    const item = baseItem();
+    const entry: PdfApplySelectionEntry = {
+      originalNumber: 3,
+      patternPrincipalId: "pat-1",
+      reviewedAlternatives: [
+        { letter: "A", text: "A" },
+        { letter: "B", text: "  " },
+        { letter: "C", text: "C" },
+        { letter: "D", text: "D" },
+        { letter: "E", text: "E" },
+      ],
+    };
+    const result = await applyReviewEdit(item, entry);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("pode ficar vazia");
+  });
+
+  it("questao visual permanece fail-closed: a edicao de texto NUNCA limpa visualReviewRequired", async () => {
+    const item = baseItem({
+      visualReviewRequired: true,
+      alternatives: [
+        { letter: "A", text: "A" },
+        { letter: "B", text: "B" },
+        { letter: "C", text: "C" },
+        { letter: "D", text: "D" },
+        { letter: "E", text: "E" },
+      ],
+    });
+    const entry: PdfApplySelectionEntry = {
+      originalNumber: 3,
+      patternPrincipalId: "pat-1",
+      reviewedStatement: "Texto corrigido, mas a imagem continua faltando.",
+    };
+    const result = await applyReviewEdit(item, entry);
+    expect(result.ok).toBe(true);
+    expect(result.item!.visualReviewRequired).toBe(true); // nunca "corrigido" por edicao de texto
   });
 });

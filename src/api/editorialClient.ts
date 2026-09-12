@@ -482,10 +482,29 @@ export interface PdfPreviewQuestion {
   fingerprint: string;
 }
 
+/** Seção 2/3 da ordem — identidade DETECTADA no texto dos dois PDFs
+ *  (nunca inventada; campos ausentes ficam `undefined`). */
+export interface PdfDetectedDocumentIdentity {
+  year?: number;
+  day?: number;
+  bookletNumber?: number;
+  color?: string;
+  application?: string;
+}
+
+export interface PdfDocumentIdentityCheck {
+  ok: boolean;
+  confirmedAutomatically: boolean;
+  messages: string[];
+  examDetected: PdfDetectedDocumentIdentity;
+  answerKeyDetected: PdfDetectedDocumentIdentity;
+}
+
 export interface PreviewPdfResponse {
   ok: true;
   batchId: string;
   examIdentity: PdfExamIdentity;
+  documentIdentityCheck: PdfDocumentIdentityCheck;
   pageCount: number;
   detectedQuestionCount: number;
   matchedAnswerCount: number;
@@ -523,6 +542,11 @@ export async function previewPdfEnem(
 export interface PdfApplySelectionEntry {
   originalNumber: number;
   patternPrincipalId: string;
+  /** Seção 5/7 da ordem — correção editorial OPCIONAL de enunciado/
+   *  alternativas (nunca de gabarito — não há campo de resposta correta
+   *  aqui, propositalmente). */
+  reviewedStatement?: string;
+  reviewedAlternatives?: PdfPreviewAlternative[];
 }
 
 /** Apply do PDF — mesma convenção do Pacote ZIP: os MESMOS dois `File`s já

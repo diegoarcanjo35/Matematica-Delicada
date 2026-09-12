@@ -776,6 +776,26 @@ export async function undoImport(db: D1Database, actorUserId: string, batchId: s
   return { ok: true, undoneCount: questionIds.length };
 }
 
+/** Sprint 22.1, seção 9 da ordem — rastreabilidade da origem de um lote
+ *  PDF ENEM (identidade do exame + `sourceUrl`, quando informado) DEPOIS
+ *  de aplicado/desfeito. Nunca uma coluna nova (a ordem proíbe migration
+ *  automática aqui) — a identidade inteira já vive dentro de
+ *  `question_import_batches.payload` (Sprint 22) e nunca é apagada nem no
+ *  undo (só `status`/`undone_at` mudam; a linha do lote em si e seu
+ *  payload persistem para sempre). "Duck typing" deliberado (sem importar
+ *  o tipo de questionPdfImportService.ts, para nunca criar uma dependência
+ *  circular entre os dois serviços de import) — lotes CSV/ZIP têm um
+ *  payload de formato diferente e simplesmente não batem neste shape. */
+function extractPdfSourceInfo(payloadJson: string): { examIdentity: unknown; sourceUrl: string | null } | null {
+  try {
+    const parsed = JSON.parse(payloadJson) as { sourceKind?: string; identity?: { sourceLabel?: string | null } };
+    if (parsed.sourceKind !== "pdf_enem") return null;
+    return { examIdentity: parsed.identity ?? null, sourceUrl: parsed.identity?.sourceLabel ?? null };
+  } catch {
+    return null;
+  }
+}
+
 export async function getImportBatchStatus(db: D1Database, batchId: string, actorUserId: string) {
   const batch = await findImportBatch(db, batchId);
   if (!batch || batch.user_id !== actorUserId) return null;
@@ -791,5 +811,8 @@ export async function getImportBatchStatus(db: D1Database, batchId: string, acto
     appliedAt: batch.applied_at,
     undoneAt: batch.undone_at,
     items: items.map((i) => ({ rowNumber: i.row_number, code: i.code, questionId: i.question_id })),
+    // `null` para lotes CSV/ZIP (payload de outro formato) — só presente
+    // para lotes de origem `pdf_enem`.
+    pdfSourceInfo: extractPdfSourceInfo(batch.payload),
   };
 }
