@@ -1076,6 +1076,94 @@ describe("endpoint /api/student-metrics/patterns/overview — HTTP (Sprint 21)",
   });
 });
 
+/* Sprint 21.1 — correção de auditoria: o overview de desempenho por padrão
+   NÃO pode depender de existir questão publicada. Antes desta correção,
+   handleStudentMetricsRequest aplicava isQuestionBankAvailable (gate
+   global do módulo) ANTES de identificar a rota, então /patterns/overview
+   herdava indevidamente o "available:false" dos endpoints legados
+   (summary/patterns/patterns/:slug/activity) sempre que não havia nenhuma
+   questão real publicada — mesmo com padrões publicados no catálogo. A
+   prova aqui usa prodEnv() (sem ENABLE_LOCAL_EDITORIAL_FIXTURES, sem
+   ENVIRONMENT de dev) deliberadamente, o mesmo ambiente que a Sprint 16
+   v1.2 já usa para provar o gate — é o cenário exato em que o bug
+   aparecia. */
+describe("Sprint 21.1 — overview de desempenho não depende de existir questão publicada", () => {
+  function prodEnv(): Env {
+    return { DB: db as never, ASSETS: {} as never };
+  }
+
+  async function callOverviewProd(token: string | null, method = "GET"): Promise<Response> {
+    const request = new Request("https://matematica-delicada.proffandreia5.workers.dev/api/student-metrics/patterns/overview", {
+      method,
+      headers: token ? { Cookie: `md_session=${token}` } : {},
+    });
+    return (await handleStudentMetricsRequest(request, prodEnv(), new URL(request.url)))!;
+  }
+
+  it("A — produção real (sem flag), 3 padrões published, ZERO questões: 200 com os 3, todos sem_evidencias/accuracy=null/canTrain=false/count=0", async () => {
+    db.sqlite.exec(
+      `INSERT INTO patterns (id, code, slug, name, recognition_phrase, description, main_strategy, introductory_example, strategic_summary, editorial_status)
+       VALUES ('pat-3', 'PAD-03', 'padrao-3', 'Padrão 3', 'Frase de reconhecimento 3', 'D3', 'E3', 'X3', 'R3', 'published')`
+    );
+    expect(countRows("questions")).toBe(0);
+    const token = await ensureUserSession("gate211-a");
+    const response = await callOverviewProd(token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; patterns: PatternPerformanceOverviewItemDTO[] };
+    expect(body.patterns).toHaveLength(3);
+    for (const item of body.patterns) {
+      expect(item.state.code).toBe("sem_evidencias");
+      expect(item.accuracy).toBeNull();
+      expect(item.training.canTrain).toBe(false);
+      expect(item.training.availableQuestionCount).toBe(0);
+    }
+  });
+
+  it("B — produção real, ZERO padrões published, ZERO questões: 200 com patterns=[] (nunca available:false)", async () => {
+    db.sqlite.exec(`DELETE FROM patterns`);
+    const token = await ensureUserSession("gate211-b");
+    const response = await callOverviewProd(token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; patterns: PatternPerformanceOverviewItemDTO[] };
+    expect(body.patterns).toEqual([]);
+  });
+
+  it("C — sem sessão responde 401 mesmo em produção real sem nenhuma questão publicada", async () => {
+    const response = await callOverviewProd(null);
+    expect(response.status).toBe(401);
+  });
+
+  it("D — POST /patterns/overview responde method-not-allowed, mesmo sem questão publicada", async () => {
+    const token = await ensureUserSession("gate211-d");
+    const response = await callOverviewProd(token, "POST");
+    expect(response.status).toBe(405);
+  });
+
+  it("E — endpoint LEGADO /summary sem questão real publicada preserva o comportamento anterior (available:false)", async () => {
+    const token = await ensureUserSession("gate211-e");
+    const request = new Request("https://matematica-delicada.proffandreia5.workers.dev/api/student-metrics/summary", {
+      headers: { Cookie: `md_session=${token}` },
+    });
+    const response = (await handleStudentMetricsRequest(request, prodEnv(), new URL(request.url)))!;
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { available?: boolean };
+    expect(body.available).toBe(false);
+  });
+
+  it("F — um padrão published sem questão + outro com questão publicada: ambos aparecem, só o segundo canTrain=true", async () => {
+    seedPublishedQuestion({ patternId: "pat-2" });
+    const token = await ensureUserSession("gate211-f");
+    const response = await callOverviewProd(token);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: true; patterns: PatternPerformanceOverviewItemDTO[] };
+    expect(body.patterns.map((p) => p.pattern.id).sort()).toEqual(["pat-1", "pat-2"]);
+    const withQuestion = body.patterns.find((p) => p.pattern.id === "pat-2")!;
+    const withoutQuestion = body.patterns.find((p) => p.pattern.id === "pat-1")!;
+    expect(withQuestion.training.canTrain).toBe(true);
+    expect(withoutQuestion.training.canTrain).toBe(false);
+  });
+});
+
 describe("derivePatternAttention — regra centralizada (Sprint 21, seção 7 da ordem)", () => {
   const BASE = { confirmedAttempts: 0, correctCount: 0, incorrectCount: 0, attemptsWithHelp: 0, reviewsIncorrect: 0 };
 

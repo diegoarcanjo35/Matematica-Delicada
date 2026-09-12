@@ -70,6 +70,22 @@ export async function handleStudentMetricsRequest(request: Request, env: Env, ur
   const user = await requireUser(request, env);
   if (!user) return Errors.unauthorized();
 
+  // Sprint 21.1 — checado ANTES do gate global isQuestionBankAvailable (e
+  // ANTES de PATTERN_DETAIL_RE, que casaria "overview" como se fosse um
+  // slug de padrão). O overview de desempenho depende só de sessão válida
+  // + catálogo de padrões published: um padrão publicado sem NENHUMA
+  // questão treinável ainda deve aparecer (state=sem_evidencias,
+  // canTrain=false) — a ausência de banco de questões não pode esconder o
+  // dashboard inteiro. Os endpoints legados abaixo (summary/patterns/
+  // patterns/:slug/activity) continuam atrás do gate, comportamento
+  // inalterado.
+  if (path === "/api/student-metrics/patterns/overview") {
+    if (method !== "GET") return Errors.methodNotAllowed();
+    const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
+    const overview = await getPatternPerformanceOverview(env.DB, user.id, fixturesAllowed);
+    return json({ ok: true, patterns: overview });
+  }
+
   const available = await isQuestionBankAvailable(env, url, env.DB);
   if (!available) return unavailableResponse();
 
@@ -83,16 +99,6 @@ export async function handleStudentMetricsRequest(request: Request, env: Env, ur
     if (method !== "GET") return Errors.methodNotAllowed();
     const patterns = await listPatternMetrics(env.DB, user.id);
     return json({ ok: true, patterns });
-  }
-
-  // Sprint 21 — checado ANTES de PATTERN_DETAIL_RE (que casaria "overview"
-  // como se fosse um slug de padrão), mesmo cuidado já aplicado pelo Treino
-  // Diário (Sprint 20) entre /patterns e /patterns/:id/preview.
-  if (path === "/api/student-metrics/patterns/overview") {
-    if (method !== "GET") return Errors.methodNotAllowed();
-    const fixturesAllowed = isLocalEditorialFixturesAllowed(env, url);
-    const overview = await getPatternPerformanceOverview(env.DB, user.id, fixturesAllowed);
-    return json({ ok: true, patterns: overview });
   }
 
   if (path === "/api/student-metrics/activity") {
