@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Sprint 24.1 — assets do OCR (worker script, núcleo WASM, traineddata)
+# copiados de node_modules por scripts/prepare-tesseract-assets.mjs
+# (roda como prebuild/predev) — reproduzível a partir de dependências
+# pinadas no package-lock.json, nunca versionado como binário solto.
+public/tesseract
+
 # Wrangler (local dev only — sem credenciais, mas é cache de execução)
 .wrangler
 

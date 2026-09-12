@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prepare-tesseract-assets.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/prepare-tesseract-assets.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -30,12 +32,14 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@tesseract.js-data/por": "^1.0.0",
     "fflate": "^0.8.3",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.2",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "tesseract.js-core": "^7.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260828.1",

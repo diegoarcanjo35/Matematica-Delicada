@@ -1,19 +1,47 @@
-/* OCR client-side (browser) — Sprint 24, seções 1/4/5/19/20/21/22 da ordem.
+/* OCR client-side (browser) — Sprint 24/24.1, seções 1/2/3/4/5/19/20/21/22
+   da ordem.
 
-   Feasibility spike desta sprint (Seção 1 do relatório): OCR roda
-   EXCLUSIVAMENTE no navegador da editora, nunca no Cloudflare Worker —
-   `tesseract.js` (Apache-2.0, engine C++ Tesseract embarcado em WASM)
-   depende de um Web Worker de verdade para não travar a aba, e o runtime
-   do Worker (workerd) não suporta `new Worker()` aninhado nem tem memória/
-   CPU-time dedicados o bastante para um engine OCR completo. Nenhum
-   serviço pago, nenhuma API externa, nenhuma IA externa — só a biblioteca
-   local, carregada sob demanda (nunca no bundle principal — só quando pelo
-   menos uma página precisar de OCR).
+   Feasibility spike (Sprint 24, Seção 1): OCR roda EXCLUSIVAMENTE no
+   navegador da editora, nunca no Cloudflare Worker — `tesseract.js`
+   (Apache-2.0, engine C++ Tesseract embarcado em WASM) depende de um Web
+   Worker de verdade para não travar a aba, e o runtime do Worker (workerd)
+   não suporta `new Worker()` aninhado nem tem memória/CPU-time dedicados o
+   bastante para um engine OCR completo. Nenhum serviço pago, nenhuma API
+   externa, nenhuma IA externa — só a biblioteca local, carregada sob
+   demanda (nunca no bundle principal — só quando pelo menos uma página
+   precisar de OCR, via `import()` dinâmico em `EditorialImportsPage.tsx`).
+
+   Sprint 24.1 — SELF-HOST de TODOS os assets do OCR (nunca jsdelivr/unpkg/
+   GitHub raw em runtime). Investigação do CÓDIGO REAL da versão instalada
+   (`node_modules/tesseract.js@7.0.0`, nunca assumido) confirmou três
+   recursos que o tesseract.js buscaria externamente por padrão:
+     - `workerPath` → default `https://cdn.jsdelivr.net/npm/tesseract.js@v.../dist/worker.min.js`
+       (`src/worker/browser/defaultOptions.js`);
+     - `corePath` → default `https://cdn.jsdelivr.net/npm/tesseract.js-core@v...`,
+       resolvendo para um de vários `tesseract-core*.wasm.js` via detecção
+       de SIMD (`src/worker-script/browser/getCore.js`);
+     - `langPath` → default `https://cdn.jsdelivr.net/npm/@tesseract.js-data/${lang}/4.0.0_best_int`
+       (`src/worker-script/index.js`, comentário explícito no código-fonte:
+       "If langPath if not explicitly set by the user, the jsdelivr CDN is
+       used").
+   Os três agora são passados EXPLICITAMENTE abaixo, apontando para
+   `/tesseract/...` — arquivos copiados de `node_modules` (dependências
+   pinadas `tesseract.js-core`/`@tesseract.js-data/por` no package.json,
+   nunca um download ad hoc) para `public/tesseract/` por
+   `scripts/prepare-tesseract-assets.mjs`, que roda como `prebuild`/`predev`
+   (nunca um passo manual esquecível) — servidos pelo MESMO origin do
+   Matemática Delicada, dentro do bundle publicado.
+
+   Núcleo escolhido: `tesseract-core-lstm` (LSTM simples, SEM detecção de
+   SIMD) — um `corePath` terminado em `.js` é usado DIRETAMENTE pelo
+   tesseract.js, sem nenhuma ramificação condicional nem fetch de feature
+   detection; troca uma otimização de performance por comportamento 100%
+   determinístico e same-origin em qualquer navegador.
 
    Renderização: `pdfjs-dist` (já dependência do projeto, usado também no
    Worker) — aqui no BUILD DE NAVEGADOR de verdade, com Web Worker real
-   (bundlado pelo Vite via `new URL(...)`), diferente do "fake worker"
-   síncrono usado em `worker/src/lib/pdfEnemExtractor.ts`.
+   (bundlado pelo Vite via `new URL(...)`, mesmo origin), diferente do
+   "fake worker" síncrono usado em `worker/src/lib/pdfEnemExtractor.ts`.
 
    Coordenadas: `PdfTextLine.y`/`x` (usados por todo o pipeline de
    segmentação/fusão) seguem a convenção NATIVA do PDF (origem no canto
@@ -26,6 +54,14 @@ import * as pdfjsLib from "pdfjs-dist";
 import { createWorker, type Worker as TesseractWorker } from "tesseract.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).toString();
+
+/** Sprint 24.1 — caminhos EXPLÍCITOS, same-origin, nunca os defaults do
+ *  tesseract.js (que apontam para jsdelivr — ver comentário do arquivo).
+ *  `langPath` é tratado como DIRETÓRIO pelo tesseract.js (nunca um
+ *  arquivo `.js`) — ele mesmo monta `${langPath}/${lang}.traineddata.gz`. */
+const TESSERACT_WORKER_PATH = "/tesseract/worker.min.js";
+const TESSERACT_CORE_PATH = "/tesseract/tesseract-core-lstm.wasm.js";
+const TESSERACT_LANG_PATH = "/tesseract";
 
 export interface ClientOcrLine {
   x: number;
@@ -61,6 +97,12 @@ export const OCR_MAX_DIMENSION_PX = 3000;
 export const OCR_MAX_PIXELS = 6_000_000;
 /** Seção 19 — nunca deixa uma única página travar o processo inteiro. */
 export const OCR_PAGE_TIMEOUT_MS = 45_000;
+/** Sprint 24.1, seção 19 — teto para o CARREGAMENTO do engine (worker+core
+ *  WASM+traineddata), descoberto como uma lacuna real durante o teste
+ *  adversarial de rede desta sprint: só `recognize()` tinha um teto antes
+ *  disso. Maior que `OCR_PAGE_TIMEOUT_MS` porque inclui baixar e
+ *  descomprimir ~4MB de assets na primeira chamada. */
+export const OCR_WORKER_LOAD_TIMEOUT_MS = 60_000;
 
 export class OcrCancelledError extends Error {
   constructor() {
@@ -169,7 +211,6 @@ export async function runOcrOnPages(
   if (options.signal?.aborted) throw new OcrCancelledError();
 
   const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
-  const doc = await loadingTask.promise;
   let worker: TesseractWorker | null = null;
 
   const abortHandler = () => {
@@ -178,7 +219,28 @@ export async function runOcrOnPages(
   options.signal?.addEventListener("abort", abortHandler);
 
   try {
-    worker = await createWorker("por", 1);
+    // Sprint 24.1, seção 19 da ordem — lacuna real encontrada no smoke em
+    // navegador desta sprint: o carregamento do PDF (spawn do Worker do
+    // pdf.js + handshake) não tinha NENHUM teto — uma falha rara de
+    // inicialização do Worker travaria `runOcrOnPages` para sempre, mesmo
+    // com os tetos de `createWorker`/`recognize()` já existentes. Agora
+    // DENTRO do try/finally — mesmo um timeout aqui ainda libera
+    // `loadingTask` corretamente.
+    const doc = await withTimeout(loadingTask.promise, OCR_WORKER_LOAD_TIMEOUT_MS, "Tempo limite excedido ao carregar o PDF para OCR.");
+    // Seção 19 da ordem — nunca deixa uma página travar o processo
+    // inteiro: sem este teto, uma falha de carregamento do worker/core/
+    // traineddata (ex.: rede instável, aba em segundo plano) travaria
+    // `runOcrOnPages` indefinidamente — `recognize()` já tinha esse teto,
+    // a fase de `createWorker()` (carregamento do engine) não tinha.
+    worker = await withTimeout(
+      createWorker("por", 1, {
+        workerPath: TESSERACT_WORKER_PATH,
+        corePath: TESSERACT_CORE_PATH,
+        langPath: TESSERACT_LANG_PATH,
+      }),
+      OCR_WORKER_LOAD_TIMEOUT_MS,
+      "Tempo limite excedido ao carregar o motor de OCR."
+    );
     const results: ClientOcrPageResult[] = [];
 
     for (let index = 0; index < pageNumbers.length; index++) {
