@@ -101,8 +101,25 @@ function remapPages(pages: PdfPageText[], offset: number): PdfPageText[] {
   return pages.map((p) => ({ ...p, pageNumber: p.pageNumber + offset }));
 }
 
+/** Bug real encontrado ao testar contra o PDF oficial 2024 (auditoria de
+ *  hardening): `id` é construído DENTRO de `extractPageVisualElements`
+ *  (pdfEnemVisualExtractor.ts) como `p<pageNumber>_img_<n>` usando o
+ *  número de página RELATIVO AO CHUNK (a janela sempre começa sua própria
+ *  numeração em 1) — remapear só o campo `pageNumber` sem também
+ *  reescrever essa string deixava o `id` "preso" ao número de página
+ *  errado, e duas janelas DIFERENTES cujo "page 2 do chunk" ambas geram
+ *  `p2_img_1` colidiam (mesmo id, elementos fisicamente distintos,
+ *  páginas absolutas diferentes) — rejeitado no backend como "id
+ *  duplicado" (proteção real fazendo seu trabalho). Corrigido reescrevendo
+ *  o prefixo `p<número>_` do id para o número de página JÁ REMAPEADO,
+ *  preservando o resto (funciona para `_img_`, `_mask_` ou qualquer outro
+ *  sufixo, via regex — nunca acoplado a um formato específico). */
+export function remapElementId(id: string, offset: number): string {
+  return id.replace(/^p(\d+)_/, (_match, rawPageNumber: string) => `p${Number(rawPageNumber) + offset}_`);
+}
+
 function remapVisualElements(elements: RawVisualElement[], offset: number): RawVisualElement[] {
-  return elements.map((e) => ({ ...e, pageNumber: e.pageNumber + offset }));
+  return elements.map((e) => ({ ...e, id: remapElementId(e.id, offset), pageNumber: e.pageNumber + offset }));
 }
 
 function remapVectorCandidates(candidates: RawVectorCandidate[], offset: number): RawVectorCandidate[] {

@@ -46,8 +46,14 @@ const PDF_PREVIEW_MULTIPART_MAX_BYTES = PDF_EXAM_MAX_BYTES + PDF_ANSWER_KEY_MAX_
    máximo aqui é bem menor — o JSON estruturado (medido no PDF real de
    2024: ~177KB para 90 questões) mais as imagens PNG confirmadas (teto
    já existente `MAX_TOTAL_VISUAL_BYTES_PER_BATCH`, 15MB). */
-const PDF_CLIENT_MULTIPART_MAX_BYTES = MAX_TOTAL_VISUAL_BYTES_PER_BATCH + 2 * 1024 * 1024; // 15MB de imagens + 2MB de folga para o JSON estruturado + overhead multipart.
-const PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES = 4 * 1024 * 1024; // campo "payload" isolado — nunca o corpo multipart inteiro.
+// Hardening pós-auditoria — o client-preview (seção 3 da ordem) é JSON
+// puro, SEM imagem nenhuma (medido no PDF real de 2024: ~328KB para 90
+// questões/634 elementos visuais) — este teto é generoso o bastante para
+// documentos muito maiores, nunca ilimitado. O client-apply CONTINUA
+// multipart (só as poucas imagens de fato confirmadas), usando o teto
+// maior abaixo.
+const PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES = 4 * 1024 * 1024;
+const PDF_CLIENT_MULTIPART_MAX_BYTES = MAX_TOTAL_VISUAL_BYTES_PER_BATCH + 2 * 1024 * 1024; // 15MB de imagens confirmadas + 2MB de folga para o JSON de seleção + overhead multipart.
 /** Prefixo do nome de campo multipart de cada imagem confirmada — seguido
  *  do `hash` declarado no JSON estruturado (nunca um índice posicional,
  *  que poderia dessincronizar da lista se o cliente reordenar por engano). */
@@ -57,16 +63,28 @@ const VISUAL_FILE_FIELD_PREFIX = "visual:";
  *  nome comece com `VISUAL_FILE_FIELD_PREFIX`. Nunca confia na extensão/
  *  nome do arquivo enviado pelo navegador — só no HASH declarado na
  *  própria chave do campo, que é o mesmo hash validado contra o conteúdo
- *  real dentro do serviço (`validateClientVisualElements`/
- *  `applyPdfFromClientPreview`, nunca só aqui). */
-async function collectVisualFilesByHash(form: FormData): Promise<Map<string, Uint8Array>> {
-  const map = new Map<string, Uint8Array>();
+ *  real dentro do serviço (`applyPdfFromClientPreview`, nunca só aqui).
+ *
+ *  Hardening pós-auditoria (seção 6) — DOIS campos `visual:<mesmo_hash>`
+ *  no mesmo multipart são REJEITADOS explicitamente, nunca deixados um
+ *  sobrescrever o outro silenciosamente num `Map.set` — um cliente normal
+ *  nunca faz isso, mas é uma defesa simples e barata da fronteira de
+ *  confiança (a origem dos bytes é o navegador, não o Worker). */
+function collectVisualFilesByHash(form: FormData): { ok: true; value: Map<string, File> } | { ok: false; duplicateHash: string } {
+  const map = new Map<string, File>();
   for (const [key, value] of form.entries()) {
     if (!key.startsWith(VISUAL_FILE_FIELD_PREFIX) || !(value instanceof File)) continue;
     const hash = key.slice(VISUAL_FILE_FIELD_PREFIX.length);
     if (!hash) continue;
-    map.set(hash, new Uint8Array(await value.arrayBuffer()));
+    if (map.has(hash)) return { ok: false, duplicateHash: hash };
+    map.set(hash, value);
   }
+  return { ok: true, value: map };
+}
+
+async function readVisualFilesAsBytes(filesByHash: Map<string, File>): Promise<Map<string, Uint8Array>> {
+  const map = new Map<string, Uint8Array>();
+  for (const [hash, file] of filesByHash) map.set(hash, new Uint8Array(await file.arrayBuffer()));
   return map;
 }
 
@@ -570,33 +588,31 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
   if (path === "/api/editorial/question-imports/pdf/client-preview") {
     if (request.method !== "POST") return Errors.methodNotAllowed();
 
+    // Hardening pós-auditoria (seção 3 da ordem) — NUNCA multipart aqui:
+    // o navegador já tem os bytes de imagem localmente e já os exibe para
+    // a Andreia (ver EditorialImportsPage.tsx) — o corpo é só o JSON
+    // estruturado (medido no PDF real de 2024, sem PNGs: ~328KB para 90
+    // questões/634 elementos visuais). Content-Length obrigatório, mesma
+    // disciplina fail-closed de sempre.
     const contentLengthRaw = request.headers.get("content-length");
     if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
       return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido.");
     }
-    if (Number(contentLengthRaw) > PDF_CLIENT_MULTIPART_MAX_BYTES) {
+    if (Number(contentLengthRaw) > PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES) {
       return Errors.payloadTooLarge("Corpo da requisição excede o limite permitido para gerar a prévia.");
     }
 
-    let form: FormData;
-    try {
-      form = await request.formData();
-    } catch {
-      return Errors.badRequest("Corpo multipart/form-data inválido.");
-    }
-
-    const payloadRaw = form.get("payload");
-    if (typeof payloadRaw !== "string" || payloadRaw.length === 0) return Errors.badRequest("Campo 'payload' é obrigatório.");
-    if (new TextEncoder().encode(payloadRaw).byteLength > PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES) {
-      return Errors.payloadTooLarge("Campo 'payload' excede o limite permitido.");
-    }
     let parsedPayload: Record<string, unknown>;
     try {
-      const parsed = JSON.parse(payloadRaw) as unknown;
+      const text = await request.text();
+      if (new TextEncoder().encode(text).byteLength > PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES) {
+        return Errors.payloadTooLarge("Corpo da requisição excede o limite permitido para gerar a prévia.");
+      }
+      const parsed = JSON.parse(text) as unknown;
       if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
       parsedPayload = parsed as Record<string, unknown>;
     } catch {
-      return Errors.badRequest("Campo 'payload' não é um JSON válido.");
+      return Errors.badRequest("Corpo não é um JSON válido.");
     }
 
     const input: PdfClientPreviewRawInput = {
@@ -619,8 +635,13 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       answerKeyDetectedIdentity: parsedPayload.answerKeyDetectedIdentity,
     };
 
-    const imageBytesByHash = await collectVisualFilesByHash(form);
-    const result = await previewPdfFromClientPayload(env.DB, actor.userId, input, imageBytesByHash);
+    // Hardening pós-auditoria — o preview NUNCA chama collectVisualFilesByHash,
+    // nunca faz sniff de PNG, nunca hasheia bytes de imagem: isso reintroduzia
+    // exatamente o tipo de trabalho de CPU que esta sprint existe para
+    // eliminar (causa raiz do incidente P1). `pngSha256`/`byteLength` são
+    // validados só por FORMA dentro do serviço — a prova de consistência
+    // real acontece no apply.
+    const result = await previewPdfFromClientPayload(env.DB, actor.userId, input);
     if (!result.ok) {
       return json({ error: { code: `pdf_client_${result.reason ?? "invalid_payload"}`, message: result.message ?? "Payload inválido." } }, { status: 400 });
     }
@@ -709,7 +730,11 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
     }
 
     if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
-    const imageBytesByHash = await collectVisualFilesByHash(form);
+    const visualFiles = collectVisualFilesByHash(form);
+    if (!visualFiles.ok) {
+      return Errors.badRequest(`Arquivo de imagem duplicado para o mesmo hash (${visualFiles.duplicateHash}) — envie cada imagem confirmada uma única vez.`);
+    }
+    const imageBytesByHash = await readVisualFilesAsBytes(visualFiles.value);
     const result = await applyPdfFromClientPreview(env.DB, env.QUESTION_MEDIA, actor.userId, batchId, selection, imageBytesByHash);
     if (!result.ok) {
       if (result.notFound) return Errors.notFound();

@@ -673,24 +673,20 @@ export function applyPdfEnem(
    PDF nunca é enviado ao Worker neste fluxo — todo o processamento
    (extração/segmentação/casamento) já rodou no navegador
    (`src/workers/pdfEnemImportPipeline.ts` via `src/pages/editorial/
-   pdfEnemImportClient.ts`). Aqui só existe o transporte HTTP do resultado
-   JÁ ESTRUTURADO — mesmo prefixo de campo de arquivo (`visual:<hash>`)
-   esperado por `collectVisualFilesByHash` em
-   worker/src/routes/editorialImports.ts.
-   ----------------------------------------------------------------------- */
+   pdfEnemImportClient.ts`).
+
+   Hardening pós-auditoria (bloqueio real encontrado: hashear ~104 PNGs no
+   Worker a cada preview reintroduzia CPU pesada — exatamente a causa raiz
+   do incidente P1) — `previewPdfEnemClient` agora manda JSON PURO, SEM
+   NENHUM arquivo de imagem: o navegador já exibe a prévia com os bytes
+   que já tem localmente (ver `imagePngByHashRef`/miniaturas em
+   `EditorialImportsPage.tsx`), o Worker só recebe metadado
+   (`hash`/`pngSha256`/`byteLength`), nunca pixels. Só `applyPdfEnemClient`
+   continua multipart — as poucas imagens REALMENTE confirmadas, mesmo
+   prefixo de campo (`visual:<hash>`) esperado por
+   `collectVisualFilesByHash` em worker/src/routes/editorialImports.ts. */
 
 const VISUAL_FILE_FIELD_PREFIX = "visual:";
-
-/** Preenche os campos multipart de imagem confirmada — reaproveitado tanto
- *  pelo client-preview quanto pelo client-apply (mesma convenção de nome
- *  de campo dos dois lados). */
-function appendVisualImageFiles(form: FormData, imagePngByHash: Map<string, Uint8Array>, hashes: Iterable<string>): void {
-  for (const hash of hashes) {
-    const bytes = imagePngByHash.get(hash);
-    if (!bytes) continue;
-    form.set(`${VISUAL_FILE_FIELD_PREFIX}${hash}`, new Blob([new Uint8Array(bytes)], { type: "image/png" }), `${hash}.png`);
-  }
-}
 
 export interface PdfClientPreviewPayload {
   identity: PdfExamIdentityInput;
@@ -701,20 +697,19 @@ export interface PdfClientPreviewPayload {
   parserVersion: string;
   examQuestions: unknown[];
   answerKey: Array<[number, string]>;
+  /** Metadado leve (`hash`/`pngSha256`/`byteLength`/geometria/status) —
+   *  NUNCA bytes de imagem. `pngSha256` já vem calculado pelo pipeline
+   *  client-side (`src/workers/pdfEnemImportPipeline.ts`), dos bytes
+   *  REAIS extraídos no navegador — é essa declaração que o apply exige
+   *  bater de novo, byte-a-byte, quando a imagem é de fato confirmada e
+   *  reenviada (única prova de consistência possível sem reenviar o PDF —
+   *  o Worker nunca prova os bytes no preview, só no apply). */
   visualElements: unknown[];
   examDetectedIdentity: unknown;
   answerKeyDetectedIdentity: unknown;
 }
 
-/** Todos os hashes de imagem REALMENTE extraída (`extractionStatus ===
- *  "extracted"`) presentes em `visualElements` — usado para saber quais
- *  arquivos PNG precisam ser anexados ao multipart (nunca envia bytes de
- *  elementos vetoriais/ambíguos, que nunca têm PNG). */
-function extractedImageHashes(visualElements: Array<{ hash: string; kind: string; extractionStatus: string }>): string[] {
-  return visualElements.filter((el) => el.kind === "raster" && el.extractionStatus === "extracted").map((el) => el.hash);
-}
-
-export async function previewPdfEnemClient(payload: PdfClientPreviewPayload, imagePngByHash: Map<string, Uint8Array>): Promise<PreviewPdfResponse> {
+export async function previewPdfEnemClient(payload: PdfClientPreviewPayload): Promise<PreviewPdfResponse> {
   const jsonPayload = {
     year: payload.identity.year,
     application: payload.identity.application,
@@ -732,10 +727,17 @@ export async function previewPdfEnemClient(payload: PdfClientPreviewPayload, ima
     examDetectedIdentity: payload.examDetectedIdentity,
     answerKeyDetectedIdentity: payload.answerKeyDetectedIdentity,
   };
-  const form = new FormData();
-  form.set("payload", JSON.stringify(jsonPayload));
-  appendVisualImageFiles(form, imagePngByHash, extractedImageHashes(payload.visualElements as never));
-  return request("/api/editorial/question-imports/pdf/client-preview", { method: "POST", body: form });
+  return request("/api/editorial/question-imports/pdf/client-preview", { method: "POST", body: JSON.stringify(jsonPayload) });
+}
+
+/** Preenche os campos multipart de imagem confirmada — usado SÓ pelo
+ *  client-apply (nunca mais pelo preview, ver comentário acima). */
+function appendVisualImageFiles(form: FormData, imagePngByHash: Map<string, Uint8Array>, hashes: Iterable<string>): void {
+  for (const hash of hashes) {
+    const bytes = imagePngByHash.get(hash);
+    if (!bytes) continue;
+    form.set(`${VISUAL_FILE_FIELD_PREFIX}${hash}`, new Blob([new Uint8Array(bytes)], { type: "image/png" }), `${hash}.png`);
+  }
 }
 
 export function applyPdfEnemClient(

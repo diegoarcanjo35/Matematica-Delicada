@@ -1179,20 +1179,22 @@ function validateClientAnswerKey(raw: unknown): { ok: true; value: Map<number, A
 
 const VALID_VISUAL_STATUSES = ["extracted", "detected_not_extractable", "ambiguous", "ignored_decorative"] as const;
 const VALID_PLACEMENT_CANDIDATES = ["statement", "option_A", "option_B", "option_C", "option_D", "option_E", "unknown"] as const;
+const CLIENT_PNG_SHA256_RE = /^[a-f0-9]{64}$/;
 
-/** Valida forma + casa cada elemento `kind==='raster'`/`extractionStatus
- *  ==='extracted'` com o arquivo PNG correspondente (enviado à parte no
- *  multipart, indexado por `hash`) — nunca aceita um elemento "extraído"
- *  sem o arquivo de fato presente. `pngSha256` é SEMPRE calculado AQUI, a
- *  partir dos bytes REALMENTE recebidos (nunca de um valor declarado pelo
- *  cliente) — é esse valor, persistido no batch, que o apply exige bater
- *  de novo (seção 9 da ordem: única prova de consistência possível sem o
- *  PDF original). */
-async function validateClientVisualElements(
-  raw: unknown,
-  pageCount: number,
-  imageBytesByHash: Map<string, Uint8Array>
-): Promise<{ ok: true; value: RawVisualElement[] } | { ok: false; message: string }> {
+/** Sprint 24.2, hardening pós-auditoria — o client-preview NUNCA MAIS
+ *  recebe bytes de imagem (nem sniff de MIME, nem hash server-side): a
+ *  causa raiz original do incidente P1 é CPU do Worker, e hashear ~104
+ *  PNGs (SHA-256 de ~7,7MB somados) a cada preview reintroduzia
+ *  exatamente o tipo de trabalho pesado que esta sprint existe para
+ *  eliminar. `pngSha256`/`byteLength` agora são uma DECLARAÇÃO do
+ *  navegador (calculada lá, dos bytes reais, na mesma fronteira de
+ *  confiança de todo o resto deste payload — seção 2/9 da ordem) —
+ *  validados aqui só por FORMA (regex de hash hex de 64 caracteres,
+ *  inteiro positivo dentro do limite), nunca por prova. A prova de
+ *  consistência real (bytes reenviados == bytes revisados no preview)
+ *  acontece no APPLY, onde o Worker de fato recebe e re-hasheia os PNGs
+ *  confirmados — ver `applyPdfFromClientPreview`. */
+function validateClientVisualElements(raw: unknown, pageCount: number): { ok: true; value: RawVisualElement[] } | { ok: false; message: string } {
   if (!Array.isArray(raw)) return { ok: false, message: "visualElements precisa ser uma lista." };
   if (raw.length > MAX_CLIENT_VISUAL_ELEMENTS) return { ok: false, message: `visualElements excede o limite de ${MAX_CLIENT_VISUAL_ELEMENTS} elementos.` };
 
@@ -1221,19 +1223,19 @@ async function validateClientVisualElements(
 
     const kind = el.kind as "raster" | "vector_diagram";
     const extractionStatus = el.extractionStatus as RawVisualElement["extractionStatus"];
-    let pngBytes: Uint8Array | undefined;
     let pngSha256: string | undefined;
     let mime: "image/png" | undefined;
     let byteLength: number | undefined;
     if (kind === "raster" && extractionStatus === "extracted") {
-      const bytes = imageBytesByHash.get(el.hash as string);
-      if (!bytes) return { ok: false, message: `Elemento visual ${el.id}: arquivo de imagem correspondente não foi enviado.` };
-      if (sniffImageMimeType(bytes) !== "image/png") return { ok: false, message: `Elemento visual ${el.id}: arquivo enviado não é um PNG válido.` };
-      if (bytes.byteLength > MAX_IMAGE_UPLOAD_BYTES) return { ok: false, message: `Elemento visual ${el.id}: imagem excede o limite de ${MAX_IMAGE_UPLOAD_BYTES} bytes.` };
-      pngBytes = bytes;
-      pngSha256 = await sha256HexOfBytes(bytes);
+      if (typeof el.pngSha256 !== "string" || !CLIENT_PNG_SHA256_RE.test(el.pngSha256)) {
+        return { ok: false, message: `Elemento visual ${el.id}: pngSha256 inválido (esperado hash hex de 64 caracteres).` };
+      }
+      if (!Number.isInteger(el.byteLength) || (el.byteLength as number) <= 0 || (el.byteLength as number) > MAX_IMAGE_UPLOAD_BYTES) {
+        return { ok: false, message: `Elemento visual ${el.id}: byteLength inválido (esperado inteiro entre 1 e ${MAX_IMAGE_UPLOAD_BYTES} bytes).` };
+      }
+      pngSha256 = el.pngSha256;
       mime = "image/png";
-      byteLength = bytes.byteLength;
+      byteLength = el.byteLength as number;
     }
 
     result.push({
@@ -1250,7 +1252,6 @@ async function validateClientVisualElements(
       extractionStatus,
       placementCandidate: el.placementCandidate as VisualPlacementCandidate,
       warnings: el.warnings,
-      pngBytes,
       pngSha256,
     });
   }
@@ -1264,12 +1265,7 @@ async function validateClientVisualElements(
  *  saber sozinho) e `checkDocumentIdentity` a partir da identidade BRUTA
  *  detectada em cada PDF (nunca aceita um resultado de comparação
  *  pré-pronto do cliente). */
-export async function previewPdfFromClientPayload(
-  db: D1Database,
-  actorUserId: string,
-  input: PdfClientPreviewRawInput,
-  imageBytesByHash: Map<string, Uint8Array>
-): Promise<PdfClientPreviewResult> {
+export async function previewPdfFromClientPayload(db: D1Database, actorUserId: string, input: PdfClientPreviewRawInput): Promise<PdfClientPreviewResult> {
   if (!input.confirmation) {
     return {
       ok: false,
@@ -1305,7 +1301,7 @@ export async function previewPdfFromClientPayload(
   const answerKeyResult = validateClientAnswerKey(input.answerKey);
   if (!answerKeyResult.ok) return { ok: false, reason: "invalid_payload", message: answerKeyResult.message };
 
-  const visualElementsResult = await validateClientVisualElements(input.visualElements, pageCount, imageBytesByHash);
+  const visualElementsResult = validateClientVisualElements(input.visualElements, pageCount);
   if (!visualElementsResult.ok) return { ok: false, reason: "invalid_payload", message: visualElementsResult.message };
 
   const examDetectedResult = validateDetectedIdentity(input.examDetectedIdentity, "examDetectedIdentity");

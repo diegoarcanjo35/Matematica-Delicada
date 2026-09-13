@@ -6,11 +6,12 @@ import {
   dedupQuestionsByCompleteness,
   filterPhantomQuestions,
   runClientPdfImportPipeline,
+  remapElementId,
   type PdfWindowPlan,
 } from "../../src/workers/pdfEnemImportPipeline";
 import { extractPdfPages } from "../src/lib/pdfEnemExtractor";
 import { segmentExamQuestions, type RawQuestionCandidate } from "../src/lib/pdfEnemSegmenter";
-import { buildExamPdf, buildAnswerKeyPdf } from "./pdfFixtureBuilder";
+import { buildExamPdf, buildAnswerKeyPdf, buildFixturePdfWithVisuals, type FixturePageSpec } from "./pdfFixtureBuilder";
 
 /* Sprint 24.2 — importador ENEM client-side. Suíte FOCADA (seção 19 da
    ordem, "não rodar suíte completa"): split local, overlap, dedup,
@@ -245,5 +246,59 @@ describe("runClientPdfImportPipeline — ponta a ponta com fixture sintética mu
     const result = await runClientPdfImportPipeline(examPdf, keyPdf, { signal: controller.signal });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("cancelled");
+  });
+});
+
+describe("remapElementId — regressão do bug real de auditoria (id preso ao número de página relativo ao chunk)", () => {
+  it("reescreve o prefixo p<número>_ preservando o sufixo, para qualquer offset", () => {
+    expect(remapElementId("p2_img_1", 7)).toBe("p9_img_1");
+    expect(remapElementId("p1_mask_3", 21)).toBe("p22_mask_3");
+    expect(remapElementId("p5_vec_0", 0)).toBe("p5_vec_0");
+  });
+
+  it("nunca mexe numa string que não começa com o padrão p<número>_", () => {
+    expect(remapElementId("elemento-sem-prefixo", 5)).toBe("elemento-sem-prefixo");
+  });
+});
+
+describe("ponta a ponta com imagens reais em janelas diferentes — bug real encontrado na auditoria de hardening", () => {
+  it("duas imagens cujo número de página é IDÊNTICO dentro do respectivo chunk (ambas 'página 2 da janela') nunca colidem — ids e pageNumber corretos e únicos", async () => {
+    // 12 questões, 1 por página — janela 1 = páginas 1-8, janela 2 =
+    // páginas 8-15(->12). Página absoluta 2 é a "página 2" da janela 1;
+    // página absoluta 9 é a "página 2" da janela 2 (janela 2 começa na
+    // página 8) — o EXATO cenário que colidia antes da correção.
+    const questionNumbers = Array.from({ length: 12 }, (_, i) => i + 1);
+    const smallImage = { afterLineIndex: 0, width: 2, height: 2, rgbBytes: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120] };
+    const pages: FixturePageSpec[] = questionNumbers.map((n) => ({
+      lines: [
+        `QUESTAO ${n}`,
+        `Enunciado tecnico da questao ${n} de teste.`,
+        `A. Alternativa A da questao ${n}`,
+        `B. Alternativa B da questao ${n}`,
+        `C. Alternativa C da questao ${n}`,
+        `D. Alternativa D da questao ${n}`,
+        `E. Alternativa E da questao ${n}`,
+      ],
+      images: n === 2 || n === 9 ? [smallImage] : undefined,
+    }));
+    const examPdf = buildFixturePdfWithVisuals(pages);
+    const keyPdf = buildAnswerKeyPdf(questionNumbers.map((n) => [n, "A"] as [number, string]));
+
+    const result = await runClientPdfImportPipeline(examPdf, keyPdf, { windowSize: 8, overlap: 1 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const rasterElements = result.visualElements.filter((el) => el.kind === "raster" && el.extractionStatus === "extracted");
+    expect(rasterElements).toHaveLength(2);
+
+    const ids = rasterElements.map((el) => el.id);
+    expect(new Set(ids).size).toBe(2); // nunca colidem.
+
+    const byPage = new Map(rasterElements.map((el) => [el.pageNumber, el] as const));
+    expect(byPage.has(2)).toBe(true);
+    expect(byPage.has(9)).toBe(true);
+    // O id precisa refletir a página ABSOLUTA remapeada, nunca a relativa ao chunk.
+    expect(byPage.get(2)!.id.startsWith("p2_")).toBe(true);
+    expect(byPage.get(9)!.id.startsWith("p9_")).toBe(true);
   });
 });

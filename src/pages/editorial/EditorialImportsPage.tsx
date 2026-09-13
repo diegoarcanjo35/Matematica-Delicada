@@ -586,6 +586,20 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   const [clientProgress, setClientProgress] = useState<PdfImportProgress | null>(null);
   const clientCancelRef = useRef<(() => void) | null>(null);
   const imagePngByHashRef = useRef<Map<string, Uint8Array>>(new Map());
+  // Hardening pós-auditoria — o Worker não ecoa mais thumbnails no preview
+  // (nunca recebe PNG nenhum, ver previewPdfEnemClient); a miniatura vem
+  // de um Blob URL construído AQUI, dos bytes que o próprio navegador já
+  // extraiu. `thumbnailUrlVersion` força um re-render quando o Map (um
+  // ref, que não dispara re-render sozinho) muda de conteúdo.
+  const thumbnailUrlByHashRef = useRef<Map<string, string>>(new Map());
+  const [, setThumbnailUrlVersion] = useState(0);
+
+  useEffect(() => {
+    // Revoga todos os Blob URLs ao desmontar a tela — nunca vaza memória.
+    return () => {
+      for (const url of thumbnailUrlByHashRef.current.values()) URL.revokeObjectURL(url);
+    };
+  }, []);
 
   useEffect(() => {
     fetchEditorialPatterns()
@@ -618,27 +632,38 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
       const pipelineResult = await handle.promise;
       clientCancelRef.current = null;
 
+      // Hardening pós-auditoria — as miniaturas agora vêm dos bytes que o
+      // PRÓPRIO navegador já extraiu (nunca mais ecoadas de volta pelo
+      // Worker, que não recebe mais nenhum PNG no preview). Blob URLs
+      // antigas são revogadas antes de criar as novas — nunca vaza memória
+      // entre gerações de prévia sucessivas.
+      for (const url of thumbnailUrlByHashRef.current.values()) URL.revokeObjectURL(url);
+      const newThumbnailUrls = new Map<string, string>();
       for (const el of pipelineResult.visualElements) {
-        if (el.pngBytes) imagePngByHashRef.current.set(el.hash, el.pngBytes);
+        if (!el.pngBytes) continue;
+        imagePngByHashRef.current.set(el.hash, el.pngBytes);
+        newThumbnailUrls.set(el.hash, URL.createObjectURL(new Blob([new Uint8Array(el.pngBytes)], { type: "image/png" })));
       }
+      thumbnailUrlByHashRef.current = newThumbnailUrls;
+      setThumbnailUrlVersion((v) => v + 1);
 
       setClientProgress({ stage: "preparing", message: "Enviando prévia..." });
-      const result = await previewPdfEnemClient(
-        {
-          identity: currentIdentity(),
-          confirmation: confirmed,
-          examSha256: pipelineResult.examSha256,
-          answerKeySha256: pipelineResult.answerKeySha256,
-          pageCount: pipelineResult.pageCount,
-          parserVersion: "client-v1",
-          examQuestions: pipelineResult.examQuestions,
-          answerKey: pipelineResult.answerKey,
-          visualElements: pipelineResult.visualElements.map(({ pngBytes: _pngBytes, ...rest }) => rest),
-          examDetectedIdentity: pipelineResult.examDetectedIdentity,
-          answerKeyDetectedIdentity: pipelineResult.answerKeyDetectedIdentity,
-        },
-        imagePngByHashRef.current
-      );
+      const result = await previewPdfEnemClient({
+        identity: currentIdentity(),
+        confirmation: confirmed,
+        examSha256: pipelineResult.examSha256,
+        answerKeySha256: pipelineResult.answerKeySha256,
+        pageCount: pipelineResult.pageCount,
+        parserVersion: "client-v1",
+        examQuestions: pipelineResult.examQuestions,
+        // Hardening pós-auditoria (seção 3) — NUNCA envia `pngBytes` ao
+        // Worker no preview, só o metadado leve (hash/pngSha256/
+        // byteLength/geometria/status) que o serviço valida por forma.
+        answerKey: pipelineResult.answerKey,
+        visualElements: pipelineResult.visualElements.map(({ pngBytes: _pngBytes, ...rest }) => rest),
+        examDetectedIdentity: pipelineResult.examDetectedIdentity,
+        answerKeyDetectedIdentity: pipelineResult.answerKeyDetectedIdentity,
+      });
       setPreview(result);
       setMathOnlyFilter(result.documentIdentityCheck?.examDetected.day === 2);
       const initialSelection = new Map<number, PdfSelectionState>();
@@ -978,7 +1003,13 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
                           const confirmation = sel.visualConfirmations[el.hash] ?? { placement: "", altText: "" };
                           return (
                             <li key={el.hash}>
-                              {el.thumbnailDataUri && <img src={el.thumbnailDataUri} alt="Miniatura da imagem extraída" className="editorial__pdf-thumbnail" />}
+                              {(thumbnailUrlByHashRef.current.get(el.hash) ?? el.thumbnailDataUri) && (
+                                <img
+                                  src={thumbnailUrlByHashRef.current.get(el.hash) ?? el.thumbnailDataUri}
+                                  alt="Miniatura da imagem extraída"
+                                  className="editorial__pdf-thumbnail"
+                                />
+                              )}
                               <label htmlFor={`pdf-visual-placement-${q.originalNumber}-${el.hash}`} className="editorial__field-label">
                                 Onde esta imagem pertence
                               </label>
