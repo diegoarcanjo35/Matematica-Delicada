@@ -40,9 +40,9 @@ describe("isRepeatedStampText — detecção estrutural de marca d'água (nunca 
     expect(isRepeatedStampText("AB".repeat(20))).toBe(true);
   });
 
-  it("tolera uma pequena variação no meio da repetição (ex.: glitch de encoding), desde que o início repita o suficiente", () => {
+  it("correção pós-cc3737b — uma repetição corrompida no meio (glitch) deixa de casar por inteiro e NUNCA é mais tolerada como stamp; fail-closed prefere preservar (nunca descartar) um item que não é 100% repetição pura", () => {
     const withGlitch = "ENEM2024".repeat(25) + "ENEM20E4" + "ENEM2024".repeat(20);
-    expect(isRepeatedStampText(withGlitch)).toBe(true);
+    expect(isRepeatedStampText(withGlitch)).toBe(false);
   });
 
   it("nunca marca texto real de prova como marca d'água", () => {
@@ -58,17 +58,55 @@ describe("isRepeatedStampText — detecção estrutural de marca d'água (nunca 
   });
 });
 
+/* Correção pós-cc3737b — auditoria encontrou que `REPEATED_STAMP_TEXT_RE`
+   não estava ancorado no final (`$` ausente), então um item MISTO
+   "[marca d'água repetida 10x][texto legítimo]" também batia no padrão
+   pelo PREFIXO e era descartado por inteiro — perda silenciosa de
+   conteúdo real, violando fail-closed. Bateria de testes adversariais
+   exigida pela ordem (itens A-F): prova que o filtro corrigido NUNCA
+   remove um item misto, só um item que é 100% repetição do início ao
+   fim da string. */
+describe("isRepeatedStampText — regex ancorada na string inteira (fail-closed: nunca descarta item misto)", () => {
+  it("A) 'AB' repetido 10x -> true (marca d'água pura, ocupa a string inteira)", () => {
+    expect(isRepeatedStampText("AB".repeat(10))).toBe(true);
+  });
+
+  it("B) 'ENEM2024' repetido dezenas de vezes -> true (marca d'água pura, ocupa a string inteira)", () => {
+    expect(isRepeatedStampText("ENEM2024".repeat(40))).toBe(true);
+  });
+
+  it("C) 'ENEM2024' repetido 10x + ' Questão 91' -> false (item MISTO nunca mais é descartado por inteiro)", () => {
+    expect(isRepeatedStampText("ENEM2024".repeat(10) + " Questão 91")).toBe(false);
+  });
+
+  it("D) 'AB' repetido 10x + ' texto legítimo' -> false (mesma classe do bug C, unidade mais curta)", () => {
+    expect(isRepeatedStampText("AB".repeat(10) + " texto legítimo")).toBe(false);
+  });
+
+  it("E) frase legítima comum com repetição parcial de uma palavra -> false (prosa real nunca é 100% repetição de um trecho fixo)", () => {
+    expect(isRepeatedStampText("Repita, repita, repita: essa fórmula não muda em nenhuma versão do teste.")).toBe(false);
+  });
+
+  it("F) repetição abaixo do limiar (menos de 10 ocorrências), mesmo ocupando a string inteira -> false", () => {
+    expect(isRepeatedStampText("ENEM2024".repeat(5))).toBe(false);
+  });
+});
+
 describe("Filtro de marca d'água na extração — nunca deixa colidir com conteúdo real", () => {
   it("um item de texto que é só a marca d'água repetida nunca aparece na saída, mesmo colidindo em Y com uma linha real", () => {
     // Fixture de baixo nível: injeta manualmente um PDF com uma linha real
     // e um item de marca d'água na MESMA faixa Y (mesmo mecanismo de
     // colisão documentado no código de produção).
-    // Unidade curta (2 caracteres) repetida muitas vezes — robusto mesmo
-    // se o motor de layout do pdf.js truncar a string por causa da fonte
-    // minimalista sem tabela de larguras real (limitação só desta fixture
+    // Unidade curta (2 caracteres) repetida um número MODESTO de vezes
+    // (15x = 30 caracteres) — deliberadamente curto o bastante para nunca
+    // esbarrar no truncamento de layout do pdf.js causado pela fonte
+    // minimalista sem tabela de larguras real desta fixture (limitação só
     // de teste, nunca do PDF oficial real, que sempre vem com fonte
-    // embutida completa — ver relatório do hotfix).
-    const stamp = "AB".repeat(100);
+    // embutida completa — ver relatório do hotfix). Correção pós-cc3737b:
+    // como o regex agora exige casar a STRING INTEIRA (âncora `$`), um
+    // truncamento no meio de uma repetição deixaria de casar por inteiro
+    // — por isso o comprimento aqui é escolhido para nunca ser truncado.
+    const stamp = "AB".repeat(15);
     function pdfEscape(text: string): string {
       return text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
     }

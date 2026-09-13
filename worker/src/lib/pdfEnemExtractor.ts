@@ -270,8 +270,19 @@ function detectColumnGutter(xs: number[], pageWidth: number): number | null {
  *  string inteira é um trecho de 2-24 caracteres repetido pelo menos 10
  *  vezes seguidas nunca é texto real de prova (nenhuma palavra/frase
  *  legítima em português se repete assim) — excluído ANTES de qualquer
- *  agrupamento por linha, nunca deixado fundir com conteúdo real. */
-const REPEATED_STAMP_TEXT_RE = /^(.{2,24}?)\1{9,}/;
+ *  agrupamento por linha, nunca deixado fundir com conteúdo real.
+ *
+ *  Correção pós-cc3737b (auditoria): o regex original não estava ancorado
+ *  no final (`$` ausente), então um item MISTO — "[marca d'água repetida
+ *  10x][texto legítimo]" — também batia no padrão pelo PREFIXO e o item
+ *  inteiro era descartado, inclusive o texto real que vinha depois.
+ *  Fail-closed exige o oposto: só descartar quando a STRING INTEIRA, do
+ *  início ao fim, é a repetição — nunca um prefixo. Um item corrompido no
+ *  meio da repetição (ex.: glitch de encoding do PDF) deixa de casar por
+ *  inteiro e agora é preservado (nunca descartado por engano) em vez de
+ *  ser tolerado como antes — a perda de conteúdo real é sempre pior do que
+ *  deixar passar um fragmento residual de marca d'água corrompida. */
+const REPEATED_STAMP_TEXT_RE = /^(.{2,24}?)\1{9,}$/;
 
 export function isRepeatedStampText(str: string): boolean {
   return REPEATED_STAMP_TEXT_RE.test(str);
