@@ -1,15 +1,51 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorialImportsPage } from "./EditorialImportsPage";
 import { EditorialRoleContext } from "../../auth/editorialRoleContext";
+import { runPdfClientImport, PdfClientImportError } from "./pdfEnemImportClient";
 
 /* Sprint 22 — aba "PDF oficial ENEM" (itens 63-79 da ordem, seção 40):
    exige os 2 PDFs + confirmação, mostra resumo/cards/avisos/gabarito para
    revisão editorial, seleção de padrão pelo NOME (nunca código), botão
    final diz "Criar N rascunhos" e a tela NUNCA contém a palavra
    "Publicar". Mesma convenção de mock de fetch global de
-   EditorialImportsPage.test.tsx (Sprint 19). */
+   EditorialImportsPage.test.tsx (Sprint 19).
+
+   Sprint 24.2 — o PDF não é mais processado pelo Worker Cloudflare (causa
+   raiz do incidente P1: CPU do plano Free). Estes testes de UI nunca
+   precisam rodar o pipeline REAL (pdf.js/pdf-lib dentro de um Web Worker
+   de verdade seria lento e frágil num ambiente jsdom) — `runPdfClientImport`
+   é mockado para devolver instantaneamente um resultado sintético
+   equivalente ao que o navegador real produziria; o comportamento real do
+   pipeline (janelamento/overlap/dedup/consolidação) é coberto à parte em
+   worker/testing/pdfEnemClientPipeline.test.ts (puro, sem DOM) e contra o
+   PDF real do ENEM 2024 (script ad-hoc, nunca commitado). Endpoints
+   também mudaram: /pdf/client-preview e /pdf/client-apply (nunca mais
+   /pdf/preview e /pdf/apply, que continuam existindo só para o fluxo
+   clássico, ainda usado por um Workers Paid futuro). */
+
+vi.mock("./pdfEnemImportClient", async () => {
+  const actual = await vi.importActual<typeof import("./pdfEnemImportClient")>("./pdfEnemImportClient");
+  return { ...actual, runPdfClientImport: vi.fn() };
+});
+
+const DEFAULT_PIPELINE_RESULT = {
+  ok: true as const,
+  pageCount: 1,
+  examSha256: "e".repeat(64),
+  answerKeySha256: "f".repeat(64),
+  examQuestions: [],
+  answerKey: [] as Array<[number, "A" | "B" | "C" | "D" | "E"]>,
+  visualElements: [] as never[],
+  examDetectedIdentity: {},
+  answerKeyDetectedIdentity: {},
+  warnings: [] as string[],
+};
+
+function mockPdfPipelineSuccess() {
+  vi.mocked(runPdfClientImport).mockReturnValue({ promise: Promise.resolve(DEFAULT_PIPELINE_RESULT), cancel: vi.fn() });
+}
 
 const PATTERNS_RESPONSE = {
   ok: true,
@@ -86,6 +122,7 @@ function buildPreviewResponse(overrides: Partial<{ questions: unknown[]; globalW
 }
 
 function mockApi(previewBody: unknown = buildPreviewResponse()) {
+  mockPdfPipelineSuccess();
   const calls: Array<{ url: string; method: string }> = [];
   vi.stubGlobal(
     "fetch",
@@ -94,8 +131,8 @@ function mockApi(previewBody: unknown = buildPreviewResponse()) {
       const method = init?.method ?? "GET";
       calls.push({ url, method });
       if (url.includes("/api/editorial/patterns")) return new Response(JSON.stringify(PATTERNS_RESPONSE), { status: 200 });
-      if (url.includes("/question-imports/pdf/preview")) return new Response(JSON.stringify(previewBody), { status: 200 });
-      if (url.includes("/question-imports/pdf/apply")) {
+      if (url.includes("/question-imports/pdf/client-preview")) return new Response(JSON.stringify(previewBody), { status: 200 });
+      if (url.includes("/question-imports/pdf/client-apply")) {
         return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-1"] }), { status: 200 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -128,6 +165,9 @@ async function selectPdfMode(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
+  beforeEach(() => {
+    vi.mocked(runPdfClientImport).mockReset();
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -292,25 +332,24 @@ describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
   });
 
   it("item 79 — PDF corrompido/inválido (extensão correta, conteúdo inválido) não trava a UI: erro amigável aparece", async () => {
+    // Sprint 24.2 — a detecção de PDF inválido agora acontece NO
+    // NAVEGADOR, dentro do próprio pipeline (pdf-lib/pdf.js falhando ao
+    // abrir), antes de qualquer chamada ao servidor — nunca mais uma
+    // resposta 400 do endpoint clássico.
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/api/editorial/patterns")) return new Response(JSON.stringify(PATTERNS_RESPONSE), { status: 200 });
-        if (url.includes("/question-imports/pdf/preview")) {
-          return new Response(JSON.stringify({ error: { code: "pdf_invalid_exam", message: "PDF inválido ou corrompido." } }), { status: 400 });
-        }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       })
     );
+    const rejection = Promise.reject(new PdfClientImportError("invalid_exam", "PDF inválido ou corrompido."));
+    rejection.catch(() => {}); // evita warning de unhandled rejection do Node — o `await` real do componente trata a mesma promise normalmente.
+    vi.mocked(runPdfClientImport).mockReturnValue({ promise: rejection, cancel: vi.fn() });
     const user = userEvent.setup();
     renderPage();
     await selectPdfMode(user);
-    // Um arquivo com nome/MIME de PDF mas conteúdo inválido — o filtro
-    // "accept" do input já barra extensões erradas no navegador real (e no
-    // próprio userEvent, confirmado ao investigar esta suíte); o cenário
-    // real que o backend precisa rejeitar é justamente este: parece PDF,
-    // mas pdf.js não consegue abri-lo.
     await user.upload(screen.getByLabelText("PDF da prova"), new File(["nao e um pdf valido"], "prova-corrompida.pdf", { type: "application/pdf" }));
     await user.upload(screen.getByLabelText("PDF do gabarito oficial"), buildPdfFile("gabarito.pdf"));
     await fillIdentityAndConfirm(user);
@@ -348,15 +387,16 @@ describe("EditorialImportsPage — aba PDF oficial ENEM (Sprint 22)", () => {
       fingerprint: "fp-3",
     };
     let capturedApplyBody: string | null = null;
+    mockPdfPipelineSuccess();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/api/editorial/patterns")) return new Response(JSON.stringify(PATTERNS_RESPONSE), { status: 200 });
-        if (url.includes("/question-imports/pdf/preview")) {
+        if (url.includes("/question-imports/pdf/client-preview")) {
           return new Response(JSON.stringify(buildPreviewResponse({ questions: [editableQuestion] })), { status: 200 });
         }
-        if (url.includes("/question-imports/pdf/apply")) {
+        if (url.includes("/question-imports/pdf/client-apply")) {
           const form = init!.body as FormData;
           capturedApplyBody = form.get("selection") as string;
           return new Response(JSON.stringify({ ok: true, appliedCount: 1, alreadyApplied: false, questionIds: ["q-3"] }), { status: 200 });

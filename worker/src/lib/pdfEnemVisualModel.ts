@@ -56,6 +56,19 @@ export interface RawVisualElement {
    *  upload real no apply, via o MESMO pipeline de `addQuestionImage`
    *  (questionMediaService.ts) já usado pelo resto do Banco de Questões. */
   pngBytes?: Uint8Array;
+  /** Sprint 24.2 — SHA-256 hex dos bytes do ARQUIVO PNG final (nunca dos
+   *  pixels crus — isso já é `hash`), calculado pelo importador CLIENT-SIDE
+   *  (`src/lib/pdfEnemImport/pipeline.ts`) no momento do preview. Ausente
+   *  em todo o fluxo Worker-side clássico (`pdfEnemVisualExtractor.ts`
+   *  nunca preenche este campo — extensão aditiva, comportamento anterior
+   *  intocado). Único propósito: no apply do importador client-side, o
+   *  Worker não tem como re-derivar a imagem a partir do PDF (não recebe
+   *  mais o PDF) — em vez disso, exige que os bytes reenviados no apply
+   *  tenham EXATAMENTE este hash, provando que são byte-a-byte os mesmos
+   *  revisados no preview (mesmo princípio de "nunca aplica bytes
+   *  diferentes dos revisados", adaptado à nova fronteira de confiança —
+   *  ver seção 9 da ordem Sprint 24.2). */
+  pngSha256?: string;
 }
 
 /** Seção 16 da ordem — limites explícitos por página/questão/lote,

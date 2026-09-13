@@ -5,12 +5,12 @@ import { ErrorState } from "../../components/ErrorState";
 import {
   applyImportBatch,
   applyPackageBatch,
-  applyPdfEnem,
+  applyPdfEnemClient,
   EditorialApiError,
   fetchEditorialPatterns,
   previewImportFile,
   previewPackageFile,
-  previewPdfEnem,
+  previewPdfEnemClient,
   templateV2DownloadUrl,
   undoImportBatch,
   type EditorialPatternSummary,
@@ -18,7 +18,6 @@ import {
   type PackageError,
   type PdfApplySelectionEntry,
   type PdfExamIdentityInput,
-  type PdfOcrPageInput,
   type PdfPreviewQuestion,
   type PdfVisualConfirmation,
   type PreviewImportResponse,
@@ -27,7 +26,8 @@ import {
 } from "../../api/editorialClient";
 import { useEditorialRole } from "../../auth/editorialRoleContext";
 import { buildPackageThumbnails } from "./packageZip";
-import type { OcrProgressEvent } from "./pdfOcr";
+import { runPdfClientImport, PdfClientImportError } from "./pdfEnemImportClient";
+import type { PdfImportProgress } from "../../workers/pdfEnemImportPipeline";
 import "./editorial.css";
 
 /* Importação de questões — /editorial/importacoes, Sprint 19 da ordem,
@@ -572,15 +572,20 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   // Matemática). Sempre um checkbox comum, sempre desmarcável.
   const [mathOnlyFilter, setMathOnlyFilter] = useState(false);
 
-  // Sprint 24, seções 2/4/9/17/21/22 da ordem — OCR já reconhecido no
-  // navegador (nunca refeito pelo worker), acumulado por página conforme o
-  // preview vai sinalizando quais páginas precisam — reenviado tanto nas
-  // tentativas seguintes de preview QUANTO no apply (mesmo princípio de
-  // "nunca confia no preview persistido" já usado para os bytes do PDF).
-  const [examOcrPages, setExamOcrPages] = useState<PdfOcrPageInput[]>([]);
-  const [answerKeyOcrPages, setAnswerKeyOcrPages] = useState<PdfOcrPageInput[]>([]);
-  const [ocrProgress, setOcrProgress] = useState<OcrProgressEvent | null>(null);
-  const ocrAbortRef = useRef<AbortController | null>(null);
+  // Sprint 24.2 — importador ENEM CLIENT-SIDE (Workers Free): todo o PDF é
+  // lido/extraído/segmentado/casado no NAVEGADOR (Web Worker,
+  // src/workers/pdfEnemImportPipeline.ts) — o Worker Cloudflare nunca mais
+  // abre um PDF neste fluxo (causa raiz do incidente P1: o plano Free não
+  // tem CPU suficiente para pdf.js — ver auditoria correlacionada por
+  // cf-ray). `imagePngByHashRef` guarda os PNGs extraídos localmente entre
+  // o preview e o apply (nunca persistidos no servidor antes da
+  // confirmação — mesmo princípio de "nada sobe sem revisão" do fluxo
+  // clássico). Reconhecimento de OCR de páginas escaneadas NÃO é suportado
+  // nesta versão (escopo divulgado no relatório da sprint) — o pipeline
+  // sinaliza isso como um erro claro, nunca trava silenciosamente.
+  const [clientProgress, setClientProgress] = useState<PdfImportProgress | null>(null);
+  const clientCancelRef = useRef<(() => void) | null>(null);
+  const imagePngByHashRef = useRef<Map<string, Uint8Array>>(new Map());
 
   useEffect(() => {
     fetchEditorialPatterns()
@@ -592,16 +597,9 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
     return { year: Number(year), application, booklet, sourceUrl: sourceUrl || undefined };
   }
 
-  function handleCancelOcr() {
-    ocrAbortRef.current?.abort();
+  function handleCancelClientImport() {
+    clientCancelRef.current?.();
   }
-
-  // Seção 2/4/9 da ordem — loop curto e finito (nunca infinito): cada
-  // tentativa de preview pode voltar sinalizando UMA face (prova OU
-  // gabarito) precisando de OCR; reconhece SÓ as páginas pedidas, acumula,
-  // e tenta de novo — até um máximo de tentativas (nunca um PDF real tem
-  // mais que 2-3 rodadas: prova, depois gabarito, no pior caso).
-  const MAX_PREVIEW_OCR_ROUNDS = 6;
 
   async function handleGeneratePreview() {
     if (!examFile || !answerKeyFile) return;
@@ -611,68 +609,64 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
     setApplyResult(null);
     setUndoResult(null);
     setFinalConfirmChecked(false);
-    setOcrProgress(null);
-    let currentExamOcrPages = examOcrPages;
-    let currentAnswerKeyOcrPages = answerKeyOcrPages;
+    setClientProgress(null);
+    imagePngByHashRef.current = new Map();
     try {
-      for (let round = 0; round < MAX_PREVIEW_OCR_ROUNDS; round++) {
-        try {
-          const result = await previewPdfEnem(examFile, answerKeyFile, currentIdentity(), confirmed, currentExamOcrPages, currentAnswerKeyOcrPages);
-          setPreview(result);
-          setMathOnlyFilter(result.documentIdentityCheck?.examDetected.day === 2);
-          const initialSelection = new Map<number, PdfSelectionState>();
-          for (const q of result.questions) {
-            const editedAlternatives: PdfSelectionState["editedAlternatives"] = { A: "", B: "", C: "", D: "", E: "" };
-            for (const a of q.alternatives) editedAlternatives[a.letter] = a.text;
-            initialSelection.set(q.originalNumber, {
-              included: q.canApply && !q.hasPendingVisualConfirmation,
-              patternPrincipalId: "",
-              editing: false,
-              editedStatement: q.statement,
-              editedAlternatives,
-              visualConfirmations: {},
-            });
-          }
-          setSelection(initialSelection);
-          return;
-        } catch (err) {
-          if (!(err instanceof EditorialApiError) || (err.code !== "pdf_needs_ocr_exam" && err.code !== "pdf_needs_ocr_answer_key")) {
-            throw err;
-          }
-          const isExam = err.code === "pdf_needs_ocr_exam";
-          const targetFile = isExam ? examFile : answerKeyFile;
-          const controller = new AbortController();
-          ocrAbortRef.current = controller;
-          const bytes = new Uint8Array(await targetFile.arrayBuffer());
-          // Seção 1/2 da ordem — import DINÂMICO: tesseract.js (e seu
-          // glue code) só entra no bundle do navegador quando pelo menos
-          // uma página REALMENTE precisa de OCR — nunca no chunk principal
-          // carregado por toda visita à página de importação.
-          const { runOcrOnPages } = await import("./pdfOcr");
-          const recognized = await runOcrOnPages(bytes, err.pagesNeedingOcr, {
-            signal: controller.signal,
-            onProgress: (event) => setOcrProgress(event),
-          });
-          ocrAbortRef.current = null;
-          if (isExam) {
-            currentExamOcrPages = recognized;
-            setExamOcrPages(recognized);
-          } else {
-            currentAnswerKeyOcrPages = recognized;
-            setAnswerKeyOcrPages(recognized);
-          }
-        }
+      const [examBuffer, answerKeyBuffer] = await Promise.all([examFile.arrayBuffer(), answerKeyFile.arrayBuffer()]);
+      const handle = runPdfClientImport(examBuffer, answerKeyBuffer, (progress) => setClientProgress(progress));
+      clientCancelRef.current = handle.cancel;
+      const pipelineResult = await handle.promise;
+      clientCancelRef.current = null;
+
+      for (const el of pipelineResult.visualElements) {
+        if (el.pngBytes) imagePngByHashRef.current.set(el.hash, el.pngBytes);
       }
-      setError("Este PDF precisou de reconhecimento de OCR em muitas rodadas seguidas — revise os arquivos selecionados.");
+
+      setClientProgress({ stage: "preparing", message: "Enviando prévia..." });
+      const result = await previewPdfEnemClient(
+        {
+          identity: currentIdentity(),
+          confirmation: confirmed,
+          examSha256: pipelineResult.examSha256,
+          answerKeySha256: pipelineResult.answerKeySha256,
+          pageCount: pipelineResult.pageCount,
+          parserVersion: "client-v1",
+          examQuestions: pipelineResult.examQuestions,
+          answerKey: pipelineResult.answerKey,
+          visualElements: pipelineResult.visualElements.map(({ pngBytes: _pngBytes, ...rest }) => rest),
+          examDetectedIdentity: pipelineResult.examDetectedIdentity,
+          answerKeyDetectedIdentity: pipelineResult.answerKeyDetectedIdentity,
+        },
+        imagePngByHashRef.current
+      );
+      setPreview(result);
+      setMathOnlyFilter(result.documentIdentityCheck?.examDetected.day === 2);
+      const initialSelection = new Map<number, PdfSelectionState>();
+      for (const q of result.questions) {
+        const editedAlternatives: PdfSelectionState["editedAlternatives"] = { A: "", B: "", C: "", D: "", E: "" };
+        for (const a of q.alternatives) editedAlternatives[a.letter] = a.text;
+        initialSelection.set(q.originalNumber, {
+          included: q.canApply && !q.hasPendingVisualConfirmation,
+          patternPrincipalId: "",
+          editing: false,
+          editedStatement: q.statement,
+          editedAlternatives,
+          visualConfirmations: {},
+        });
+      }
+      setSelection(initialSelection);
     } catch (err) {
-      if (err instanceof Error && err.name === "OcrCancelledError") {
-        setError("Reconhecimento de OCR cancelado.");
+      if (err instanceof PdfClientImportError) {
+        // Mensagens do pipeline client-side já são específicas e prontas
+        // para exibição (nunca stack técnica) — mesma disciplina de nunca
+        // mostrar um erro genérico quando já se sabe a causa real.
+        setError(err.reason === "cancelled" ? "Processamento cancelado." : err.message);
       } else {
         setError(formatPdfError(err, "Não foi possível gerar a prévia deste PDF."));
       }
     } finally {
-      setOcrProgress(null);
-      ocrAbortRef.current = null;
+      setClientProgress(null);
+      clientCancelRef.current = null;
       setBusy(false);
     }
   }
@@ -730,7 +724,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
   const canSubmitApply = includedCount > 0 && allIncludedHavePattern && finalConfirmChecked;
 
   async function handleApply() {
-    if (!preview || !examFile || !answerKeyFile || !canSubmitApply) return;
+    if (!preview || !canSubmitApply) return;
     setBusy(true);
     setError(null);
     try {
@@ -759,7 +753,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
             }
           : {}),
       }));
-      const result = await applyPdfEnem(preview.batchId, examFile, answerKeyFile, currentIdentity(), selectionPayload, examOcrPages, answerKeyOcrPages);
+      const result = await applyPdfEnemClient(preview.batchId, selectionPayload, imagePngByHashRef.current);
       setApplyResult(result);
     } catch (err) {
       setError(formatPdfError(err, "Não foi possível aplicar esta importação."));
@@ -793,12 +787,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           id="pdf-exam-file"
           type="file"
           accept="application/pdf,.pdf"
-          onChange={(e) => {
-            setExamFile(e.target.files?.[0] ?? null);
-            // Seção 4 da ordem — um arquivo NOVO invalida qualquer OCR já
-            // reconhecido para o arquivo anterior (páginas diferentes).
-            setExamOcrPages([]);
-          }}
+          onChange={(e) => setExamFile(e.target.files?.[0] ?? null)}
           disabled={busy}
         />
         <label htmlFor="pdf-answerkey-file" className="editorial__field-label">
@@ -808,10 +797,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
           id="pdf-answerkey-file"
           type="file"
           accept="application/pdf,.pdf"
-          onChange={(e) => {
-            setAnswerKeyFile(e.target.files?.[0] ?? null);
-            setAnswerKeyOcrPages([]);
-          }}
+          onChange={(e) => setAnswerKeyFile(e.target.files?.[0] ?? null)}
           disabled={busy}
         />
       </Card>
@@ -859,11 +845,11 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
             Gerar prévia
           </Button>
         </div>
-        {ocrProgress && (
+        {clientProgress && (
           <div className="editorial__ocr-progress" role="status">
-            <p>{ocrProgress.message}</p>
-            <Button type="button" variant="secondary" onClick={handleCancelOcr}>
-              Cancelar OCR
+            <p>{clientProgress.message}</p>
+            <Button type="button" variant="secondary" onClick={handleCancelClientImport}>
+              Cancelar processamento
             </Button>
           </div>
         )}

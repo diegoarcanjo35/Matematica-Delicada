@@ -34,7 +34,10 @@ function crc32(bytes: Uint8Array): number {
 async function deflateZlib(bytes: Uint8Array): Promise<Uint8Array> {
   const cs = new CompressionStream("deflate");
   const writer = cs.writable.getWriter();
-  const writePromise = writer.write(bytes).then(() => writer.close());
+  // Sprint 24.2 — `as BufferSource`: só ajuste de tipo (mesmo motivo de
+  // worker/src/lib/crypto.ts:sha256HexBytes — este arquivo agora também é
+  // compilado sob `tsconfig.app.json` pelo importador client-side).
+  const writePromise = writer.write(bytes as BufferSource).then(() => writer.close());
   const chunks: Uint8Array[] = [];
   const reader = cs.readable.getReader();
   for (;;) {

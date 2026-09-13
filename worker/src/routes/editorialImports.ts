@@ -17,11 +17,15 @@ import { applyPackage, previewPackage, PACKAGE_MAX_FILE_BYTES } from "../service
 import {
   applyPdf,
   previewPdf,
+  previewPdfFromClientPayload,
+  applyPdfFromClientPreview,
   PDF_ANSWER_KEY_MAX_BYTES,
   PDF_EXAM_MAX_BYTES,
   type PdfApplySelectionEntry,
+  type PdfClientPreviewRawInput,
 } from "../services/questionPdfImportService";
 import type { VisualPlacementCandidate } from "../lib/pdfEnemVisualModel";
+import { MAX_TOTAL_VISUAL_BYTES_PER_BATCH } from "../lib/pdfEnemVisualModel";
 import type { OcrPageInput } from "../lib/pdfEnemOcrModel";
 import { MAX_OCR_PAGES_PER_BATCH, MAX_OCR_LINES_PER_PAGE, MAX_OCR_TEXT_LENGTH_PER_LINE } from "../lib/pdfEnemOcrModel";
 
@@ -36,6 +40,35 @@ const PACKAGE_MAX_MULTIPART_BYTES = PACKAGE_MAX_FILE_BYTES + 1024 * 1024; // 1 M
    de PDF (dois arquivos: prova + gabarito, + campos de identidade ao
    redor). Mesma disciplina de Content-Length obrigatório e fail-closed. */
 const PDF_PREVIEW_MULTIPART_MAX_BYTES = PDF_EXAM_MAX_BYTES + PDF_ANSWER_KEY_MAX_BYTES + 2 * 1024 * 1024; // 2 MB de margem.
+
+/* Sprint 24.2, seção 10 da ordem — o importador CLIENT-SIDE nunca envia
+   PDF ao Worker (só o resultado já processado no navegador): o corpo
+   máximo aqui é bem menor — o JSON estruturado (medido no PDF real de
+   2024: ~177KB para 90 questões) mais as imagens PNG confirmadas (teto
+   já existente `MAX_TOTAL_VISUAL_BYTES_PER_BATCH`, 15MB). */
+const PDF_CLIENT_MULTIPART_MAX_BYTES = MAX_TOTAL_VISUAL_BYTES_PER_BATCH + 2 * 1024 * 1024; // 15MB de imagens + 2MB de folga para o JSON estruturado + overhead multipart.
+const PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES = 4 * 1024 * 1024; // campo "payload" isolado — nunca o corpo multipart inteiro.
+/** Prefixo do nome de campo multipart de cada imagem confirmada — seguido
+ *  do `hash` declarado no JSON estruturado (nunca um índice posicional,
+ *  que poderia dessincronizar da lista se o cliente reordenar por engano). */
+const VISUAL_FILE_FIELD_PREFIX = "visual:";
+
+/** Sprint 24.2 — extrai `{hash -> bytes}` de todo campo multipart cujo
+ *  nome comece com `VISUAL_FILE_FIELD_PREFIX`. Nunca confia na extensão/
+ *  nome do arquivo enviado pelo navegador — só no HASH declarado na
+ *  própria chave do campo, que é o mesmo hash validado contra o conteúdo
+ *  real dentro do serviço (`validateClientVisualElements`/
+ *  `applyPdfFromClientPreview`, nunca só aqui). */
+async function collectVisualFilesByHash(form: FormData): Promise<Map<string, Uint8Array>> {
+  const map = new Map<string, Uint8Array>();
+  for (const [key, value] of form.entries()) {
+    if (!key.startsWith(VISUAL_FILE_FIELD_PREFIX) || !(value instanceof File)) continue;
+    const hash = key.slice(VISUAL_FILE_FIELD_PREFIX.length);
+    if (!hash) continue;
+    map.set(hash, new Uint8Array(await value.arrayBuffer()));
+  }
+  return map;
+}
 
 /* Rotas de importação CSV — Sprint 7 v1.0, seção 8.2 da ordem.
 
@@ -525,6 +558,174 @@ export async function handleEditorialImportsRequest(request: Request, env: Env, 
       alreadyApplied: result.alreadyApplied ?? false,
       questionIds: result.questionIds ?? [],
     });
+  }
+
+  // Sprint 24.2 — importador ENEM CLIENT-SIDE (Workers Free). Nunca abre
+  // PDF: o navegador já extraiu/segmentou/consolidou tudo (ver
+  // src/lib/pdfEnemImport/pipeline.ts) — este endpoint só valida forma e
+  // roda o MESMO `buildPreviewQuestions`/`checkDocumentIdentity` de
+  // sempre, agora com dados reais do D1 (nunca confia no cliente para
+  // duplicidade/identidade). O endpoint clássico acima continua existindo
+  // (seção 10 da ordem: "não quebrar compatibilidade").
+  if (path === "/api/editorial/question-imports/pdf/client-preview") {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+
+    const contentLengthRaw = request.headers.get("content-length");
+    if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
+      return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido.");
+    }
+    if (Number(contentLengthRaw) > PDF_CLIENT_MULTIPART_MAX_BYTES) {
+      return Errors.payloadTooLarge("Corpo da requisição excede o limite permitido para gerar a prévia.");
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return Errors.badRequest("Corpo multipart/form-data inválido.");
+    }
+
+    const payloadRaw = form.get("payload");
+    if (typeof payloadRaw !== "string" || payloadRaw.length === 0) return Errors.badRequest("Campo 'payload' é obrigatório.");
+    if (new TextEncoder().encode(payloadRaw).byteLength > PDF_CLIENT_PAYLOAD_FIELD_MAX_BYTES) {
+      return Errors.payloadTooLarge("Campo 'payload' excede o limite permitido.");
+    }
+    let parsedPayload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(payloadRaw) as unknown;
+      if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
+      parsedPayload = parsed as Record<string, unknown>;
+    } catch {
+      return Errors.badRequest("Campo 'payload' não é um JSON válido.");
+    }
+
+    const input: PdfClientPreviewRawInput = {
+      identityInput: {
+        year: parsedPayload.year,
+        application: parsedPayload.application,
+        booklet: parsedPayload.booklet,
+        languageVariant: parsedPayload.languageVariant,
+        sourceUrl: parsedPayload.sourceUrl,
+      },
+      confirmation: parsedPayload.confirmation === true,
+      examSha256: parsedPayload.examSha256,
+      answerKeySha256: parsedPayload.answerKeySha256,
+      pageCount: parsedPayload.pageCount,
+      parserVersion: parsedPayload.parserVersion,
+      examQuestions: parsedPayload.examQuestions,
+      answerKey: parsedPayload.answerKey,
+      visualElements: parsedPayload.visualElements,
+      examDetectedIdentity: parsedPayload.examDetectedIdentity,
+      answerKeyDetectedIdentity: parsedPayload.answerKeyDetectedIdentity,
+    };
+
+    const imageBytesByHash = await collectVisualFilesByHash(form);
+    const result = await previewPdfFromClientPayload(env.DB, actor.userId, input, imageBytesByHash);
+    if (!result.ok) {
+      return json({ error: { code: `pdf_client_${result.reason ?? "invalid_payload"}`, message: result.message ?? "Payload inválido." } }, { status: 400 });
+    }
+    return json({
+      ok: true,
+      batchId: result.batchId,
+      examIdentity: result.examIdentity,
+      documentIdentityCheck: result.documentIdentityCheck,
+      pageCount: result.pageCount,
+      detectedQuestionCount: result.detectedQuestionCount,
+      matchedAnswerCount: result.matchedAnswerCount,
+      questions: result.questions,
+      globalWarnings: result.globalWarnings ?? [],
+      canApply: result.canApply ?? false,
+      expiresAt: result.expiresAt,
+    });
+  }
+
+  if (path === "/api/editorial/question-imports/pdf/client-apply") {
+    if (request.method !== "POST") return Errors.methodNotAllowed();
+
+    const contentLengthRaw = request.headers.get("content-length");
+    if (contentLengthRaw === null || !/^\d+$/.test(contentLengthRaw) || Number(contentLengthRaw) <= 0) {
+      return Errors.badRequest("Cabeçalho Content-Length obrigatório e válido.");
+    }
+    if (Number(contentLengthRaw) > PDF_CLIENT_MULTIPART_MAX_BYTES) {
+      return Errors.payloadTooLarge("Corpo da requisição excede o limite permitido para aplicar.");
+    }
+
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return Errors.badRequest("Corpo multipart/form-data inválido.");
+    }
+
+    const batchId = form.get("batchId");
+    if (!isValidQuestionId(batchId)) return Errors.badRequest("Informe batchId.");
+
+    const selectionRaw = form.get("selection");
+    if (typeof selectionRaw !== "string") return Errors.badRequest("Informe 'selection' (JSON com as questões escolhidas e seus padrões).");
+    let selection: PdfApplySelectionEntry[];
+    try {
+      const parsed = JSON.parse(selectionRaw) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("not an array");
+      selection = parsed.map((entry) => {
+        const e = entry as {
+          originalNumber?: unknown;
+          patternPrincipalId?: unknown;
+          reviewedStatement?: unknown;
+          reviewedAlternatives?: unknown;
+          visualConfirmations?: unknown;
+        };
+        if (typeof e.originalNumber !== "number" || typeof e.patternPrincipalId !== "string" || !e.patternPrincipalId) {
+          throw new Error("invalid entry");
+        }
+        const result: PdfApplySelectionEntry = { originalNumber: e.originalNumber, patternPrincipalId: e.patternPrincipalId };
+        if (e.reviewedStatement !== undefined) {
+          if (typeof e.reviewedStatement !== "string") throw new Error("invalid reviewedStatement");
+          result.reviewedStatement = e.reviewedStatement;
+        }
+        if (e.reviewedAlternatives !== undefined) {
+          if (!Array.isArray(e.reviewedAlternatives)) throw new Error("invalid reviewedAlternatives");
+          result.reviewedAlternatives = e.reviewedAlternatives.map((alt) => {
+            const a = alt as { letter?: unknown; text?: unknown };
+            if (typeof a.letter !== "string" || !["A", "B", "C", "D", "E"].includes(a.letter) || typeof a.text !== "string") {
+              throw new Error("invalid reviewed alternative");
+            }
+            return { letter: a.letter as "A" | "B" | "C" | "D" | "E", text: a.text };
+          });
+        }
+        if (e.visualConfirmations !== undefined) {
+          if (!Array.isArray(e.visualConfirmations)) throw new Error("invalid visualConfirmations");
+          result.visualConfirmations = e.visualConfirmations.map((vc) => {
+            const v = vc as { elementHash?: unknown; placement?: unknown; altText?: unknown };
+            if (typeof v.elementHash !== "string" || !v.elementHash || typeof v.placement !== "string" || typeof v.altText !== "string") {
+              throw new Error("invalid visual confirmation");
+            }
+            return { elementHash: v.elementHash, placement: v.placement as VisualPlacementCandidate, altText: v.altText };
+          });
+        }
+        return result;
+      });
+    } catch {
+      return Errors.badRequest("Campo 'selection' inválido.");
+    }
+
+    if (!env.QUESTION_MEDIA) return Errors.internal("Armazenamento de mídia não configurado neste ambiente.");
+    const imageBytesByHash = await collectVisualFilesByHash(form);
+    const result = await applyPdfFromClientPreview(env.DB, env.QUESTION_MEDIA, actor.userId, batchId, selection, imageBytesByHash);
+    if (!result.ok) {
+      if (result.notFound) return Errors.notFound();
+      if (result.expired) return json({ error: { code: "preview_expired", message: "A prévia expirou. Gere uma nova." } }, { status: 409 });
+      if (result.conflict) {
+        return json({ error: { code: "pdf_conflict", message: result.conflictReason ?? "Um ou mais itens não podem ser aplicados. Revise a seleção." } }, { status: 409 });
+      }
+      if (result.tooManyStatements) {
+        return json({ error: { code: "pdf_too_many_statements", message: result.message ?? "Seleção grande demais para aplicar de uma vez." } }, { status: 413 });
+      }
+      if (result.visualBytesExceeded) {
+        return json({ error: { code: "pdf_visual_bytes_exceeded", message: result.message ?? "Total de imagens confirmadas excede o limite permitido." } }, { status: 413 });
+      }
+      return json({ error: { code: "pdf_invalid", message: result.message ?? "Prévia inválida ou seleção com erros pendentes." } }, { status: 400 });
+    }
+    return json({ ok: true, appliedCount: result.appliedCount ?? 0, alreadyApplied: result.alreadyApplied ?? false, questionIds: result.questionIds ?? [] });
   }
 
   const undoMatch = path.match(BATCH_UNDO_RE);

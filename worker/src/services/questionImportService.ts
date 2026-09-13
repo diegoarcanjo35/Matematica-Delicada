@@ -789,7 +789,7 @@ export async function undoImport(db: D1Database, actorUserId: string, batchId: s
 function extractPdfSourceInfo(payloadJson: string): { examIdentity: unknown; sourceUrl: string | null } | null {
   try {
     const parsed = JSON.parse(payloadJson) as { sourceKind?: string; identity?: { sourceLabel?: string | null } };
-    if (parsed.sourceKind !== "pdf_enem") return null;
+    if (parsed.sourceKind !== "pdf_enem" && parsed.sourceKind !== "pdf_enem_client") return null;
     return { examIdentity: parsed.identity ?? null, sourceUrl: parsed.identity?.sourceLabel ?? null };
   } catch {
     return null;

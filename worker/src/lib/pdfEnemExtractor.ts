@@ -98,8 +98,39 @@ export interface PdfPageText {
   hasVisualContent: boolean;
 }
 
+/** Sprint 24.2, seção 6 da ordem — quando o pipeline roda em JANELAS
+ *  internas (importador client-side, ver `src/lib/pdfEnemImportClient.ts`),
+ *  a classificação de "decorativo" (que compara repetição ao longo de TODO
+ *  o documento — `classifyDecorativeRasterElements`/
+ *  `classifyDecorativeVectorCandidates`, ambas em `pdfEnemVisualExtractor.ts`)
+ *  precisa rodar UMA ÚNICA VEZ sobre o documento inteiro, nunca por janela —
+ *  senão um elemento decorativo real (que se repete no documento inteiro)
+ *  não se repete o suficiente DENTRO de uma janela pequena e vira falso
+ *  positivo "conteúdo real" (confirmado por medição: até +108% de elementos
+ *  em janelas de 1-2 páginas). `skipDecorativeClassification: true` faz
+ *  `extractPdfPages` devolver os elementos BRUTOS (raster ainda com
+ *  `extractionStatus` original, nunca `"ignored_decorative"`) e os
+ *  candidatos vetoriais BRUTOS (`rawVectorCandidates`, nunca fundidos em
+ *  `visualElements`) — o chamador roda a classificação depois, com o
+ *  conjunto completo de todas as janelas. Ausente/`false` preserva 100% o
+ *  comportamento anterior (nenhum fluxo do Worker muda). */
+export interface ExtractPdfPagesOptions {
+  skipDecorativeClassification?: boolean;
+}
+
 export type PdfExtractResult =
-  | { ok: true; pageCount: number; pages: PdfPageText[]; visualElements: RawVisualElement[]; pageDiagnostics: PageQualityDiagnostic[]; ocrWarnings: string[]; tabularPageNumbers: number[] }
+  | {
+      ok: true;
+      pageCount: number;
+      pages: PdfPageText[];
+      visualElements: RawVisualElement[];
+      pageDiagnostics: PageQualityDiagnostic[];
+      ocrWarnings: string[];
+      tabularPageNumbers: number[];
+      /** Só populado quando `skipDecorativeClassification: true` — vazio em
+       *  todo o resto do sistema (comportamento anterior nunca muda). */
+      rawVectorCandidates: RawVectorCandidate[];
+    }
   | { ok: false; reason: "invalid" | "too_large" | "too_many_pages" | "needs_ocr"; message: string; pagesNeedingOcr?: number[] };
 
 const VISUAL_OPS_TO_DETECT: number[] = [
@@ -340,7 +371,7 @@ export function classifyPageTextQuality(pages: PdfPageText[]): PageQualityDiagno
   });
 }
 
-export async function extractPdfPages(bytes: Uint8Array, ocrPages?: OcrPageInput[]): Promise<PdfExtractResult> {
+export async function extractPdfPages(bytes: Uint8Array, ocrPages?: OcrPageInput[], options?: ExtractPdfPagesOptions): Promise<PdfExtractResult> {
   if (bytes.byteLength === 0) return { ok: false, reason: "invalid", message: "Arquivo PDF vazio." };
   if (bytes.byteLength > PDF_MAX_BYTES) {
     return { ok: false, reason: "too_large", message: `PDF excede o limite de ${PDF_MAX_BYTES} bytes.` };
@@ -475,6 +506,13 @@ export async function extractPdfPages(bytes: Uint8Array, ocrPages?: OcrPageInput
 
     // Seção 5/6 da ordem — decisão de "decorativo/estrutural" só é possível
     // com o DOCUMENTO INTEIRO já extraído (precisa comparar entre páginas).
+    // Sprint 24.2 — quando `skipDecorativeClassification` está ativo (uso
+    // exclusivo do importador client-side por janelas), este passo é
+    // adiado para o chamador rodar UMA vez sobre TODAS as janelas.
+    if (options?.skipDecorativeClassification) {
+      return { ok: true, pageCount: doc.numPages, pages, visualElements: rasterElements, pageDiagnostics, ocrWarnings, tabularPageNumbers, rawVectorCandidates: vectorCandidates };
+    }
+
     classifyDecorativeRasterElements(rasterElements, doc.numPages);
     const decorativeVectorFingerprints = classifyDecorativeVectorCandidates(vectorCandidates, doc.numPages);
     for (let vectorIndex = 0; vectorIndex < vectorCandidates.length; vectorIndex++) {
@@ -500,7 +538,7 @@ export async function extractPdfPages(bytes: Uint8Array, ocrPages?: OcrPageInput
       });
     }
 
-    return { ok: true, pageCount: doc.numPages, pages, visualElements: rasterElements, pageDiagnostics, ocrWarnings, tabularPageNumbers };
+    return { ok: true, pageCount: doc.numPages, pages, visualElements: rasterElements, pageDiagnostics, ocrWarnings, tabularPageNumbers, rawVectorCandidates: [] };
   } finally {
     await loadingTask.destroy();
   }

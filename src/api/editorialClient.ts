@@ -667,3 +667,89 @@ export function applyPdfEnem(
   if (answerKeyOcrPages.length > 0) form.set("answerKeyOcrPages", JSON.stringify(answerKeyOcrPages));
   return request("/api/editorial/question-imports/pdf/apply", { method: "POST", body: form });
 }
+
+/* -----------------------------------------------------------------------
+   Sprint 24.2 — importador ENEM CLIENT-SIDE (Cloudflare Workers Free). O
+   PDF nunca é enviado ao Worker neste fluxo — todo o processamento
+   (extração/segmentação/casamento) já rodou no navegador
+   (`src/workers/pdfEnemImportPipeline.ts` via `src/pages/editorial/
+   pdfEnemImportClient.ts`). Aqui só existe o transporte HTTP do resultado
+   JÁ ESTRUTURADO — mesmo prefixo de campo de arquivo (`visual:<hash>`)
+   esperado por `collectVisualFilesByHash` em
+   worker/src/routes/editorialImports.ts.
+   ----------------------------------------------------------------------- */
+
+const VISUAL_FILE_FIELD_PREFIX = "visual:";
+
+/** Preenche os campos multipart de imagem confirmada — reaproveitado tanto
+ *  pelo client-preview quanto pelo client-apply (mesma convenção de nome
+ *  de campo dos dois lados). */
+function appendVisualImageFiles(form: FormData, imagePngByHash: Map<string, Uint8Array>, hashes: Iterable<string>): void {
+  for (const hash of hashes) {
+    const bytes = imagePngByHash.get(hash);
+    if (!bytes) continue;
+    form.set(`${VISUAL_FILE_FIELD_PREFIX}${hash}`, new Blob([new Uint8Array(bytes)], { type: "image/png" }), `${hash}.png`);
+  }
+}
+
+export interface PdfClientPreviewPayload {
+  identity: PdfExamIdentityInput;
+  confirmation: boolean;
+  examSha256: string;
+  answerKeySha256: string;
+  pageCount: number;
+  parserVersion: string;
+  examQuestions: unknown[];
+  answerKey: Array<[number, string]>;
+  visualElements: unknown[];
+  examDetectedIdentity: unknown;
+  answerKeyDetectedIdentity: unknown;
+}
+
+/** Todos os hashes de imagem REALMENTE extraída (`extractionStatus ===
+ *  "extracted"`) presentes em `visualElements` — usado para saber quais
+ *  arquivos PNG precisam ser anexados ao multipart (nunca envia bytes de
+ *  elementos vetoriais/ambíguos, que nunca têm PNG). */
+function extractedImageHashes(visualElements: Array<{ hash: string; kind: string; extractionStatus: string }>): string[] {
+  return visualElements.filter((el) => el.kind === "raster" && el.extractionStatus === "extracted").map((el) => el.hash);
+}
+
+export async function previewPdfEnemClient(payload: PdfClientPreviewPayload, imagePngByHash: Map<string, Uint8Array>): Promise<PreviewPdfResponse> {
+  const jsonPayload = {
+    year: payload.identity.year,
+    application: payload.identity.application,
+    booklet: payload.identity.booklet,
+    languageVariant: payload.identity.languageVariant,
+    sourceUrl: payload.identity.sourceUrl,
+    confirmation: payload.confirmation,
+    examSha256: payload.examSha256,
+    answerKeySha256: payload.answerKeySha256,
+    pageCount: payload.pageCount,
+    parserVersion: payload.parserVersion,
+    examQuestions: payload.examQuestions,
+    answerKey: payload.answerKey,
+    visualElements: payload.visualElements,
+    examDetectedIdentity: payload.examDetectedIdentity,
+    answerKeyDetectedIdentity: payload.answerKeyDetectedIdentity,
+  };
+  const form = new FormData();
+  form.set("payload", JSON.stringify(jsonPayload));
+  appendVisualImageFiles(form, imagePngByHash, extractedImageHashes(payload.visualElements as never));
+  return request("/api/editorial/question-imports/pdf/client-preview", { method: "POST", body: form });
+}
+
+export function applyPdfEnemClient(
+  batchId: string,
+  selection: PdfApplySelectionEntry[],
+  imagePngByHash: Map<string, Uint8Array>
+): Promise<{ ok: true; appliedCount: number; alreadyApplied: boolean; questionIds: string[] }> {
+  const form = new FormData();
+  form.set("batchId", batchId);
+  form.set("selection", JSON.stringify(selection));
+  // Só os hashes REALMENTE confirmados nesta seleção — nunca reenvia
+  // imagens que a Andreia não confirmou (mesma disciplina de "nunca sobe
+  // o que não foi revisado" do fluxo clássico).
+  const confirmedHashes = selection.flatMap((entry) => entry.visualConfirmations?.map((c) => c.elementHash) ?? []);
+  appendVisualImageFiles(form, imagePngByHash, confirmedHashes);
+  return request("/api/editorial/question-imports/pdf/client-apply", { method: "POST", body: form });
+}

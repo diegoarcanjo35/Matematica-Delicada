@@ -26,7 +26,16 @@ export function generateOpaqueToken(): string {
 }
 
 async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  // Sprint 24.2 — `as BufferSource`: puramente um ajuste de TIPO (nunca de
+  // runtime). Este arquivo agora também é compilado sob `tsconfig.app.json`
+  // (o importador client-side, `src/workers/pdfEnemImportPipeline.ts,
+  // reaproveita `sha256HexOfBytes` no navegador) — a lib DOM dessa config
+  // infere `Uint8Array<ArrayBufferLike>` (pode incluir SharedArrayBuffer)
+  // onde a Web Crypto API exige `BufferSource`; `worker/tsconfig.json`
+  // (`@cloudflare/workers-types`) nunca teve esse conflito. Todo
+  // `Uint8Array` real satisfaz `BufferSource` em runtime — nenhum
+  // comportamento muda.
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -122,7 +131,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
       ["deriveBits"]
     );
     const derivedBits = await crypto.subtle.deriveBits(
-      { name: "PBKDF2", salt, iterations, hash: PBKDF2_HASH },
+      { name: "PBKDF2", salt: salt as BufferSource, iterations, hash: PBKDF2_HASH },
       keyMaterial,
       expected.length * 8
     );
