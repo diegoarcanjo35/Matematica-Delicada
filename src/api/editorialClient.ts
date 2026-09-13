@@ -15,6 +15,12 @@ export interface ApiFieldError {
    *  `pdf_needs_ocr_exam`/`pdf_needs_ocr_answer_key`: páginas (1-based) que
    *  precisam de OCR antes de tentar a prévia de novo. */
   pagesNeedingOcr?: number[];
+  /** Hotfix pós-Sprint 24.1, seção 4 da ordem — presente quando o Worker
+   *  capturou um erro genuinamente interno (nunca vazado como stack —
+   *  ver `worker/src/lib/response.ts:Errors.internal`). Mostrado à
+   *  editora para ela poder reportar e correlacionarmos com os logs do
+   *  Worker (`wrangler tail`). */
+  requestId?: string;
 }
 
 export class EditorialApiError extends Error {
@@ -23,6 +29,7 @@ export class EditorialApiError extends Error {
   readonly code: string;
   readonly packageErrors: PackageError[];
   readonly pagesNeedingOcr: number[];
+  readonly requestId?: string;
 
   constructor(apiError: ApiFieldError, status: number) {
     super(apiError.message);
@@ -31,7 +38,26 @@ export class EditorialApiError extends Error {
     this.code = apiError.code;
     this.packageErrors = apiError.errors ?? [];
     this.pagesNeedingOcr = apiError.pagesNeedingOcr ?? [];
+    this.requestId = apiError.requestId;
   }
+}
+
+/** Hotfix pós-Sprint 24.1, seção 4 da ordem — "erro genérico é bug também":
+ *  quando o corpo da resposta não é JSON válido (`response.json()` falhou),
+ *  o Worker do próprio app NUNCA respondeu — nem com um erro de aplicação
+ *  (JSON, `pdf_invalid`/etc.) nem com `Errors.internal()` (também JSON,
+ *  sempre com `requestId`). Isso só acontece quando a PLATAFORMA Cloudflare
+ *  intercepta a requisição ANTES do Worker rodar (ex.: tempo/CPU/memória
+ *  excedidos, conexão encerrada) — devolvendo uma página HTML própria, não
+ *  o JSON do app. Nunca mais "Erro inesperado." sem contexto: explica o
+ *  cenário provável e dá um horário para a pessoa reportar (não existe
+ *  `requestId` real aqui — o Worker nunca chegou a gerar um). */
+function buildGatewayErrorMessage(status: number): ApiFieldError {
+  const timestamp = new Date().toLocaleString("pt-BR");
+  return {
+    code: "gateway_error",
+    message: `O servidor não conseguiu concluir esta operação (código ${status}) — provavelmente o arquivo é grande ou complexo demais para o tempo de processamento disponível. Tente novamente; se for um PDF muito grande, tente um arquivo menor ou divida a prova em partes. Se persistir, avise o suporte informando este horário: ${timestamp}.`,
+  };
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -46,7 +72,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    const apiError: ApiFieldError = data?.error ?? { code: "unknown", message: "Erro inesperado." };
+    const apiError: ApiFieldError = data?.error ?? buildGatewayErrorMessage(response.status);
     throw new EditorialApiError(apiError, response.status);
   }
   return data as T;

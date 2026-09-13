@@ -253,8 +253,32 @@ function detectColumnGutter(xs: number[], pageWidth: number): number | null {
   return mid;
 }
 
+/** Hotfix pós-Sprint 24.1 — investigação real contra o PDF oficial ENEM
+ *  2024 (2º dia, Caderno 5, Amarelo) encontrou um item de texto novo,
+ *  inexistente no PDF 2019 usado nas sprints anteriores: uma marca d'água
+ *  de segurança impressa como texto REAL do PDF — um item ISOLADO cuja
+ *  string inteira é um trecho curto repetido dezenas de vezes seguidas
+ *  (ex.: "ENEM2024ENEM2024ENEM2024..."). Esse item fica posicionado numa
+ *  faixa Y fixa perto da margem da página e, por coincidência, cai no
+ *  MESMO bucket de `groupItemsByY` de conteúdo real vizinho (rodapé de
+ *  identidade, última alternativa de uma questão) — fundindo os dois numa
+ *  única linha ilegível (mesma classe de bug já corrigida nesta sprint
+ *  para colisão de cabeçalho isolado, agora para marca d'água).
+ *
+ *  Correção estrutural (nunca amarrada a "ENEM2024"/2024 — funciona para
+ *  qualquer ano/padrão futuro de marca d'água repetida): um item cuja
+ *  string inteira é um trecho de 2-24 caracteres repetido pelo menos 10
+ *  vezes seguidas nunca é texto real de prova (nenhuma palavra/frase
+ *  legítima em português se repete assim) — excluído ANTES de qualquer
+ *  agrupamento por linha, nunca deixado fundir com conteúdo real. */
+const REPEATED_STAMP_TEXT_RE = /^(.{2,24}?)\1{9,}/;
+
+export function isRepeatedStampText(str: string): boolean {
+  return REPEATED_STAMP_TEXT_RE.test(str);
+}
+
 function groupItemsIntoLines(items: Array<{ str: string; transform: number[] }>, pageWidth: number): PdfTextLine[] {
-  const flat = items.filter((i) => i.str).map((i) => ({ x: i.transform[4], y: Math.round(i.transform[5]), str: i.str }));
+  const flat = items.filter((i) => i.str && !isRepeatedStampText(i.str)).map((i) => ({ x: i.transform[4], y: Math.round(i.transform[5]), str: i.str }));
   const gutter = detectColumnGutter(flat.map((i) => i.x), pageWidth);
   if (gutter === null) return groupItemsByY(flat);
 

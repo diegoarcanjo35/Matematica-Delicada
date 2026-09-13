@@ -44,10 +44,33 @@ const KNOWN_BOOKLET_COLORS = ["AZUL", "AMARELO", "ROSA", "CINZA", "BRANCO", "VER
    (usado nas fixtures técnicas ASCII dos testes, já que "º" em bytes
    UTF-8 dentro de uma string PDF de fonte padrão WinAnsi renderizaria
    garbled — nunca um problema real com o PDF oficial, que já vem
-   corretamente codificado pelo produtor). */
-const EXAM_FOOTER_RE = /(\d)\s*[ºo°]\s*dia\s*\|\s*Caderno\s*(\d+)\s*-\s*([A-ZÀ-ÖØ-Ý]+)\s*-\s*P[áa]gina/i;
-const KEY_DAY_BOOKLET_RE = /(\d)\s*[ºo°]?\s*DIA\s*[-–]\s*CADERNO\s*(\d+)/i;
-const KEY_COLOR_YEAR_RE = /^(AZUL|AMARELO|ROSA|CINZA|BRANCO|VERDE|LARANJA)\s+GABARITO\s+(\d{4})/i;
+   corretamente codificado pelo produtor).
+
+   Hotfix pós-Sprint 24.1 — investigação real contra o PDF oficial ENEM
+   2024 (2º dia, Caderno 5, Amarelo) encontrou DOIS formatos de identidade
+   genuinamente diferentes do padrão 2019 usado para calibrar os regexes
+   originais (nunca um problema do parser, um problema real de o layout do
+   produtor ter mudado entre edições):
+     - Rodapé da PROVA: 2019 era uma linha só, "CN - 2º dia | Caderno 7 -
+       AZUL - Página 2"; 2024 é "º DIA • CADERNO 5 • AMARELO •" — SEM o
+       dígito do dia (aparentemente perdido/não capturável no texto nativo
+       desta edição) e usando "•" em vez de "|"/"-" como separador, sem o
+       sufixo "- Página N".
+     - Cabeçalho do GABARITO: 2019 vinha em DUAS linhas combinadas ("2º DIA
+       - CADERNO 7" e "AZUL Gabarito 2019"); 2024 vem espalhado em CINCO
+       linhas separadas ("º", "2 dia", "CADERNO 5", "Amarelo", "Gabarito
+       2024") — a mesma informação, só que cada palavra/token do bloco
+       vira sua própria linha.
+   Correção estrutural (nunca amarrada a "2024"): os regexes abaixo toleram
+   o dígito do dia ausente, aceitam "|"/"-"/"•" como separador
+   indiferentemente, e (só para o gabarito) são aplicados contra o texto de
+   TODAS as linhas da página JUNTAS (nunca uma linha isolada) — assim
+   funcionam tanto quando a informação está numa linha só quanto quando
+   está espalhada em várias linhas adjacentes, em qualquer ordem futura de
+   quebra de linha que o produtor venha a usar. */
+const EXAM_FOOTER_RE = /(\d)?\s*[ºo°]\s*dia\s*[|•-]\s*Caderno\s*(\d+)\s*[•-]\s*([A-ZÀ-ÖØ-Ý]+)/i;
+const KEY_DAY_BOOKLET_RE = /[ºo°]?\s*(\d)\s*[ºo°]?\s*dia\s*[-–•]?\s*Caderno\s*(\d+)/i;
+const KEY_COLOR_YEAR_RE = /(AZUL|AMARELO|ROSA|CINZA|BRANCO|VERDE|LARANJA)\s+GABARITO\s+(\d{4})/i;
 
 function normalizeColor(raw: string): string | undefined {
   const upper = raw.toUpperCase();
@@ -67,7 +90,11 @@ export function detectExamDocumentIdentity(pages: PdfPageText[]): DetectedDocume
       const match = line.text.match(EXAM_FOOTER_RE);
       if (!match) continue;
       const color = normalizeColor(match[3]);
-      const detected: DetectedDocumentIdentity = { day: Number(match[1]), bookletNumber: Number(match[2]), color };
+      // Seção 5 do hotfix — o dígito do dia pode estar ausente nesta
+      // edição (grupo de captura opcional); `day` fica `undefined` nesse
+      // caso, nunca inventado (mesma regra de "campo opcional" de sempre).
+      const detected: DetectedDocumentIdentity = { bookletNumber: Number(match[2]), color };
+      if (match[1] !== undefined) detected.day = Number(match[1]);
       if (isLowConfidenceOcrLine(line)) detected.lowConfidenceOcrSource = true;
       return detected;
     }
@@ -79,30 +106,32 @@ export function detectExamDocumentIdentity(pages: PdfPageText[]): DetectedDocume
  *  e, separadamente, a linha "<COR> Gabarito <ANO>" — podem aparecer em
  *  posições distintas da lista de linhas (colunas diferentes da mesma
  *  página), nunca assumidas adjacentes. */
+/** Hotfix pós-Sprint 24.1 — o bloco de identidade do gabarito pode vir
+ *  como uma linha combinada ("2º DIA - CADERNO 7", edição 2019) OU
+ *  espalhado em várias linhas adjacentes, uma palavra/token por linha
+ *  ("º" / "2 dia" / "CADERNO 5", edição 2024) — nunca sabemos de antemão
+ *  qual formato um caderno futuro vai usar. Em vez de casar linha por
+ *  linha, junta TODO o texto do documento (ordem de leitura já correta,
+ *  nunca reordenada) numa única string com espaço entre linhas — os dois
+ *  formatos viram uma sequência contígua de tokens nessa string conjunta,
+ *  então o MESMO regex tolerante casa em ambos os casos. */
 export function detectAnswerKeyDocumentIdentity(pages: PdfPageText[]): DetectedDocumentIdentity {
   const result: DetectedDocumentIdentity = {};
-  let lowConfidenceOcrSource = false;
-  for (const page of pages) {
-    for (const line of page.lines) {
-      if (result.day === undefined) {
-        const dayMatch = line.text.match(KEY_DAY_BOOKLET_RE);
-        if (dayMatch) {
-          result.day = Number(dayMatch[1]);
-          result.bookletNumber = Number(dayMatch[2]);
-          if (isLowConfidenceOcrLine(line)) lowConfidenceOcrSource = true;
-        }
-      }
-      if (result.color === undefined) {
-        const colorMatch = line.text.match(KEY_COLOR_YEAR_RE);
-        if (colorMatch) {
-          result.color = normalizeColor(colorMatch[1]);
-          result.year = Number(colorMatch[2]);
-          if (isLowConfidenceOcrLine(line)) lowConfidenceOcrSource = true;
-        }
-      }
-    }
+  const allLines = pages.flatMap((page) => page.lines);
+  const joinedText = allLines.map((l) => l.text).join(" ");
+  const hasLowConfidenceOcrLine = allLines.some((l) => isLowConfidenceOcrLine(l));
+
+  const dayMatch = joinedText.match(KEY_DAY_BOOKLET_RE);
+  if (dayMatch) {
+    result.day = Number(dayMatch[1]);
+    result.bookletNumber = Number(dayMatch[2]);
   }
-  if (lowConfidenceOcrSource) result.lowConfidenceOcrSource = true;
+  const colorMatch = joinedText.match(KEY_COLOR_YEAR_RE);
+  if (colorMatch) {
+    result.color = normalizeColor(colorMatch[1]);
+    result.year = Number(colorMatch[2]);
+  }
+  if ((dayMatch || colorMatch) && hasLowConfidenceOcrLine) result.lowConfidenceOcrSource = true;
   return result;
 }
 

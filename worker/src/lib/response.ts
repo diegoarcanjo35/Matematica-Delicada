@@ -6,8 +6,8 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), { ...init, headers });
 }
 
-export function errorResponse(status: number, code: string, message: string): Response {
-  return json({ error: { code, message } }, { status });
+export function errorResponse(status: number, code: string, message: string, extra?: Record<string, unknown>): Response {
+  return json({ error: { code, message, ...extra } }, { status });
 }
 
 export const Errors = {
@@ -24,8 +24,20 @@ export const Errors = {
     errorResponse(413, "payload_too_large", message),
   tooManyRequests: (message = "Muitas tentativas. Tente novamente em alguns minutos.") =>
     errorResponse(429, "too_many_requests", message),
-  internal: (message = "Erro interno. Tente novamente.") =>
-    errorResponse(500, "internal_error", message),
+  /* Hotfix pós-Sprint 24.1 — todo erro genuinamente interno carrega um
+     `requestId` (nunca stack técnica) para a pessoa poder reportar e nós
+     conseguirmos correlacionar com os logs do Worker (`wrangler tail`) —
+     nunca mais um "Erro inesperado." sem nenhum rastro. Aditivo (campo
+     JSON novo, nunca muda `code`/`message` de chamadas existentes). */
+  internal: (message = "Erro interno. Tente novamente.", cause?: unknown) => {
+    const requestId = crypto.randomUUID();
+    if (cause !== undefined) {
+      console.error(`Errors.internal requestId=${requestId}: ${message}`, cause);
+    } else {
+      console.error(`Errors.internal requestId=${requestId}: ${message}`);
+    }
+    return errorResponse(500, "internal_error", message, { requestId });
+  },
 };
 
 const MAX_BODY_BYTES = 16 * 1024;

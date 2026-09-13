@@ -516,6 +516,16 @@ interface PdfSelectionState {
   visualConfirmations: Record<string, { placement: string; altText: string }>;
 }
 
+/** Hotfix pós-Sprint 24.1, seção 4 da ordem — "erro genérico é bug
+ *  também": nunca mostra só uma mensagem genérica quando o backend deu um
+ *  `requestId` correlacionável (erro realmente interno, seção 4) — a
+ *  editora vê o código e pode reportar; nós conseguimos achar o log exato
+ *  via `wrangler tail`. */
+function formatPdfError(err: unknown, fallback: string): string {
+  if (!(err instanceof EditorialApiError)) return fallback;
+  return err.requestId ? `${err.message} (código: ${err.requestId})` : err.message;
+}
+
 /** Seção 5 da ordem — edição só faz sentido quando o PROBLEMA é
  *  estrutural: nunca quando falta gabarito (editar texto não resolve),
  *  nunca quando é conteúdo visual (seção 6), nunca quando já é uma
@@ -658,7 +668,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
       if (err instanceof Error && err.name === "OcrCancelledError") {
         setError("Reconhecimento de OCR cancelado.");
       } else {
-        setError(err instanceof EditorialApiError ? err.message : "Não foi possível gerar a prévia deste PDF.");
+        setError(formatPdfError(err, "Não foi possível gerar a prévia deste PDF."));
       }
     } finally {
       setOcrProgress(null);
@@ -752,7 +762,7 @@ function PdfImportPanel({ isAdmin }: { isAdmin: boolean }) {
       const result = await applyPdfEnem(preview.batchId, examFile, answerKeyFile, currentIdentity(), selectionPayload, examOcrPages, answerKeyOcrPages);
       setApplyResult(result);
     } catch (err) {
-      setError(err instanceof EditorialApiError ? err.message : "Não foi possível aplicar esta importação.");
+      setError(formatPdfError(err, "Não foi possível aplicar esta importação."));
     } finally {
       setBusy(false);
     }

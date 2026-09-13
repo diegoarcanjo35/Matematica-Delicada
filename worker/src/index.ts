@@ -90,9 +90,10 @@ export default {
 
         return Errors.notFound();
       } catch (error) {
-        // Nunca expor stack trace ou detalhe interno ao cliente.
-        console.error("Erro interno não tratado:", error);
-        return Errors.internal();
+        // Nunca expor stack trace ou detalhe interno ao cliente — mas
+        // `Errors.internal` sempre carrega um `requestId` correlacionável
+        // com este mesmo log via `wrangler tail` (hotfix pós-Sprint 24.1).
+        return Errors.internal("Erro interno. Tente novamente.", error);
       }
     }
 
